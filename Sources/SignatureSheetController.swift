@@ -76,14 +76,17 @@ final class SignatureSheetController: NSObject, NSTextFieldDelegate {
 
         drawHint.textColor = .secondaryLabelColor
         drawHint.font = .systemFont(ofSize: 11)
-        drawHint.frame = NSRect(x: 318, y: 9, width: 242, height: 18)
+        drawHint.frame = NSRect(x: 312, y: 9, width: 248, height: 18)
         drawTab.addSubview(drawHint)
         updateDrawHint()
+
+        capture.onReturn = { [weak self] in self?.use() }
+        capture.onEscape = { [weak self] in self?.cancel() }
     }
 
     private func updateDrawHint() {
         drawHint.stringValue = trackpadToggle.state == .on
-            ? "Glide one finger on the trackpad — no click."
+            ? "Glide to sign · ↵ Return = done · ⌫ = clear"
             : "Draw with your mouse or trackpad (click-drag)."
     }
 

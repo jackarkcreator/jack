@@ -14,6 +14,19 @@ final class SignatureCaptureView: NSView {
     private var trackedIdentity: (NSCopying & NSObjectProtocol)?
     private var cursorFrozen = false
 
+    // In glide mode the trackpad can't move the cursor to a button, so finish via keyboard.
+    var onReturn: (() -> Void)?
+    var onEscape: (() -> Void)?
+
+    override func keyDown(with event: NSEvent) {
+        switch event.keyCode {
+        case 36, 76: onReturn?()        // Return / keypad Enter → commit
+        case 53:     onEscape?()        // Escape → cancel
+        case 51, 117: clear()           // Delete / Forward-delete → clear canvas
+        default: super.keyDown(with: event)
+        }
+    }
+
     override var isFlipped: Bool { false }
     override var acceptsFirstResponder: Bool { true }
     var isEmpty: Bool { strokes.isEmpty }
