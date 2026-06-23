@@ -29,24 +29,24 @@ final class SignatureSheetController: NSObject, NSTextFieldDelegate {
     }
 
     private func buildUI() {
-        let content = NSView(frame: NSRect(x: 0, y: 0, width: 540, height: 400))
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
 
-        seg.frame = NSRect(x: 20, y: 360, width: 500, height: 26)
+        seg.frame = NSRect(x: 20, y: 360, width: 560, height: 26)
         seg.selectedSegment = 0
         seg.target = self
         seg.action = #selector(switchTab)
         content.addSubview(seg)
 
-        let area = NSRect(x: 20, y: 60, width: 500, height: 288)
+        let area = NSRect(x: 20, y: 60, width: 560, height: 288)
         for t in [drawTab, typeTab, savedTab] { t.frame = area; content.addSubview(t) }
 
         buildDrawTab()
         buildTypeTab()
         buildSavedTab()
 
-        let cancel = button("Cancel", #selector(cancel)); cancel.frame = NSRect(x: 360, y: 16, width: 80, height: 30)
+        let cancel = button("Cancel", #selector(cancel)); cancel.frame = NSRect(x: 356, y: 16, width: 92, height: 30)
         cancel.keyEquivalent = "\u{1b}"
-        let use = button("Use Signature", #selector(use)); use.frame = NSRect(x: 444, y: 16, width: 120, height: 30)
+        let use = button("Use Signature", #selector(use)); use.frame = NSRect(x: 456, y: 16, width: 124, height: 30)
         use.keyEquivalent = "\r"
         content.addSubview(cancel); content.addSubview(use)
 
@@ -55,22 +55,45 @@ final class SignatureSheetController: NSObject, NSTextFieldDelegate {
         showTab(0)
     }
 
+    private let drawHint = NSTextField(labelWithString: "")
+    private let trackpadToggle = NSButton(checkboxWithTitle: "Glide on trackpad (no click)", target: nil, action: nil)
+
     private func buildDrawTab() {
-        capture.frame = NSRect(x: 0, y: 38, width: 500, height: 250)
+        capture.frame = NSRect(x: 0, y: 38, width: 560, height: 250)
         capture.wantsLayer = true
         capture.layer?.borderWidth = 1
         capture.layer?.borderColor = NSColor.separatorColor.cgColor
         capture.layer?.cornerRadius = 8
         drawTab.addSubview(capture)
+
         let clear = button("Clear", #selector(clearDrawing)); clear.frame = NSRect(x: 0, y: 4, width: 80, height: 26)
-        let hint = NSTextField(labelWithString: "Sign with your mouse, trackpad, or finger.")
-        hint.textColor = .secondaryLabelColor; hint.font = .systemFont(ofSize: 11)
-        hint.frame = NSRect(x: 92, y: 7, width: 380, height: 18)
-        drawTab.addSubview(clear); drawTab.addSubview(hint)
+        drawTab.addSubview(clear)
+
+        trackpadToggle.frame = NSRect(x: 92, y: 7, width: 220, height: 22)
+        trackpadToggle.target = self
+        trackpadToggle.action = #selector(toggleTrackpad)
+        drawTab.addSubview(trackpadToggle)
+
+        drawHint.textColor = .secondaryLabelColor
+        drawHint.font = .systemFont(ofSize: 11)
+        drawHint.frame = NSRect(x: 318, y: 9, width: 242, height: 18)
+        drawTab.addSubview(drawHint)
+        updateDrawHint()
+    }
+
+    private func updateDrawHint() {
+        drawHint.stringValue = trackpadToggle.state == .on
+            ? "Glide one finger on the trackpad — no click."
+            : "Draw with your mouse or trackpad (click-drag)."
+    }
+
+    @objc private func toggleTrackpad() {
+        capture.setTrackpad(trackpadToggle.state == .on)
+        updateDrawHint()
     }
 
     private func buildTypeTab() {
-        typeField.frame = NSRect(x: 0, y: 236, width: 500, height: 28)
+        typeField.frame = NSRect(x: 0, y: 236, width: 560, height: 28)
         typeField.placeholderString = "Type your name"
         typeField.delegate = self
         typeTab.addSubview(typeField)
@@ -81,7 +104,7 @@ final class SignatureSheetController: NSObject, NSTextFieldDelegate {
         fontPopup.target = self; fontPopup.action = #selector(updatePreview)
         typeTab.addSubview(fontPopup)
 
-        typePreview.frame = NSRect(x: 0, y: 40, width: 500, height: 140)
+        typePreview.frame = NSRect(x: 0, y: 40, width: 560, height: 140)
         typePreview.alignment = .center
         typePreview.lineBreakMode = .byTruncatingTail
         typeTab.addSubview(typePreview)
@@ -89,22 +112,22 @@ final class SignatureSheetController: NSObject, NSTextFieldDelegate {
     }
 
     private func buildSavedTab() {
-        let scroll = NSScrollView(frame: NSRect(x: 0, y: 38, width: 500, height: 250))
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 38, width: 560, height: 250))
         scroll.hasVerticalScroller = true
         scroll.borderType = .lineBorder
-        let doc = NSView(frame: NSRect(x: 0, y: 0, width: 500, height: 250))
+        let doc = NSView(frame: NSRect(x: 0, y: 0, width: 560, height: 250))
         doc.autoresizingMask = [.width]
 
         savedURLs = SignatureStore.list()
         if savedURLs.isEmpty {
             let empty = NSTextField(labelWithString: "No saved signatures yet — create one in Draw or Type.")
             empty.textColor = .secondaryLabelColor
-            empty.frame = NSRect(x: 16, y: 110, width: 468, height: 20)
+            empty.frame = NSRect(x: 16, y: 110, width: 528, height: 20)
             doc.addSubview(empty)
         } else {
-            let cols = 3, w = 150, h = 80, gap = 12
+            let cols = 3, w = 170, h = 80, gap = 12
             let rows = (savedURLs.count + cols - 1) / cols
-            doc.frame = NSRect(x: 0, y: 0, width: 500, height: max(250, rows * (h + gap) + gap))
+            doc.frame = NSRect(x: 0, y: 0, width: 560, height: max(250, rows * (h + gap) + gap))
             for (i, url) in savedURLs.enumerated() {
                 let r = i / cols, c = i % cols
                 let x = gap + c * (w + gap)
