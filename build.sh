@@ -13,8 +13,14 @@ rm -rf "$APPDIR"
 mkdir -p "$APPDIR/Contents/MacOS" "$APPDIR/Contents/Resources"
 
 echo "==> Compile universal binary"
-swiftc -O -target arm64-apple-macos11  "$DIR/Sources/main.swift" -o "$BUILD/jack-arm64"
-swiftc -O -target x86_64-apple-macos11 "$DIR/Sources/main.swift" -o "$BUILD/jack-x86_64"
+# All app sources except the standalone icon-renderer tool.
+APP_SRCS=()
+for f in "$DIR"/Sources/*.swift; do
+  [ "$(basename "$f")" = "makeicon.swift" ] && continue
+  APP_SRCS+=("$f")
+done
+swiftc -O -target arm64-apple-macos11  "${APP_SRCS[@]}" -o "$BUILD/jack-arm64"
+swiftc -O -target x86_64-apple-macos11 "${APP_SRCS[@]}" -o "$BUILD/jack-x86_64"
 lipo -create "$BUILD/jack-arm64" "$BUILD/jack-x86_64" -o "$APPDIR/Contents/MacOS/$APP"
 chmod +x "$APPDIR/Contents/MacOS/$APP"
 

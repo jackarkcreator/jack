@@ -1,90 +1,118 @@
-// Jack — drop photos, get one resized PDF.
-// ThinkOpen Inc. Replaces the legacy "Photo Resize" + "PDF Creator" Automator droplets.
+// Jack — drop photos to get one resized PDF, or open a PDF to sign it.
+// ThinkOpen Inc.
 import Cocoa
 import ImageIO
 import PDFKit
 import UniformTypeIdentifiers
 
-let MAX_EDGE: CGFloat = 1600     // long-edge cap in pixels
-let JPEG_QUALITY: CGFloat = 0.72 // re-encode quality for the embedded pages
+let MAX_EDGE: CGFloat = 1600
+let JPEG_QUALITY: CGFloat = 0.72
+
+// Shared, simple info alert used across the app.
+func infoAlert(_ title: String, _ body: String) {
+    let a = NSAlert()
+    a.messageText = title
+    a.informativeText = body
+    a.alertStyle = .informational
+    a.addButton(withTitle: "OK")
+    a.runModal()
+}
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var didHandleOpen = false
+    private var pending: [URL] = []
+    private var scheduled = false
+    static var windows: [SigningWindowController] = []
 
-    // Fired when the user drops files on the app icon (or "Open With… Jack").
+    // Drop files on the app icon / "Open With… Jack".
+    // Coalesce rapid open calls (the OS sometimes splits a multi-file drop) into one batch.
     func application(_ application: NSApplication, open urls: [URL]) {
         didHandleOpen = true
-        process(urls: urls)
+        pending.append(contentsOf: urls)
+        guard !scheduled else { return }
+        scheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            guard let self = self else { return }
+            let batch = self.pending; self.pending = []; self.scheduled = false
+            self.route(batch)
+        }
     }
 
-    // Double-clicked with no files → fall back to a picker so the app is still usable.
     func applicationDidFinishLaunching(_ notification: Notification) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
             guard let self = self, !self.didHandleOpen else { return }
-            self.pickAndProcess()
+            self.showOpenPanel()
         }
     }
 
-    private func pickAndProcess() {
+    // Quit once the last signing window closes (the image flow has no window and quits itself).
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+
+    private func route(_ urls: [URL]) {
+        let pdfs = urls.filter { $0.pathExtension.lowercased() == "pdf" }
+        let images = urls.filter(isImage)
+        if !pdfs.isEmpty {
+            pdfs.forEach(openSigning)
+        } else if !images.isEmpty {
+            makeImagePDF(images)
+        } else {
+            showOpenPanel()
+        }
+    }
+
+    private func showOpenPanel() {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = true
-        panel.canChooseDirectories = false
         panel.canChooseFiles = true
-        panel.message = "Choose photos to combine into one PDF"
-        panel.prompt = "Make PDF"
-        if #available(macOS 11.0, *) { panel.allowedContentTypes = [.image] }
-        else { panel.allowedFileTypes = ["jpg", "jpeg", "png", "heic", "heif", "tiff", "tif", "gif", "bmp"] }
-        if panel.runModal() == .OK { process(urls: panel.urls) } else { NSApp.terminate(nil) }
+        panel.canChooseDirectories = false
+        panel.message = "Choose a PDF to sign, or photos to combine into one PDF"
+        panel.prompt = "Open"
+        if #available(macOS 11.0, *) { panel.allowedContentTypes = [.pdf, .image] }
+        if panel.runModal() == .OK { route(panel.urls) } else { NSApp.terminate(nil) }
     }
 
-    private func process(urls: [URL]) {
-        let images = urls
-            .filter(isImage)
-            .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
-
-        guard !images.isEmpty else {
-            alert("No images found",
-                  "Drop photos (JPEG, PNG, HEIC…) onto Jack and it will resize them and build one PDF.")
-            NSApp.terminate(nil); return
+    private func openSigning(_ url: URL) {
+        guard let wc = SigningWindowController(pdfURL: url) else {
+            infoAlert("Couldn’t open PDF", "“\(url.lastPathComponent)” couldn’t be read as a PDF.")
+            return
         }
+        AppDelegate.windows.append(wc)
+        wc.showWindow(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
 
+    // MARK: - Image → PDF (the original droplet behavior)
+
+    private func makeImagePDF(_ urls: [URL]) {
+        let images = urls.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
         let pdf = PDFDocument()
-        var pageCount = 0
+        var n = 0
         var skipped: [String] = []
-
         for url in images {
             if let img = downscaled(url: url), let page = PDFPage(image: img) {
-                pdf.insert(page, at: pageCount)
-                pageCount += 1
+                pdf.insert(page, at: n); n += 1
             } else {
                 skipped.append(url.lastPathComponent)
             }
         }
-
-        guard pageCount > 0 else {
-            alert("Couldn’t read those images", "None of the dropped files could be processed.")
+        guard n > 0 else {
+            infoAlert("Couldn’t read those images", "None of the dropped files could be processed.")
             NSApp.terminate(nil); return
         }
-
-        let out = desktopOutput()
+        let out = desktopURL(name: "Jack_\(timestamp()).pdf")
         if pdf.write(to: out) {
             NSWorkspace.shared.activateFileViewerSelecting([out])
             NSSound(named: "Glass")?.play()
             if !skipped.isEmpty {
-                alert("PDF created",
-                      "Saved \(pageCount) page(s) to \(out.lastPathComponent) on your Desktop.\n\nSkipped (unreadable): \(skipped.joined(separator: ", "))")
+                infoAlert("PDF created", "Saved \(n) page(s) to \(out.lastPathComponent) on your Desktop.\n\nSkipped (unreadable): \(skipped.joined(separator: ", "))")
             }
         } else {
-            alert("Save failed",
-                  "Couldn’t write the PDF to your Desktop. If macOS asked for Desktop access, allow it and try again.")
+            infoAlert("Save failed", "Couldn’t write the PDF to your Desktop.")
         }
-
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { NSApp.terminate(nil) }
     }
 
-    // MARK: - Helpers
-
-    private func isImage(_ url: URL) -> Bool {
+    func isImage(_ url: URL) -> Bool {
         if #available(macOS 11.0, *),
            let type = try? url.resourceValues(forKeys: [.contentTypeKey]).contentType {
             return type.conforms(to: .image)
@@ -93,7 +121,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return exts.contains(url.pathExtension.lowercased())
     }
 
-    // Downscale to MAX_EDGE (never upscales), honoring EXIF orientation, then re-encode as JPEG to shrink.
     private func downscaled(url: URL) -> NSImage? {
         guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
         let opts: [CFString: Any] = [
@@ -110,23 +137,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         return img
     }
+}
 
-    private func desktopOutput() -> URL {
-        let desktop = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first
-            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Desktop")
-        let df = DateFormatter()
-        df.dateFormat = "yyyy-MM-dd_HHmmss"
-        return desktop.appendingPathComponent("Jack_\(df.string(from: Date())).pdf")
-    }
+func timestamp() -> String {
+    let df = DateFormatter(); df.dateFormat = "yyyy-MM-dd_HHmmss"; return df.string(from: Date())
+}
 
-    private func alert(_ title: String, _ body: String) {
-        let a = NSAlert()
-        a.messageText = title
-        a.informativeText = body
-        a.alertStyle = .informational
-        a.addButton(withTitle: "OK")
-        a.runModal()
-    }
+func desktopURL(name: String) -> URL {
+    let desktop = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first
+        ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Desktop")
+    return desktop.appendingPathComponent(name)
 }
 
 let app = NSApplication.shared
