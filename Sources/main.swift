@@ -18,7 +18,7 @@ func infoAlert(_ title: String, _ body: String) {
     a.runModal()
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSOpenSavePanelDelegate {
     private var didHandleOpen = false
     private var pending: [URL] = []
     private var scheduled = false
@@ -67,8 +67,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.canChooseDirectories = false
         panel.message = "Choose a PDF to sign, or photos to combine into one PDF"
         panel.prompt = "Open"
+        panel.delegate = self
         if #available(macOS 11.0, *) { panel.allowedContentTypes = [.pdf, .image] }
         if panel.runModal() == .OK { route(panel.urls) } else { NSApp.terminate(nil) }
+    }
+
+    // Reflect what the selection will do: "Make PDF" for photos, "Open" for a PDF.
+    func panelSelectionDidChange(_ sender: NSSavePanel?) {
+        guard let panel = sender as? NSOpenPanel else { return }
+        let urls = panel.urls
+        let hasPDF = urls.contains { $0.pathExtension.lowercased() == "pdf" }
+        let hasImage = urls.contains(where: isImage)
+        panel.prompt = (!hasPDF && hasImage) ? "Make PDF" : "Open"
     }
 
     private func openSigning(_ url: URL) {
