@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>Jack</AssemblyName>
+    <Product>Jack</Product>
+    <Company>ThinkOpen Inc.</Company>
+    <ApplicationIcon>jack.ico</ApplicationIcon>
+    <Version>1.1.0</Version>
+    <AssemblyVersion>1.1.0.0</AssemblyVersion>
+    <FileVersion>1.1.0.0</FileVersion>
+    <Copyright>© 2026 ThinkOpen Inc.</Copyright>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="PdfSharp" Version="6.1.1" />
+  </ItemGroup>
+
+</Project>

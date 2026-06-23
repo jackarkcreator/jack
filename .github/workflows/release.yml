@@ -1,0 +1,61 @@
+name: Release
+
+# Builds the signed Windows .exe on a version tag and attaches it to the GitHub Release.
+# Windows signing uses Azure Trusted Signing (cert lives in the cloud — no key in CI) via the
+# gh-artifact-signing-thinkopen service principal: AZURE_TENANT_ID / AZURE_CLIENT_ID /
+# AZURE_CLIENT_SECRET repo secrets. The macOS build is signed + notarized locally (build.sh +
+# notarize.sh) and its zip is uploaded to the same release by hand.
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Publish self-contained single-file exe
+        run: >
+          dotnet publish win/Jack/Jack.csproj
+          -c Release -r win-x64 --self-contained true
+          -p:PublishSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:EnableCompressionInSingleFile=true
+          -o publish
+
+      - name: Name the artifact
+        run: Rename-Item publish/Jack.exe Jack-win-x64.exe
+        shell: pwsh
+
+      - name: Sign (Azure Trusted Signing)
+        uses: azure/trusted-signing-action@v0.5.1
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: https://eus.codesigning.azure.net/
+          trusted-signing-account-name: thinkopen
+          certificate-profile-name: thinkopen-public
+          files-folder: ${{ github.workspace }}/publish
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: publish/Jack-win-x64.exe
+          fail_on_unmatched_files: true
+          append_body: true
+          body: |
+            **Windows (signed):** download `Jack-win-x64.exe`, then drag photos onto it to get one resized PDF on your Desktop. No install needed.
