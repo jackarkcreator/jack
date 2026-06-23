@@ -16,7 +16,7 @@ final class SigningPDFView: PDFView {
             dragging = ann; dragPage = page; last = p
             stampDelegate?.didSelect(ann)
         } else {
-            stampDelegate?.didSelect(nil)
+            // Don't deselect on a background click — keep the active signature selected.
             super.mouseDown(with: event)
         }
     }

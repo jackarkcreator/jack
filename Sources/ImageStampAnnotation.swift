@@ -4,6 +4,7 @@ import AppKit
 
 final class ImageStampAnnotation: PDFAnnotation {
     let image: NSImage
+    var outline = false   // selection outline (on screen only; never flattened)
 
     init(image: NSImage, bounds: CGRect) {
         self.image = image
@@ -18,6 +19,15 @@ final class ImageStampAnnotation: PDFAnnotation {
         context.interpolationQuality = .high
         context.draw(cg, in: bounds)
         context.restoreGState()
+
+        if outline {
+            context.saveGState()
+            context.setStrokeColor(NSColor.controlAccentColor.cgColor)
+            context.setLineWidth(1.5)
+            context.setLineDash(phase: 0, lengths: [6, 4])
+            context.stroke(bounds.insetBy(dx: -3, dy: -3))
+            context.restoreGState()
+        }
     }
 
     var aspect: CGFloat {

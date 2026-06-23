@@ -100,17 +100,33 @@ final class SigningWindowController: NSWindowController {
         pdfView.needsDisplay = true
     }
 
-    // Called by SigningPDFView when an annotation is clicked (or deselected with nil).
+    // Called by SigningPDFView when an annotation is clicked.
     func didSelect(_ ann: ImageStampAnnotation?) {
+        if selected !== ann { selected?.outline = false }
         selected = ann
-        let on = ann != nil
+        ann?.outline = true
+        if let ann = ann { sizeSlider.doubleValue = Double(ann.bounds.width) }
+        refreshControls()
+        pdfView.needsDisplay = true
+    }
+
+    private func refreshControls() {
+        let on = selected != nil
         sizeSlider.isEnabled = on
         removeButton.isEnabled = on
-        if let ann = ann { sizeSlider.doubleValue = Double(ann.bounds.width) }
+    }
+
+    // The most-recently-added signature across all pages (fallback when nothing is clicked).
+    private func lastStamp() -> ImageStampAnnotation? {
+        guard let doc = pdfView.document else { return nil }
+        for i in stride(from: doc.pageCount - 1, through: 0, by: -1) {
+            if let s = doc.page(at: i)?.annotations.compactMap({ $0 as? ImageStampAnnotation }).last { return s }
+        }
+        return nil
     }
 
     @objc private func resizeSelected() {
-        guard let ann = selected else { return }
+        guard let ann = selected ?? lastStamp() else { return }
         let newW = CGFloat(sizeSlider.doubleValue)
         let newH = newW / max(0.01, ann.aspect)
         let cx = ann.bounds.midX, cy = ann.bounds.midY
@@ -119,9 +135,14 @@ final class SigningWindowController: NSWindowController {
     }
 
     @objc private func removeSelected() {
-        guard let ann = selected, let page = ann.page else { return }
-        page.removeAnnotation(ann)
-        didSelect(nil)
+        guard let ann = selected ?? lastStamp() else { return }
+        if let page = ann.page {
+            page.removeAnnotation(ann)
+        } else if let doc = pdfView.document {
+            for i in 0..<doc.pageCount { doc.page(at: i)?.removeAnnotation(ann) }
+        }
+        selected = nil
+        didSelect(lastStamp())   // select the next remaining signature, if any
         pdfView.needsDisplay = true
     }
 
