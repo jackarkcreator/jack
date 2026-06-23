@@ -205,6 +205,7 @@ final class SignatureSheetController: NSObject, NSTextFieldDelegate {
     }
 
     private func finish(_ img: NSImage?) {
+        capture.setTrackpad(false)   // safety: restore the cursor before the sheet goes away
         if let parent = panel.sheetParent { parent.endSheet(panel) }
         completion?(img)
         completion = nil

@@ -3,6 +3,7 @@
 //  • Mouse/trackpad click-drag (default)
 //  • Trackpad glide — move one finger on the trackpad with no click (like Preview), which flows easier.
 import AppKit
+import CoreGraphics
 
 final class SignatureCaptureView: NSView {
     private var strokes: [[NSPoint]] = []
@@ -11,6 +12,7 @@ final class SignatureCaptureView: NSView {
 
     private var trackpadMode = false
     private var trackedIdentity: (NSCopying & NSObjectProtocol)?
+    private var cursorFrozen = false
 
     override var isFlipped: Bool { false }
     override var acceptsFirstResponder: Bool { true }
@@ -19,11 +21,33 @@ final class SignatureCaptureView: NSView {
     func setTrackpad(_ on: Bool) {
         trackpadMode = on
         allowedTouchTypes = on ? [.indirect] : []
-        if on { window?.makeFirstResponder(self) }
+        if on { window?.makeFirstResponder(self) } else { freezeCursor(false) }
         // Starting a fresh mode shouldn't carry a half-finished stroke.
         current = []
         trackedIdentity = nil
     }
+
+    // While a trackpad stroke is in progress, decouple the on-screen pointer from finger
+    // movement (and hide it) so the cursor can't wander out of the canvas and break capture.
+    // Re-coupled the instant the finger lifts, so the buttons stay clickable between strokes.
+    private func freezeCursor(_ freeze: Bool) {
+        guard freeze != cursorFrozen else { return }
+        cursorFrozen = freeze
+        if freeze {
+            CGAssociateMouseAndMouseCursorPosition(0)
+            NSCursor.hide()
+        } else {
+            CGAssociateMouseAndMouseCursorPosition(1)
+            NSCursor.unhide()
+        }
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow == nil { freezeCursor(false) }   // safety: never leave the cursor frozen
+        super.viewWillMove(toWindow: newWindow)
+    }
+
+    deinit { if cursorFrozen { CGAssociateMouseAndMouseCursorPosition(1); NSCursor.unhide() } }
 
     override func draw(_ dirtyRect: NSRect) {
         NSColor.white.setFill()
@@ -79,6 +103,7 @@ final class SignatureCaptureView: NSView {
         guard trackpadMode, let t = event.touches(matching: .began, in: self).first else { return }
         trackedIdentity = t.identity
         current = [point(for: t)]
+        freezeCursor(true)
         needsDisplay = true
     }
     override func touchesMoved(with event: NSEvent) {
@@ -94,6 +119,7 @@ final class SignatureCaptureView: NSView {
         if current.count > 1 { strokes.append(current) }
         current = []
         trackedIdentity = nil
+        freezeCursor(false)
         needsDisplay = true
     }
 
