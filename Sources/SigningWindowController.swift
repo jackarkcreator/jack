@@ -134,16 +134,31 @@ final class SigningWindowController: NSWindowController {
         pdfView.needsDisplay = true
     }
 
+    @discardableResult
+    private func removeStamp(_ ann: ImageStampAnnotation) -> Bool {
+        if let p = ann.page, p.annotations.contains(ann) { p.removeAnnotation(ann); return true }
+        guard let doc = pdfView.document else { return false }
+        for i in 0..<doc.pageCount {
+            if let p = doc.page(at: i), p.annotations.contains(ann) { p.removeAnnotation(ann); return true }
+        }
+        return false
+    }
+
+    // PDFView caches page renders; reassigning the same document forces a full re-render.
+    private func forceRefresh() {
+        let page = pdfView.currentPage
+        let doc = pdfView.document
+        pdfView.document = nil
+        pdfView.document = doc
+        if let page = page { pdfView.go(to: page) }
+    }
+
     @objc private func removeSelected() {
         guard let ann = selected ?? lastStamp() else { return }
-        if let page = ann.page {
-            page.removeAnnotation(ann)
-        } else if let doc = pdfView.document {
-            for i in 0..<doc.pageCount { doc.page(at: i)?.removeAnnotation(ann) }
-        }
+        removeStamp(ann)
         selected = nil
+        forceRefresh()           // PDFView caches the page render; force a clean repaint
         didSelect(lastStamp())   // select the next remaining signature, if any
-        pdfView.needsDisplay = true
     }
 
     @objc private func saveSigned() {
