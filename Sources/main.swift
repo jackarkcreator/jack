@@ -1,14 +1,14 @@
-// Jack — a lightweight PDF utility: combine photos, sign, and organize pages.
+// Jack — a lightweight PDF utility that lives in the menu bar: combine photos, fill & sign, organize.
 // ThinkOpen Inc.
 import Cocoa
 import ImageIO
 import PDFKit
+import ServiceManagement
 import UniformTypeIdentifiers
 
 let MAX_EDGE: CGFloat = 1600
 let JPEG_QUALITY: CGFloat = 0.72
 
-// Shared, simple info alert used across the app.
 func infoAlert(_ title: String, _ body: String) {
     let a = NSAlert()
     a.messageText = title
@@ -29,7 +29,6 @@ func isImageURL(_ url: URL) -> Bool {
 
 func isPDFURL(_ url: URL) -> Bool { url.pathExtension.lowercased() == "pdf" }
 
-// Downscale an image to MAX_EDGE on the long edge (never upscales), honoring EXIF orientation.
 func downscaleImage(_ url: URL) -> NSImage? {
     guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
     let opts: [CFString: Any] = [
@@ -47,7 +46,6 @@ func downscaleImage(_ url: URL) -> NSImage? {
     return img
 }
 
-// Load detached PDFPages from a list of PDFs and/or images, in the given order.
 func loadPages(from urls: [URL]) -> [PDFPage] {
     var pages: [PDFPage] = []
     for url in urls {
@@ -66,11 +64,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var didHandleOpen = false
     private var pending: [URL] = []
     private var scheduled = false
-    private var home: HomeWindowController?
     static var signers: [SigningWindowController] = []
     static var organizers: [PageOrganizerWindowController] = []
 
-    // Drop files on the app icon / "Open With… Jack". Coalesce rapid split open calls.
+    private var statusItem: NSStatusItem!
+    private let popover = NSPopover()
+    private let popoverVC = HomePopoverViewController()
+
+    // Drop files on the menu bar icon / "Open With… Jack". Coalesce split open calls.
     func application(_ application: NSApplication, open urls: [URL]) {
         didHandleOpen = true
         pending.append(contentsOf: urls)
@@ -84,15 +85,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        setupStatusItem()
+        setupPopover()
+        configureLoginOnFirstRun()
+        // Show the launcher on a plain launch so the menu bar item is discoverable.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
             guard let self = self, !self.didHandleOpen else { return }
-            self.showHome()
+            self.showPopover()
         }
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    // Stay resident in the menu bar after document windows close.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
-    // Drag-drop intent heuristics: photos→combine, one PDF→sign, multiple/mixed→organize.
     private func route(_ urls: [URL]) {
         let pdfs = urls.filter(isPDFURL)
         let images = urls.filter(isImageURL)
@@ -103,26 +108,66 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else if !images.isEmpty {
             makeImagePDF(images)
         } else {
-            showHome()
+            showPopover()
         }
     }
 
-    // MARK: - Home
+    // MARK: - Menu bar item & popover
 
-    private func showHome() {
-        if home == nil {
-            let h = HomeWindowController()
-            h.onPhotos = { [weak self] in self?.pickPhotos() }
-            h.onSign = { [weak self] in self?.pickSign() }
-            h.onOrganize = { [weak self] in self?.pickOrganize() }
-            h.onDrop = { [weak self] urls in self?.route(urls) }
-            home = h
+    private func setupStatusItem() {
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        guard let button = statusItem.button else { return }
+        if let img = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: "Jack") {
+            img.isTemplate = true
+            button.image = img
         }
-        home?.showWindow(nil)
+        let overlay = StatusDropView(frame: button.bounds)
+        overlay.autoresizingMask = [.width, .height]
+        overlay.onClick = { [weak self] in self?.togglePopover() }
+        overlay.onDrop = { [weak self] urls in self?.popover.performClose(nil); self?.route(urls) }
+        button.addSubview(overlay)
+    }
+
+    private func setupPopover() {
+        popoverVC.onPhotos = { [weak self] in self?.popover.performClose(nil); self?.pickPhotos() }
+        popoverVC.onSign = { [weak self] in self?.popover.performClose(nil); self?.pickSign() }
+        popoverVC.onOrganize = { [weak self] in self?.popover.performClose(nil); self?.pickOrganize() }
+        popoverVC.onQuit = { NSApp.terminate(nil) }
+        popoverVC.onToggleLogin = { [weak self] on in self?.setLogin(on) }
+        popover.contentViewController = popoverVC
+        popover.behavior = .transient
+    }
+
+    private func togglePopover() {
+        if popover.isShown { popover.performClose(nil) } else { showPopover() }
+    }
+
+    private func showPopover() {
+        guard let button = statusItem.button else { return }
+        popoverVC.loginEnabled = isLoginEnabled()
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    // MARK: - Pickers (explicit actions never auto-quit; the home window keeps the app alive)
+    // MARK: - Login item
+
+    private func isLoginEnabled() -> Bool {
+        if #available(macOS 13.0, *) { return SMAppService.mainApp.status == .enabled }
+        return false
+    }
+    private func setLogin(_ on: Bool) {
+        guard #available(macOS 13.0, *) else { return }
+        do { on ? try SMAppService.mainApp.register() : try SMAppService.mainApp.unregister() }
+        catch { /* best effort; toggle reflects actual status on next open */ }
+    }
+    private func configureLoginOnFirstRun() {
+        let key = "jack.loginConfigured"
+        guard !UserDefaults.standard.bool(forKey: key) else { return }
+        setLogin(true)
+        UserDefaults.standard.set(true, forKey: key)
+    }
+
+    // MARK: - Pickers
 
     private enum PickKind { case photos, pdf, both }
 
@@ -141,6 +186,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case .both:   panel.allowedContentTypes = [.pdf, .image]
             }
         }
+        NSApp.activate(ignoringOtherApps: true)
         if panel.runModal() == .OK { completion(panel.urls) }
     }
 
@@ -167,10 +213,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             infoAlert("Couldn’t open PDF", "“\(url.lastPathComponent)” couldn’t be read as a PDF.")
             return
         }
-        wc.onCancel = { [weak self, weak wc] in
-            self?.showHome()
-            wc?.close()
-        }
+        wc.onCancel = { [weak self, weak wc] in wc?.close(); self?.showPopover() }
         AppDelegate.signers.append(wc)
         wc.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -183,16 +226,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         let wc = PageOrganizerWindowController(pages: pages)
-        wc.onCancel = { [weak self, weak wc] in
-            self?.showHome()
-            wc?.close()
-        }
+        wc.onCancel = { [weak self, weak wc] in wc?.close(); self?.showPopover() }
         AppDelegate.organizers.append(wc)
         wc.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    // MARK: - Image → PDF (the original droplet behavior)
+    // MARK: - Image → PDF
 
     private func makeImagePDF(_ urls: [URL]) {
         let images = urls.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
@@ -208,7 +248,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         guard n > 0 else {
             infoAlert("Couldn’t read those images", "None of the selected files could be processed.")
-            quitIfNoWindows(); return
+            return
         }
         let out = desktopURL(name: "Jack_\(timestamp()).pdf")
         if pdf.write(to: out) {
@@ -220,13 +260,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             infoAlert("Save failed", "Couldn’t write the PDF to your Desktop.")
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.quitIfNoWindows() }
-    }
-
-    // Quit only on the windowless drag-drop combine path; stay alive if any window is open.
-    private func quitIfNoWindows() {
-        let hasWindow = NSApp.windows.contains { $0.isVisible && $0.canBecomeMain }
-        if !hasWindow { NSApp.terminate(nil) }
     }
 }
 
@@ -243,5 +276,5 @@ func desktopURL(name: String) -> URL {
 let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate
-app.setActivationPolicy(.regular)
+app.setActivationPolicy(.accessory)
 app.run()

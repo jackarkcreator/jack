@@ -24,6 +24,8 @@
 	<string>public.app-category.productivity</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>LSUIElement</key>
+	<true/>
 	<key>NSHumanReadableCopyright</key>
 	<string>© 2026 ThinkOpen Inc.</string>
 	<key>CFBundleDocumentTypes</key>
