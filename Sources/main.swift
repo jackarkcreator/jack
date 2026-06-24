@@ -167,6 +167,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             infoAlert("Couldn’t open PDF", "“\(url.lastPathComponent)” couldn’t be read as a PDF.")
             return
         }
+        wc.onCancel = { [weak self, weak wc] in
+            self?.showHome()
+            wc?.close()
+        }
         AppDelegate.signers.append(wc)
         wc.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)

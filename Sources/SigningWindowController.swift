@@ -1,8 +1,9 @@
-// The PDF signing window: open a PDF, add a signature, drag/resize it, save a flattened signed PDF.
+// Fill & Sign window: fill form fields, add text/check/cross marks, sign, then save flattened.
 import AppKit
 import PDFKit
 
-final class SigningWindowController: NSWindowController {
+final class SigningWindowController: NSWindowController, NSWindowDelegate {
+    var onCancel: (() -> Void)?
     private let pdfURL: URL
     private let pdfView = SigningPDFView()
     private weak var selected: ImageStampAnnotation?
@@ -15,16 +16,23 @@ final class SigningWindowController: NSWindowController {
     init?(pdfURL: URL) {
         guard let doc = PDFDocument(url: pdfURL) else { return nil }
         self.pdfURL = pdfURL
-        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 920, height: 720),
+        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1040, height: 720),
                            styleMask: [.titled, .closable, .miniaturizable, .resizable],
                            backing: .buffered, defer: false)
         win.title = "Jack — \(pdfURL.lastPathComponent)"
         win.center()
         super.init(window: win)
+        win.delegate = self
         buildUI(doc: doc)
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    @objc private func backHome() { onCancel?() }
+
+    func windowWillClose(_ notification: Notification) {
+        DispatchQueue.main.async { AppDelegate.signers.removeAll { $0 === self } }
+    }
 
     private func buildUI(doc: PDFDocument) {
         guard let content = window?.contentView else { return }
@@ -36,22 +44,25 @@ final class SigningWindowController: NSWindowController {
         bar.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
         content.addSubview(bar)
 
-        let add = NSButton(title: "Add Signature", target: self, action: #selector(addSignature))
-        add.bezelStyle = .rounded
-        add.frame = NSRect(x: 16, y: 9, width: 120, height: 30)
-        bar.addSubview(add)
-
-        let addText = NSButton(title: "Add Text", target: self, action: #selector(self.addText))
-        addText.bezelStyle = .rounded
-        addText.frame = NSRect(x: 142, y: 9, width: 86, height: 30)
-        bar.addSubview(addText)
+        func tb(_ title: String, _ action: Selector, _ x: CGFloat, _ w: CGFloat) -> NSButton {
+            let b = NSButton(title: title, target: self, action: action)
+            b.bezelStyle = .rounded
+            b.frame = NSRect(x: x, y: 9, width: w, height: 30)
+            bar.addSubview(b)
+            return b
+        }
+        _ = tb("← Home", #selector(backHome), 12, 78)
+        _ = tb("Add Signature", #selector(addSignature), 98, 120)
+        _ = tb("Add Text", #selector(self.addText), 224, 86)
+        _ = tb("✓", #selector(addCheck), 316, 42)
+        _ = tb("✗", #selector(addCross), 362, 42)
 
         let sizeLabel = NSTextField(labelWithString: "Size")
         sizeLabel.textColor = .secondaryLabelColor
-        sizeLabel.frame = NSRect(x: 240, y: 15, width: 32, height: 18)
+        sizeLabel.frame = NSRect(x: 418, y: 15, width: 32, height: 18)
         bar.addSubview(sizeLabel)
 
-        sizeSlider.frame = NSRect(x: 274, y: 12, width: 140, height: 24)
+        sizeSlider.frame = NSRect(x: 452, y: 12, width: 130, height: 24)
         sizeSlider.minValue = 60; sizeSlider.maxValue = 600
         sizeSlider.target = self; sizeSlider.action = #selector(resizeSelected)
         sizeSlider.isEnabled = false
@@ -60,7 +71,7 @@ final class SigningWindowController: NSWindowController {
         removeButton.title = "Remove"
         removeButton.bezelStyle = .rounded
         removeButton.target = self; removeButton.action = #selector(removeSelected)
-        removeButton.frame = NSRect(x: 424, y: 9, width: 84, height: 30)
+        removeButton.frame = NSRect(x: 592, y: 9, width: 84, height: 30)
         removeButton.isEnabled = false
         bar.addSubview(removeButton)
 
@@ -68,7 +79,7 @@ final class SigningWindowController: NSWindowController {
             let hint = NSTextField(labelWithString: "Fillable form — click a field to type")
             hint.textColor = .secondaryLabelColor
             hint.font = .systemFont(ofSize: 11)
-            hint.frame = NSRect(x: content.bounds.width - 420, y: 15, width: 230, height: 18)
+            hint.frame = NSRect(x: content.bounds.width - 410, y: 15, width: 244, height: 18)
             hint.alignment = .right
             hint.autoresizingMask = [.minXMargin]
             bar.addSubview(hint)
@@ -102,10 +113,10 @@ final class SigningWindowController: NSWindowController {
         }
     }
 
-    private func place(_ image: NSImage) {
+    private func place(_ image: NSImage, defaultWidth: CGFloat? = nil) {
         guard let page = pdfView.currentPage ?? pdfView.document?.page(at: 0) else { return }
         let box = page.bounds(for: .mediaBox)
-        let width = min(220, box.width * 0.4)
+        let width = defaultWidth ?? min(220, box.width * 0.4)
         let aspect = image.size.height <= 0 ? 1 : image.size.width / image.size.height
         let height = width / max(0.01, aspect)
         let origin = CGPoint(x: box.midX - width / 2, y: box.midY - height / 2)
@@ -129,6 +140,25 @@ final class SigningWindowController: NSWindowController {
         let text = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, let img = textImage(text) else { return }
         place(img)
+    }
+
+    // Clean check / cross marks for ticking boxes on any form (placed like text, drag/resize).
+    @objc private func addCheck() { if let img = markImage("✔") { place(img, defaultWidth: 34) } }
+    @objc private func addCross() { if let img = markImage("✘") { place(img, defaultWidth: 34) } }
+
+    private func markImage(_ glyph: String) -> NSImage? {
+        let s = NSAttributedString(string: glyph, attributes: [
+            .font: NSFont.systemFont(ofSize: 72, weight: .bold),
+            .foregroundColor: NSColor.black
+        ])
+        let pad: CGFloat = 6
+        let m = s.size()
+        let size = NSSize(width: ceil(m.width) + pad * 2, height: ceil(m.height) + pad * 2)
+        let img = NSImage(size: size)
+        img.lockFocus()
+        s.draw(at: NSPoint(x: pad, y: pad))
+        img.unlockFocus()
+        return img
     }
 
     private func textImage(_ text: String) -> NSImage? {
