@@ -179,6 +179,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         let wc = PageOrganizerWindowController(pages: pages)
+        wc.onCancel = { [weak self, weak wc] in
+            self?.showHome()
+            wc?.close()
+        }
         AppDelegate.organizers.append(wc)
         wc.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)

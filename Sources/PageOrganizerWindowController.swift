@@ -6,8 +6,9 @@
 import AppKit
 import PDFKit
 
-final class PageOrganizerWindowController: NSWindowController, NSCollectionViewDataSource, NSCollectionViewDelegate {
+final class PageOrganizerWindowController: NSWindowController, NSCollectionViewDataSource, NSCollectionViewDelegate, NSWindowDelegate {
     private static let pageType = NSPasteboard.PasteboardType("net.thinkopen.jack.page")
+    var onCancel: (() -> Void)?
 
     private var sourcePages: [PDFPage]
     private var trayPages: [PDFPage] = []
@@ -26,7 +27,14 @@ final class PageOrganizerWindowController: NSWindowController, NSCollectionViewD
         win.title = "Jack — Organize Pages"
         win.center()
         super.init(window: win)
+        win.delegate = self
         build()
+    }
+
+    @objc private func backHome() { onCancel?() }
+
+    func windowWillClose(_ notification: Notification) {
+        DispatchQueue.main.async { AppDelegate.organizers.removeAll { $0 === self } }
     }
     required init?(coder: NSCoder) { fatalError() }
 
@@ -34,32 +42,42 @@ final class PageOrganizerWindowController: NSWindowController, NSCollectionViewD
 
     private func build() {
         guard let content = window?.contentView else { return }
+        let fullW = content.bounds.width
         let H = content.bounds.height
+        let barH: CGFloat = 44
+        let cH = H - barH                 // height available to the panes
         let sidebarW: CGFloat = 320
 
+        // Top bar with the back-to-home button
+        let topBar = NSView(frame: NSRect(x: 0, y: H - barH, width: fullW, height: barH))
+        topBar.autoresizingMask = [.width, .minYMargin]
+        topBar.wantsLayer = true
+        topBar.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        content.addSubview(topBar)
+        topBar.addSubview(button("← Home", #selector(backHome), NSRect(x: 12, y: 8, width: 96, height: 28), []))
+
         // Left pane — New PDF
-        let left = NSView(frame: NSRect(x: 0, y: 0, width: sidebarW, height: H))
+        let left = NSView(frame: NSRect(x: 0, y: 0, width: sidebarW, height: cH))
         left.autoresizingMask = [.height]
         content.addSubview(left)
 
         addHeader("New PDF", to: left, width: 288)
-        let rotate = button("Rotate", #selector(trayRotate), NSRect(x: 16, y: H - 72, width: 90, height: 28), [.minYMargin])
-        let remove = button("Remove", #selector(trayRemove), NSRect(x: 112, y: H - 72, width: 90, height: 28), [.minYMargin])
-        left.addSubview(rotate); left.addSubview(remove)
+        left.addSubview(button("Rotate", #selector(trayRotate), NSRect(x: 16, y: cH - 70, width: 90, height: 28), [.minYMargin]))
+        left.addSubview(button("Remove", #selector(trayRemove), NSRect(x: 112, y: cH - 70, width: 90, height: 28), [.minYMargin]))
         let saveTray = button("Save New PDF…", #selector(saveTray), NSRect(x: 16, y: 16, width: 288, height: 32), [.width])
         saveTray.keyEquivalent = "s"
         left.addSubview(saveTray)
         left.addSubview(scroll(trayCV, layout(itemW: 138, itemH: 184),
-                               frame: NSRect(x: 12, y: 56, width: 296, height: H - 80 - 56)))
+                               frame: NSRect(x: 12, y: 56, width: 296, height: cH - 78 - 56)))
 
         // Divider
-        let divider = NSBox(frame: NSRect(x: sidebarW, y: 0, width: 1, height: H))
+        let divider = NSBox(frame: NSRect(x: sidebarW, y: 0, width: 1, height: cH))
         divider.boxType = .separator
         divider.autoresizingMask = [.height]
         content.addSubview(divider)
 
         // Right pane — Source pages
-        let main = NSView(frame: NSRect(x: sidebarW + 1, y: 0, width: content.bounds.width - sidebarW - 1, height: H))
+        let main = NSView(frame: NSRect(x: sidebarW + 1, y: 0, width: fullW - sidebarW - 1, height: cH))
         main.autoresizingMask = [.width, .height]
         content.addSubview(main)
 
@@ -69,11 +87,11 @@ final class PageOrganizerWindowController: NSWindowController, NSCollectionViewD
                                 ("Add Selected →", #selector(addSelected), 132),
                                 ("Add All →", #selector(addAll), 96),
                                 ("Save Selected As…", #selector(saveSelectedAs), 150)] {
-            main.addSubview(button(title, sel, NSRect(x: x, y: H - 72, width: w, height: 28), [.minYMargin]))
+            main.addSubview(button(title, sel, NSRect(x: x, y: cH - 70, width: w, height: 28), [.minYMargin]))
             x += w + 8
         }
         main.addSubview(scroll(sourceCV, layout(itemW: 150, itemH: 196),
-                               frame: NSRect(x: 12, y: 16, width: main.bounds.width - 24, height: H - 80 - 16),
+                               frame: NSRect(x: 12, y: 16, width: main.bounds.width - 24, height: cH - 78 - 16),
                                flexible: true))
 
         configure(sourceCV, isTray: false)
