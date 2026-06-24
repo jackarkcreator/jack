@@ -38,15 +38,20 @@ final class SigningWindowController: NSWindowController {
 
         let add = NSButton(title: "Add Signature", target: self, action: #selector(addSignature))
         add.bezelStyle = .rounded
-        add.frame = NSRect(x: 16, y: 9, width: 130, height: 30)
+        add.frame = NSRect(x: 16, y: 9, width: 120, height: 30)
         bar.addSubview(add)
+
+        let addText = NSButton(title: "Add Text", target: self, action: #selector(self.addText))
+        addText.bezelStyle = .rounded
+        addText.frame = NSRect(x: 142, y: 9, width: 86, height: 30)
+        bar.addSubview(addText)
 
         let sizeLabel = NSTextField(labelWithString: "Size")
         sizeLabel.textColor = .secondaryLabelColor
-        sizeLabel.frame = NSRect(x: 162, y: 15, width: 32, height: 18)
+        sizeLabel.frame = NSRect(x: 240, y: 15, width: 32, height: 18)
         bar.addSubview(sizeLabel)
 
-        sizeSlider.frame = NSRect(x: 196, y: 12, width: 180, height: 24)
+        sizeSlider.frame = NSRect(x: 274, y: 12, width: 140, height: 24)
         sizeSlider.minValue = 60; sizeSlider.maxValue = 600
         sizeSlider.target = self; sizeSlider.action = #selector(resizeSelected)
         sizeSlider.isEnabled = false
@@ -55,14 +60,24 @@ final class SigningWindowController: NSWindowController {
         removeButton.title = "Remove"
         removeButton.bezelStyle = .rounded
         removeButton.target = self; removeButton.action = #selector(removeSelected)
-        removeButton.frame = NSRect(x: 388, y: 9, width: 90, height: 30)
+        removeButton.frame = NSRect(x: 424, y: 9, width: 84, height: 30)
         removeButton.isEnabled = false
         bar.addSubview(removeButton)
 
-        let save = NSButton(title: "Save Signed PDF…", target: self, action: #selector(saveSigned))
+        if hasFormFields(doc) {
+            let hint = NSTextField(labelWithString: "Fillable form — click a field to type")
+            hint.textColor = .secondaryLabelColor
+            hint.font = .systemFont(ofSize: 11)
+            hint.frame = NSRect(x: content.bounds.width - 420, y: 15, width: 230, height: 18)
+            hint.alignment = .right
+            hint.autoresizingMask = [.minXMargin]
+            bar.addSubview(hint)
+        }
+
+        let save = NSButton(title: "Save PDF…", target: self, action: #selector(saveSigned))
         save.bezelStyle = .rounded
         save.keyEquivalent = "s"
-        save.frame = NSRect(x: content.bounds.width - 176, y: 9, width: 160, height: 30)
+        save.frame = NSRect(x: content.bounds.width - 150, y: 9, width: 134, height: 30)
         save.autoresizingMask = [.minXMargin]
         bar.addSubview(save)
 
@@ -98,6 +113,44 @@ final class SigningWindowController: NSWindowController {
         page.addAnnotation(ann)
         didSelect(ann)
         pdfView.needsDisplay = true
+    }
+
+    // Add Text: type a string, place it like a signature (drag/resize/remove, then flatten).
+    @objc private func addText() {
+        let alert = NSAlert()
+        alert.messageText = "Add text"
+        alert.informativeText = "Type the text to place on the page. You can drag and resize it after."
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Add")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let text = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, let img = textImage(text) else { return }
+        place(img)
+    }
+
+    private func textImage(_ text: String) -> NSImage? {
+        let s = NSAttributedString(string: text, attributes: [
+            .font: NSFont.systemFont(ofSize: 48),
+            .foregroundColor: NSColor.black
+        ])
+        let pad: CGFloat = 12
+        let m = s.size()
+        let size = NSSize(width: ceil(m.width) + pad * 2, height: ceil(m.height) + pad * 2)
+        let img = NSImage(size: size)
+        img.lockFocus()
+        s.draw(at: NSPoint(x: pad, y: pad))
+        img.unlockFocus()
+        return img
+    }
+
+    private func hasFormFields(_ doc: PDFDocument) -> Bool {
+        for i in 0..<doc.pageCount {
+            if let p = doc.page(at: i), p.annotations.contains(where: { $0.type == "Widget" }) { return true }
+        }
+        return false
     }
 
     // Called by SigningPDFView when an annotation is clicked.

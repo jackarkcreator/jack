@@ -61,7 +61,7 @@ final class HomeWindowController: NSWindowController {
 
         let cards: [(String, String, Selector)] = [
             ("photo.on.rectangle", "Combine Photos → PDF", #selector(combine)),
-            ("signature", "Sign a PDF", #selector(sign)),
+            ("signature", "Fill & Sign a PDF", #selector(sign)),
             ("doc.on.doc", "Organize / Merge Pages", #selector(organize))
         ]
         var y = 226

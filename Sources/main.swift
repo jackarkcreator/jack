@@ -150,7 +150,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
     private func pickSign() {
-        runPicker(.pdf, multi: false, message: "Choose a PDF to sign", prompt: "Open") {
+        runPicker(.pdf, multi: false, message: "Choose a PDF to fill or sign", prompt: "Open") {
             [weak self] in if let u = $0.first { self?.openSigning(u) }
         }
     }
