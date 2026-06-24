@@ -10,6 +10,14 @@ final class HomePopoverViewController: NSViewController {
     var loginEnabled = false { didSet { loginCheck?.state = loginEnabled ? .on : .off } }
 
     private var loginCheck: NSButton?
+    private let updateButton = NSButton(title: "↓ Update", target: nil, action: nil)
+    private var updateURL: URL?
+
+    func showUpdate(version: String, url: URL) {
+        updateURL = url
+        updateButton.title = "↓ Update to \(version)"
+        updateButton.isHidden = false
+    }
 
     override func loadView() {
         let v = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 392))
@@ -54,6 +62,14 @@ final class HomePopoverViewController: NSViewController {
         quit.frame = NSRect(x: 20, y: 6, width: 100, height: 26)
         v.addSubview(quit)
 
+        updateButton.bezelStyle = .rounded
+        updateButton.target = self
+        updateButton.action = #selector(openUpdate)
+        updateButton.frame = NSRect(x: 130, y: 6, width: 150, height: 26)
+        updateButton.isHidden = true
+        updateButton.contentTintColor = .controlAccentColor
+        v.addSubview(updateButton)
+
         self.view = v
     }
 
@@ -77,4 +93,5 @@ final class HomePopoverViewController: NSViewController {
     @objc private func organize() { onOrganize?() }
     @objc private func toggleLogin() { onToggleLogin?(loginCheck?.state == .on) }
     @objc private func quit() { onQuit?() }
+    @objc private func openUpdate() { if let u = updateURL { NSWorkspace.shared.open(u) } }
 }

@@ -88,6 +88,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setupStatusItem()
         setupPopover()
         configureLoginOnFirstRun()
+        checkForUpdate()
         // Show the launcher on a plain launch so the menu bar item is discoverable.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
             guard let self = self, !self.didHandleOpen else { return }
@@ -147,6 +148,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popoverVC.loginEnabled = isLoginEnabled()
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         NSApp.activate(ignoringOtherApps: true)
+        checkForUpdate()
+    }
+
+    private func checkForUpdate() {
+        UpdateChecker.check { [weak self] info in
+            guard let self = self, let info = info else { return }
+            self.popoverVC.showUpdate(version: info.version, url: info.url)
+        }
     }
 
     // MARK: - Login item
