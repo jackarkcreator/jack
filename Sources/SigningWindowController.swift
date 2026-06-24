@@ -63,7 +63,7 @@ final class SigningWindowController: NSWindowController, NSWindowDelegate {
         bar.addSubview(sizeLabel)
 
         sizeSlider.frame = NSRect(x: 452, y: 12, width: 130, height: 24)
-        sizeSlider.minValue = 60; sizeSlider.maxValue = 600
+        sizeSlider.minValue = 14; sizeSlider.maxValue = 600
         sizeSlider.target = self; sizeSlider.action = #selector(resizeSelected)
         sizeSlider.isEnabled = false
         bar.addSubview(sizeSlider)
@@ -143,8 +143,8 @@ final class SigningWindowController: NSWindowController, NSWindowDelegate {
     }
 
     // Clean check / cross marks for ticking boxes on any form (placed like text, drag/resize).
-    @objc private func addCheck() { if let img = markImage("✔") { place(img, defaultWidth: 34) } }
-    @objc private func addCross() { if let img = markImage("✘") { place(img, defaultWidth: 34) } }
+    @objc private func addCheck() { if let img = markImage("✔") { place(img, defaultWidth: 24) } }
+    @objc private func addCross() { if let img = markImage("✘") { place(img, defaultWidth: 24) } }
 
     private func markImage(_ glyph: String) -> NSImage? {
         let s = NSAttributedString(string: glyph, attributes: [
