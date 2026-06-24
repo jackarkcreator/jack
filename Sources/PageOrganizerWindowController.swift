@@ -1,17 +1,26 @@
-// Page Organizer: combine PDFs/photos, reorder, rotate, delete, extract selected pages, save.
+// Page Organizer — two panes:
+//   • Main  = Source pages (everything you've opened/added)
+//   • Left  = New PDF (your output, built live)
+// Drag pages Source → New PDF (or Add Selected / Add All); reorder/rotate/remove inside
+// New PDF; Save it. "Save Selected As…" handles pure extract from the source.
 import AppKit
 import PDFKit
 
 final class PageOrganizerWindowController: NSWindowController, NSCollectionViewDataSource, NSCollectionViewDelegate {
     private static let pageType = NSPasteboard.PasteboardType("net.thinkopen.jack.page")
-    private var pages: [PDFPage]
+
+    private var sourcePages: [PDFPage]
+    private var trayPages: [PDFPage] = []
     private var thumbCache: [ObjectIdentifier: NSImage] = [:]
-    private var draggedIndexes: [Int] = []
-    private let collectionView = NSCollectionView()
+
+    private let sourceCV = NSCollectionView()
+    private let trayCV = NSCollectionView()
+    private var sourceDrag: [Int] = []
+    private var trayDrag: [Int] = []
 
     init(pages: [PDFPage]) {
-        self.pages = pages
-        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 980, height: 720),
+        self.sourcePages = pages
+        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1120, height: 760),
                            styleMask: [.titled, .closable, .miniaturizable, .resizable],
                            backing: .buffered, defer: false)
         win.title = "Jack — Organize Pages"
@@ -21,70 +30,110 @@ final class PageOrganizerWindowController: NSWindowController, NSCollectionViewD
     }
     required init?(coder: NSCoder) { fatalError() }
 
+    // MARK: layout
+
     private func build() {
         guard let content = window?.contentView else { return }
-        let barH: CGFloat = 48
-        let bar = NSView(frame: NSRect(x: 0, y: content.bounds.height - barH, width: content.bounds.width, height: barH))
-        bar.autoresizingMask = [.width, .minYMargin]
-        bar.wantsLayer = true
-        bar.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
-        content.addSubview(bar)
+        let H = content.bounds.height
+        let sidebarW: CGFloat = 320
 
-        func mk(_ title: String, _ action: Selector, _ x: CGFloat, _ w: CGFloat, rightAnchored: Bool = false) -> NSButton {
-            let b = NSButton(title: title, target: self, action: action)
-            b.bezelStyle = .rounded
-            b.frame = NSRect(x: x, y: 9, width: w, height: 30)
-            if rightAnchored { b.autoresizingMask = [.minXMargin] }
-            bar.addSubview(b)
-            return b
+        // Left pane — New PDF
+        let left = NSView(frame: NSRect(x: 0, y: 0, width: sidebarW, height: H))
+        left.autoresizingMask = [.height]
+        content.addSubview(left)
+
+        addHeader("New PDF", to: left, width: 288)
+        let rotate = button("Rotate", #selector(trayRotate), NSRect(x: 16, y: H - 72, width: 90, height: 28), [.minYMargin])
+        let remove = button("Remove", #selector(trayRemove), NSRect(x: 112, y: H - 72, width: 90, height: 28), [.minYMargin])
+        left.addSubview(rotate); left.addSubview(remove)
+        let saveTray = button("Save New PDF…", #selector(saveTray), NSRect(x: 16, y: 16, width: 288, height: 32), [.width])
+        saveTray.keyEquivalent = "s"
+        left.addSubview(saveTray)
+        left.addSubview(scroll(trayCV, layout(itemW: 138, itemH: 184),
+                               frame: NSRect(x: 12, y: 56, width: 296, height: H - 80 - 56)))
+
+        // Divider
+        let divider = NSBox(frame: NSRect(x: sidebarW, y: 0, width: 1, height: H))
+        divider.boxType = .separator
+        divider.autoresizingMask = [.height]
+        content.addSubview(divider)
+
+        // Right pane — Source pages
+        let main = NSView(frame: NSRect(x: sidebarW + 1, y: 0, width: content.bounds.width - sidebarW - 1, height: H))
+        main.autoresizingMask = [.width, .height]
+        content.addSubview(main)
+
+        addHeader("Source pages", to: main, width: 400)
+        var x: CGFloat = 16
+        for (title, sel, w) in [("Add Files…", #selector(addFiles), CGFloat(104)),
+                                ("Add Selected →", #selector(addSelected), 132),
+                                ("Add All →", #selector(addAll), 96),
+                                ("Save Selected As…", #selector(saveSelectedAs), 150)] {
+            main.addSubview(button(title, sel, NSRect(x: x, y: H - 72, width: w, height: 28), [.minYMargin]))
+            x += w + 8
         }
-        _ = mk("Add Files…", #selector(addFiles), 16, 104)
-        _ = mk("◀ Move", #selector(movePagesLeft), 128, 78)
-        _ = mk("Move ▶", #selector(movePagesRight), 212, 78)
-        _ = mk("Rotate", #selector(rotatePages), 296, 78)
-        _ = mk("Delete", #selector(deletePages), 380, 78)
-        _ = mk("Save PDF…", #selector(saveAll), content.bounds.width - 150, 134, rightAnchored: true)
-        _ = mk("Extract Selected…", #selector(extractSelected), content.bounds.width - 310, 150, rightAnchored: true)
+        main.addSubview(scroll(sourceCV, layout(itemW: 150, itemH: 196),
+                               frame: NSRect(x: 12, y: 16, width: main.bounds.width - 24, height: H - 80 - 16),
+                               flexible: true))
 
-        let layout = NSCollectionViewFlowLayout()
-        layout.itemSize = NSSize(width: 150, height: 196)
-        layout.minimumInteritemSpacing = 14
-        layout.minimumLineSpacing = 16
-        layout.sectionInset = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
-        collectionView.collectionViewLayout = layout
-        collectionView.dataSource = self
-        collectionView.delegate = self
-        collectionView.isSelectable = true
-        collectionView.allowsMultipleSelection = true
-        collectionView.allowsEmptySelection = true
-        collectionView.backgroundColors = [NSColor.underPageBackgroundColor]
-        collectionView.register(PageThumbnailItem.self, forItemWithIdentifier: PageThumbnailItem.id)
-        collectionView.registerForDraggedTypes([Self.pageType])
-        collectionView.setDraggingSourceOperationMask([.move], forLocal: true)
+        configure(sourceCV, isTray: false)
+        configure(trayCV, isTray: true)
+    }
 
-        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: content.bounds.width, height: content.bounds.height - barH))
-        scroll.autoresizingMask = [.width, .height]
-        scroll.hasVerticalScroller = true
-        scroll.documentView = collectionView
-        content.addSubview(scroll)
+    private func addHeader(_ text: String, to view: NSView, width: CGFloat) {
+        let label = NSTextField(labelWithString: text)
+        label.font = .systemFont(ofSize: 15, weight: .semibold)
+        label.frame = NSRect(x: 16, y: view.bounds.height - 34, width: width, height: 22)
+        label.autoresizingMask = [.width, .minYMargin]
+        view.addSubview(label)
+    }
+
+    private func layout(itemW: CGFloat, itemH: CGFloat) -> NSCollectionViewFlowLayout {
+        let l = NSCollectionViewFlowLayout()
+        l.itemSize = NSSize(width: itemW, height: itemH)
+        l.minimumInteritemSpacing = 12
+        l.minimumLineSpacing = 14
+        l.sectionInset = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
+        return l
+    }
+
+    private func scroll(_ cv: NSCollectionView, _ l: NSCollectionViewFlowLayout, frame: NSRect, flexible: Bool = false) -> NSScrollView {
+        cv.collectionViewLayout = l
+        let s = NSScrollView(frame: frame)
+        s.autoresizingMask = flexible ? [.width, .height] : [.width, .height]
+        s.hasVerticalScroller = true
+        s.documentView = cv
+        return s
+    }
+
+    private func configure(_ cv: NSCollectionView, isTray: Bool) {
+        cv.dataSource = self
+        cv.delegate = self
+        cv.isSelectable = true
+        cv.allowsMultipleSelection = true
+        cv.allowsEmptySelection = true
+        cv.backgroundColors = [isTray ? NSColor.windowBackgroundColor : NSColor.underPageBackgroundColor]
+        cv.register(PageThumbnailItem.self, forItemWithIdentifier: PageThumbnailItem.id)
+        cv.registerForDraggedTypes([Self.pageType])
+        cv.setDraggingSourceOperationMask(isTray ? .move : .copy, forLocal: true)
     }
 
     // MARK: data source
 
-    func collectionView(_ cv: NSCollectionView, numberOfItemsInSection section: Int) -> Int { pages.count }
+    private func pages(_ cv: NSCollectionView) -> [PDFPage] { cv === trayCV ? trayPages : sourcePages }
+
+    func collectionView(_ cv: NSCollectionView, numberOfItemsInSection section: Int) -> Int { pages(cv).count }
 
     func collectionView(_ cv: NSCollectionView, itemForRepresentedObjectAt indexPath: IndexPath) -> NSCollectionViewItem {
         let item = cv.makeItem(withIdentifier: PageThumbnailItem.id, for: indexPath) as! PageThumbnailItem
-        let page = pages[indexPath.item]
-        item.configure(thumbnail(for: page), label: "Page \(indexPath.item + 1)")
+        let page = pages(cv)[indexPath.item]
+        item.configure(thumbnail(for: page), label: "\(indexPath.item + 1)")
         return item
     }
 
-    // MARK: drag-to-reorder
+    // MARK: drag & drop
 
-    func collectionView(_ cv: NSCollectionView, canDragItemsAt indexPaths: Set<IndexPath>, with event: NSEvent) -> Bool {
-        true
-    }
+    func collectionView(_ cv: NSCollectionView, canDragItemsAt indexPaths: Set<IndexPath>, with event: NSEvent) -> Bool { true }
 
     func collectionView(_ cv: NSCollectionView, pasteboardWriterForItemAt indexPath: IndexPath) -> NSPasteboardWriting? {
         let item = NSPasteboardItem()
@@ -94,49 +143,66 @@ final class PageOrganizerWindowController: NSWindowController, NSCollectionViewD
 
     func collectionView(_ cv: NSCollectionView, draggingSession session: NSDraggingSession,
                         willBeginAt screenPoint: NSPoint, forItemsAt indexPaths: Set<IndexPath>) {
-        draggedIndexes = indexPaths.map { $0.item }.sorted()
+        let idx = indexPaths.map { $0.item }.sorted()
+        if cv === trayCV { trayDrag = idx } else { sourceDrag = idx }
     }
 
     func collectionView(_ cv: NSCollectionView, validateDrop draggingInfo: NSDraggingInfo,
                         proposedIndexPath: AutoreleasingUnsafeMutablePointer<NSIndexPath>,
                         dropOperation: UnsafeMutablePointer<NSCollectionView.DropOperation>) -> NSDragOperation {
+        guard cv === trayCV else { return [] }   // only the New PDF pane accepts drops
         if dropOperation.pointee == .on { dropOperation.pointee = .before }
-        return draggedIndexes.isEmpty ? [] : .move
+        return (draggingInfo.draggingSource as? NSCollectionView) === sourceCV ? .copy : .move
     }
 
     func collectionView(_ cv: NSCollectionView, acceptDrop draggingInfo: NSDraggingInfo,
                         indexPath: IndexPath, dropOperation: NSCollectionView.DropOperation) -> Bool {
-        guard !draggedIndexes.isEmpty else { return false }
+        guard cv === trayCV else { return false }
         var target = indexPath.item
-        let moving = draggedIndexes.map { pages[$0] }
-        for i in draggedIndexes.sorted(by: >) {
-            pages.remove(at: i)
-            if i < target { target -= 1 }
+        if (draggingInfo.draggingSource as? NSCollectionView) === sourceCV {
+            // Copy source pages into the New PDF.
+            let add = sourceDrag.compactMap { sourcePages[$0].copy() as? PDFPage }
+            guard !add.isEmpty else { return false }
+            target = min(max(0, target), trayPages.count)
+            trayPages.insert(contentsOf: add, at: target)
+            sourceDrag = []
+            reloadTray(select: target..<(target + add.count))
+        } else {
+            // Reorder within the New PDF.
+            guard !trayDrag.isEmpty else { return false }
+            let moving = trayDrag.map { trayPages[$0] }
+            for i in trayDrag.sorted(by: >) { trayPages.remove(at: i); if i < target { target -= 1 } }
+            target = min(max(0, target), trayPages.count)
+            trayPages.insert(contentsOf: moving, at: target)
+            trayDrag = []
+            reloadTray(select: target..<(target + moving.count))
         }
-        target = min(max(0, target), pages.count)
-        pages.insert(contentsOf: moving, at: target)
-        draggedIndexes = []
-        reload(selecting: target..<(target + moving.count))
         return true
     }
 
+    // MARK: helpers
+
     private func thumbnail(for page: PDFPage) -> NSImage {
         let key = ObjectIdentifier(page)
-        if let cached = thumbCache[key] { return cached }
-        let t = page.thumbnail(of: NSSize(width: 134, height: 162), for: .mediaBox)
+        if let c = thumbCache[key] { return c }
+        let t = page.thumbnail(of: NSSize(width: 122, height: 158), for: .mediaBox)
         thumbCache[key] = t
         return t
     }
 
-    private func selectedIndexes() -> [Int] {
-        collectionView.selectionIndexPaths.map { $0.item }.sorted()
+    private func selected(_ cv: NSCollectionView) -> [Int] { cv.selectionIndexPaths.map { $0.item }.sorted() }
+    private func reloadSource() { sourceCV.reloadData() }
+    private func reloadTray(select range: Range<Int>? = nil) {
+        trayCV.reloadData()
+        if let r = range { trayCV.selectionIndexPaths = Set(r.map { IndexPath(item: $0, section: 0) }) }
     }
 
-    private func reload(selecting range: Range<Int>? = nil) {
-        collectionView.reloadData()
-        if let range = range {
-            collectionView.selectionIndexPaths = Set(range.map { IndexPath(item: $0, section: 0) })
-        }
+    private func button(_ title: String, _ action: Selector, _ frame: NSRect, _ mask: NSView.AutoresizingMask) -> NSButton {
+        let b = NSButton(title: title, target: self, action: action)
+        b.bezelStyle = .rounded
+        b.frame = frame
+        b.autoresizingMask = mask
+        return b
     }
 
     // MARK: actions
@@ -144,64 +210,59 @@ final class PageOrganizerWindowController: NSWindowController, NSCollectionViewD
     @objc private func addFiles() {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = true
-        panel.canChooseFiles = true
-        panel.canChooseDirectories = false
-        panel.message = "Add PDFs and photos"
-        panel.prompt = "Add"
+        panel.canChooseFiles = true; panel.canChooseDirectories = false
+        panel.message = "Add PDFs and photos"; panel.prompt = "Add"
         if #available(macOS 11.0, *) { panel.allowedContentTypes = [.pdf, .image] }
         guard panel.runModal() == .OK else { return }
         let added = loadPages(from: panel.urls)
         guard !added.isEmpty else { return }
-        pages.append(contentsOf: added)
-        reload()
+        sourcePages.append(contentsOf: added)
+        reloadSource()
     }
 
-    @objc private func movePagesLeft() { move(by: -1) }
-    @objc private func movePagesRight() { move(by: 1) }
+    @objc private func addSelected() {
+        let sel = selected(sourceCV)
+        guard !sel.isEmpty else { infoAlert("Select pages", "Select source pages to add to your New PDF."); return }
+        let add = sel.compactMap { sourcePages[$0].copy() as? PDFPage }
+        let start = trayPages.count
+        trayPages.append(contentsOf: add)
+        reloadTray(select: start..<(start + add.count))
+    }
 
-    private func move(by delta: Int) {
-        let sel = selectedIndexes()
+    @objc private func addAll() {
+        let add = sourcePages.compactMap { $0.copy() as? PDFPage }
+        let start = trayPages.count
+        trayPages.append(contentsOf: add)
+        reloadTray(select: start..<(start + add.count))
+    }
+
+    @objc private func trayRotate() {
+        let sel = selected(trayCV)
         guard !sel.isEmpty else { return }
-        let moving = sel.map { pages[$0] }
-        for i in sel.reversed() { pages.remove(at: i) }
-        let insert = min(max(0, sel[0] + delta), pages.count)
-        pages.insert(contentsOf: moving, at: insert)
-        reload(selecting: insert..<(insert + moving.count))
+        for i in sel { trayPages[i].rotation = (trayPages[i].rotation + 90) % 360; thumbCache[ObjectIdentifier(trayPages[i])] = nil }
+        reloadTray(select: sel.first!..<(sel.last! + 1))
     }
 
-    @objc private func rotatePages() {
-        let sel = selectedIndexes()
+    @objc private func trayRemove() {
+        let sel = selected(trayCV)
         guard !sel.isEmpty else { return }
-        for i in sel {
-            pages[i].rotation = (pages[i].rotation + 90) % 360
-            thumbCache[ObjectIdentifier(pages[i])] = nil
-        }
-        reload(selecting: sel.first!..<(sel.last! + 1))
+        for i in sel.sorted(by: >) { trayPages.remove(at: i) }
+        reloadTray()
     }
 
-    @objc private func deletePages() {
-        let sel = selectedIndexes()
-        guard !sel.isEmpty else { return }
-        for i in sel.sorted(by: >) { pages.remove(at: i) }
-        reload()
-    }
-
-    @objc private func extractSelected() {
-        let sel = selectedIndexes()
-        guard !sel.isEmpty else {
-            infoAlert("Select pages first", "Choose the pages you want to extract into a new PDF.")
-            return
-        }
+    @objc private func saveSelectedAs() {
+        let sel = selected(sourceCV)
+        guard !sel.isEmpty else { infoAlert("Select pages first", "Choose source pages to save as a new PDF."); return }
         let doc = PDFDocument()
-        for (n, i) in sel.enumerated() { if let c = pages[i].copy() as? PDFPage { doc.insert(c, at: n) } }
+        for (n, i) in sel.enumerated() { if let c = sourcePages[i].copy() as? PDFPage { doc.insert(c, at: n) } }
         save(doc, suggested: "Extracted.pdf")
     }
 
-    @objc private func saveAll() {
-        guard !pages.isEmpty else { return }
+    @objc private func saveTray() {
+        guard !trayPages.isEmpty else { infoAlert("New PDF is empty", "Add pages to your New PDF first — drag them in, or use Add Selected / Add All."); return }
         let doc = PDFDocument()
-        for (n, p) in pages.enumerated() { if let c = p.copy() as? PDFPage { doc.insert(c, at: n) } }
-        save(doc, suggested: "Combined.pdf")
+        for (n, p) in trayPages.enumerated() { if let c = p.copy() as? PDFPage { doc.insert(c, at: n) } }
+        save(doc, suggested: "New.pdf")
     }
 
     private func save(_ doc: PDFDocument, suggested: String) {
