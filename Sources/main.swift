@@ -1,4 +1,4 @@
-// Jack — drop photos to get one resized PDF, or open a PDF to sign it.
+// Jack — a lightweight PDF utility: combine photos, sign, and organize pages.
 // ThinkOpen Inc.
 import Cocoa
 import ImageIO
@@ -18,14 +18,59 @@ func infoAlert(_ title: String, _ body: String) {
     a.runModal()
 }
 
+func isImageURL(_ url: URL) -> Bool {
+    if #available(macOS 11.0, *),
+       let type = try? url.resourceValues(forKeys: [.contentTypeKey]).contentType {
+        return type.conforms(to: .image)
+    }
+    let exts: Set<String> = ["jpg", "jpeg", "png", "heic", "heif", "tiff", "tif", "gif", "bmp"]
+    return exts.contains(url.pathExtension.lowercased())
+}
+
+func isPDFURL(_ url: URL) -> Bool { url.pathExtension.lowercased() == "pdf" }
+
+// Downscale an image to MAX_EDGE on the long edge (never upscales), honoring EXIF orientation.
+func downscaleImage(_ url: URL) -> NSImage? {
+    guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+    let opts: [CFString: Any] = [
+        kCGImageSourceCreateThumbnailFromImageAlways: true,
+        kCGImageSourceCreateThumbnailWithTransform: true,
+        kCGImageSourceThumbnailMaxPixelSize: MAX_EDGE,
+        kCGImageSourceShouldCacheImmediately: true
+    ]
+    guard let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else { return nil }
+    let rep = NSBitmapImageRep(cgImage: cg)
+    guard let jpeg = rep.representation(using: .jpeg, properties: [.compressionFactor: JPEG_QUALITY]),
+          let img = NSImage(data: jpeg) else {
+        return NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+    }
+    return img
+}
+
+// Load detached PDFPages from a list of PDFs and/or images, in the given order.
+func loadPages(from urls: [URL]) -> [PDFPage] {
+    var pages: [PDFPage] = []
+    for url in urls {
+        if isPDFURL(url), let doc = PDFDocument(url: url) {
+            for i in 0..<doc.pageCount {
+                if let p = doc.page(at: i), let copy = p.copy() as? PDFPage { pages.append(copy) }
+            }
+        } else if isImageURL(url), let img = downscaleImage(url), let p = PDFPage(image: img) {
+            pages.append(p)
+        }
+    }
+    return pages
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var didHandleOpen = false
     private var pending: [URL] = []
     private var scheduled = false
-    static var windows: [SigningWindowController] = []
+    private var home: HomeWindowController?
+    static var signers: [SigningWindowController] = []
+    static var organizers: [PageOrganizerWindowController] = []
 
-    // Drop files on the app icon / "Open With… Jack".
-    // Coalesce rapid open calls (the OS sometimes splits a multi-file drop) into one batch.
+    // Drop files on the app icon / "Open With… Jack". Coalesce rapid split open calls.
     func application(_ application: NSApplication, open urls: [URL]) {
         didHandleOpen = true
         pending.append(contentsOf: urls)
@@ -41,58 +86,100 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
             guard let self = self, !self.didHandleOpen else { return }
-            self.showOpenPanel()
+            self.showHome()
         }
     }
 
-    // Quit once the last signing window closes (the image flow has no window and quits itself).
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
+    // Drag-drop intent heuristics: photos→combine, one PDF→sign, multiple/mixed→organize.
     private func route(_ urls: [URL]) {
-        let pdfs = urls.filter { $0.pathExtension.lowercased() == "pdf" }
-        let images = urls.filter(isImage)
-        if !pdfs.isEmpty {
-            pdfs.forEach(openSigning)
+        let pdfs = urls.filter(isPDFURL)
+        let images = urls.filter(isImageURL)
+        if pdfs.count == 1 && images.isEmpty {
+            openSigning(pdfs[0])
+        } else if !pdfs.isEmpty {
+            openOrganizer(urls)
         } else if !images.isEmpty {
             makeImagePDF(images)
         } else {
-            showOpenPanel()
+            showHome()
         }
     }
 
-    // The Open panel runs out-of-process, so its button can't be re-labeled mid-selection.
-    // Ask up front which action, then open the right panel with the correct button text.
-    private func showOpenPanel() {
-        let a = NSAlert()
-        a.messageText = "What would you like to do?"
-        a.informativeText = "Sign a PDF, or combine photos into one PDF."
-        a.addButton(withTitle: "Sign a PDF…")
-        a.addButton(withTitle: "Combine Photos…")
-        a.addButton(withTitle: "Cancel")
-        switch a.runModal() {
-        case .alertFirstButtonReturn: pickFiles(forPhotos: false)
-        case .alertSecondButtonReturn: pickFiles(forPhotos: true)
-        default: NSApp.terminate(nil)
+    // MARK: - Home
+
+    private func showHome() {
+        if home == nil {
+            let h = HomeWindowController()
+            h.onPhotos = { [weak self] in self?.pickPhotos() }
+            h.onSign = { [weak self] in self?.pickSign() }
+            h.onOrganize = { [weak self] in self?.pickOrganize() }
+            h.onDrop = { [weak self] urls in self?.route(urls) }
+            home = h
         }
+        home?.showWindow(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
-    private func pickFiles(forPhotos: Bool) {
+    // MARK: - Pickers (explicit actions never auto-quit; the home window keeps the app alive)
+
+    private enum PickKind { case photos, pdf, both }
+
+    private func runPicker(_ kind: PickKind, multi: Bool, message: String, prompt: String,
+                           _ completion: @escaping ([URL]) -> Void) {
         let panel = NSOpenPanel()
-        panel.allowsMultipleSelection = forPhotos
+        panel.allowsMultipleSelection = multi
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
-        panel.message = forPhotos ? "Choose photos to combine into one PDF" : "Choose a PDF to sign"
-        panel.prompt = forPhotos ? "Make PDF" : "Open"
-        if #available(macOS 11.0, *) { panel.allowedContentTypes = forPhotos ? [.image] : [.pdf] }
-        if panel.runModal() == .OK { route(panel.urls) } else { NSApp.terminate(nil) }
+        panel.message = message
+        panel.prompt = prompt
+        if #available(macOS 11.0, *) {
+            switch kind {
+            case .photos: panel.allowedContentTypes = [.image]
+            case .pdf:    panel.allowedContentTypes = [.pdf]
+            case .both:   panel.allowedContentTypes = [.pdf, .image]
+            }
+        }
+        if panel.runModal() == .OK { completion(panel.urls) }
     }
+
+    private func pickPhotos() {
+        runPicker(.photos, multi: true, message: "Choose photos to combine into one PDF", prompt: "Make PDF") {
+            [weak self] in self?.makeImagePDF($0)
+        }
+    }
+    private func pickSign() {
+        runPicker(.pdf, multi: false, message: "Choose a PDF to sign", prompt: "Open") {
+            [weak self] in if let u = $0.first { self?.openSigning(u) }
+        }
+    }
+    private func pickOrganize() {
+        runPicker(.both, multi: true, message: "Choose PDFs and photos to combine, reorder, or extract pages", prompt: "Open") {
+            [weak self] in self?.openOrganizer($0)
+        }
+    }
+
+    // MARK: - Open flows
 
     private func openSigning(_ url: URL) {
         guard let wc = SigningWindowController(pdfURL: url) else {
             infoAlert("Couldn’t open PDF", "“\(url.lastPathComponent)” couldn’t be read as a PDF.")
             return
         }
-        AppDelegate.windows.append(wc)
+        AppDelegate.signers.append(wc)
+        wc.showWindow(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func openOrganizer(_ urls: [URL]) {
+        let pages = loadPages(from: urls)
+        guard !pages.isEmpty else {
+            infoAlert("Nothing to organize", "None of the selected files could be read as PDFs or images.")
+            return
+        }
+        let wc = PageOrganizerWindowController(pages: pages)
+        AppDelegate.organizers.append(wc)
         wc.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
@@ -105,15 +192,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         var n = 0
         var skipped: [String] = []
         for url in images {
-            if let img = downscaled(url: url), let page = PDFPage(image: img) {
+            if let img = downscaleImage(url), let page = PDFPage(image: img) {
                 pdf.insert(page, at: n); n += 1
             } else {
                 skipped.append(url.lastPathComponent)
             }
         }
         guard n > 0 else {
-            infoAlert("Couldn’t read those images", "None of the dropped files could be processed.")
-            NSApp.terminate(nil); return
+            infoAlert("Couldn’t read those images", "None of the selected files could be processed.")
+            quitIfNoWindows(); return
         }
         let out = desktopURL(name: "Jack_\(timestamp()).pdf")
         if pdf.write(to: out) {
@@ -125,33 +212,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             infoAlert("Save failed", "Couldn’t write the PDF to your Desktop.")
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { NSApp.terminate(nil) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.quitIfNoWindows() }
     }
 
-    func isImage(_ url: URL) -> Bool {
-        if #available(macOS 11.0, *),
-           let type = try? url.resourceValues(forKeys: [.contentTypeKey]).contentType {
-            return type.conforms(to: .image)
-        }
-        let exts: Set<String> = ["jpg", "jpeg", "png", "heic", "heif", "tiff", "tif", "gif", "bmp"]
-        return exts.contains(url.pathExtension.lowercased())
-    }
-
-    private func downscaled(url: URL) -> NSImage? {
-        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
-        let opts: [CFString: Any] = [
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: MAX_EDGE,
-            kCGImageSourceShouldCacheImmediately: true
-        ]
-        guard let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else { return nil }
-        let rep = NSBitmapImageRep(cgImage: cg)
-        guard let jpeg = rep.representation(using: .jpeg, properties: [.compressionFactor: JPEG_QUALITY]),
-              let img = NSImage(data: jpeg) else {
-            return NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
-        }
-        return img
+    // Quit only on the windowless drag-drop combine path; stay alive if any window is open.
+    private func quitIfNoWindows() {
+        let hasWindow = NSApp.windows.contains { $0.isVisible && $0.canBecomeMain }
+        if !hasWindow { NSApp.terminate(nil) }
     }
 }
 
