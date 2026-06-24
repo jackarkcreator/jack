@@ -2,9 +2,11 @@
 import AppKit
 import PDFKit
 
-final class PageOrganizerWindowController: NSWindowController, NSCollectionViewDataSource {
+final class PageOrganizerWindowController: NSWindowController, NSCollectionViewDataSource, NSCollectionViewDelegate {
+    private static let pageType = NSPasteboard.PasteboardType("net.thinkopen.jack.page")
     private var pages: [PDFPage]
     private var thumbCache: [ObjectIdentifier: NSImage] = [:]
+    private var draggedIndexes: [Int] = []
     private let collectionView = NSCollectionView()
 
     init(pages: [PDFPage]) {
@@ -51,11 +53,14 @@ final class PageOrganizerWindowController: NSWindowController, NSCollectionViewD
         layout.sectionInset = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
         collectionView.collectionViewLayout = layout
         collectionView.dataSource = self
+        collectionView.delegate = self
         collectionView.isSelectable = true
         collectionView.allowsMultipleSelection = true
         collectionView.allowsEmptySelection = true
         collectionView.backgroundColors = [NSColor.underPageBackgroundColor]
         collectionView.register(PageThumbnailItem.self, forItemWithIdentifier: PageThumbnailItem.id)
+        collectionView.registerForDraggedTypes([Self.pageType])
+        collectionView.setDraggingSourceOperationMask([.move], forLocal: true)
 
         let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: content.bounds.width, height: content.bounds.height - barH))
         scroll.autoresizingMask = [.width, .height]
@@ -73,6 +78,46 @@ final class PageOrganizerWindowController: NSWindowController, NSCollectionViewD
         let page = pages[indexPath.item]
         item.configure(thumbnail(for: page), label: "Page \(indexPath.item + 1)")
         return item
+    }
+
+    // MARK: drag-to-reorder
+
+    func collectionView(_ cv: NSCollectionView, canDragItemsAt indexPaths: Set<IndexPath>, with event: NSEvent) -> Bool {
+        true
+    }
+
+    func collectionView(_ cv: NSCollectionView, pasteboardWriterForItemAt indexPath: IndexPath) -> NSPasteboardWriting? {
+        let item = NSPasteboardItem()
+        item.setString(String(indexPath.item), forType: Self.pageType)
+        return item
+    }
+
+    func collectionView(_ cv: NSCollectionView, draggingSession session: NSDraggingSession,
+                        willBeginAt screenPoint: NSPoint, forItemsAt indexPaths: Set<IndexPath>) {
+        draggedIndexes = indexPaths.map { $0.item }.sorted()
+    }
+
+    func collectionView(_ cv: NSCollectionView, validateDrop draggingInfo: NSDraggingInfo,
+                        proposedIndexPath: AutoreleasingUnsafeMutablePointer<NSIndexPath>,
+                        dropOperation: UnsafeMutablePointer<NSCollectionView.DropOperation>) -> NSDragOperation {
+        if dropOperation.pointee == .on { dropOperation.pointee = .before }
+        return draggedIndexes.isEmpty ? [] : .move
+    }
+
+    func collectionView(_ cv: NSCollectionView, acceptDrop draggingInfo: NSDraggingInfo,
+                        indexPath: IndexPath, dropOperation: NSCollectionView.DropOperation) -> Bool {
+        guard !draggedIndexes.isEmpty else { return false }
+        var target = indexPath.item
+        let moving = draggedIndexes.map { pages[$0] }
+        for i in draggedIndexes.sorted(by: >) {
+            pages.remove(at: i)
+            if i < target { target -= 1 }
+        }
+        target = min(max(0, target), pages.count)
+        pages.insert(contentsOf: moving, at: target)
+        draggedIndexes = []
+        reload(selecting: target..<(target + moving.count))
+        return true
     }
 
     private func thumbnail(for page: PDFPage) -> NSImage {
