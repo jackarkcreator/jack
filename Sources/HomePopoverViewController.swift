@@ -6,6 +6,7 @@ final class HomePopoverViewController: NSViewController {
     var onPhotos: (() -> Void)?
     var onSign: (() -> Void)?
     var onOrganize: (() -> Void)?
+    var onBatch: (() -> Void)?
     var onMakeDefault: (() -> Void)?
     var onQuit: (() -> Void)?
     var onUpdate: (() -> Void)?
@@ -30,49 +31,50 @@ final class HomePopoverViewController: NSViewController {
     }
 
     override func loadView() {
-        let v = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 480))
+        let v = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 540))
 
         let title = NSTextField(labelWithString: "Jack")
         title.font = .systemFont(ofSize: 20, weight: .semibold)
-        title.frame = NSRect(x: 20, y: 440, width: 260, height: 26)
+        title.frame = NSRect(x: 20, y: 500, width: 260, height: 26)
         v.addSubview(title)
 
         let sub = NSTextField(labelWithString: "Lightweight PDF tools")
         sub.textColor = .secondaryLabelColor
         sub.font = .systemFont(ofSize: 12)
-        sub.frame = NSRect(x: 20, y: 420, width: 260, height: 16)
+        sub.frame = NSRect(x: 20, y: 480, width: 260, height: 16)
         v.addSubview(sub)
 
         let cards: [(String, String, Selector)] = [
             ("doc.text.magnifyingglass", "Open a PDF", #selector(openPDF)),
             ("photo.on.rectangle", "Combine Photos → PDF", #selector(photos)),
             ("signature", "Fill & Sign a PDF", #selector(sign)),
-            ("doc.on.doc", "Organize / Merge Pages", #selector(organize))
+            ("doc.on.doc", "Organize / Merge Pages", #selector(organize)),
+            ("folder", "Batch Process a Folder", #selector(batch))
         ]
-        var y = 350
+        var y = 410
         for (symbol, label, action) in cards { v.addSubview(card(symbol, label, action, y)); y -= 60 }
 
-        let sep = NSBox(frame: NSRect(x: 16, y: 124, width: 268, height: 1))
+        let sep = NSBox(frame: NSRect(x: 16, y: 154, width: 268, height: 1))
         sep.boxType = .separator
         v.addSubview(sep)
 
         let chk = NSButton(checkboxWithTitle: "Open Jack at login", target: self, action: #selector(toggleLogin))
-        chk.frame = NSRect(x: 20, y: 96, width: 260, height: 20)
+        chk.frame = NSRect(x: 20, y: 126, width: 260, height: 20)
         chk.state = loginEnabled ? .on : .off
         v.addSubview(chk)
         loginCheck = chk
 
         let def = NSButton(checkboxWithTitle: "★ Make Jack my default PDF app", target: self, action: #selector(makeDefault))
-        def.frame = NSRect(x: 17, y: 66, width: 264, height: 22)
+        def.frame = NSRect(x: 17, y: 96, width: 264, height: 22)
         def.state = defaultEnabled ? .on : .off
         if defaultEnabled { def.title = "Jack is your default PDF app" }
         v.addSubview(def)
         defaultCheck = def
 
-        let tip = NSTextField(wrappingLabelWithString: "Tip: drop photos or PDFs onto the menu bar icon, or right-click a file → Open With → Jack.")
+        let tip = NSTextField(wrappingLabelWithString: "Tip: drop photos, PDFs, or a whole folder onto the menu bar icon — a folder opens batch processing.")
         tip.textColor = .tertiaryLabelColor
         tip.font = .systemFont(ofSize: 10)
-        tip.frame = NSRect(x: 20, y: 34, width: 260, height: 30)
+        tip.frame = NSRect(x: 20, y: 44, width: 260, height: 40)
         v.addSubview(tip)
 
         let quit = NSButton(title: "Quit Jack", target: self, action: #selector(quit))
@@ -115,6 +117,7 @@ final class HomePopoverViewController: NSViewController {
     @objc private func photos() { onPhotos?() }
     @objc private func sign() { onSign?() }
     @objc private func organize() { onOrganize?() }
+    @objc private func batch() { onBatch?() }
     @objc private func toggleLogin() { onToggleLogin?(loginCheck?.state == .on) }
     @objc private func quit() { onQuit?() }
     @objc private func openUpdate() {

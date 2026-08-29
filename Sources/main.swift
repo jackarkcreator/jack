@@ -67,11 +67,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var scheduled = false
     static var organizers: [PageOrganizerWindowController] = []
     static var documents: [DocumentWindowController] = []
+    static var batchers: [BatchWindowController] = []
 
     // Menu bar accessory until the first document opens — then a real Dock/⌘-Tab app for the
     // rest of the session (Preview-like; vanishing from ⌘-Tab on close read as broken).
     static func updateActivationPolicy() {
-        let openDocs = documents.count + organizers.count
+        let openDocs = documents.count + organizers.count + batchers.count
         if openDocs > 0 && NSApp.activationPolicy() != .regular {
             NSApp.setActivationPolicy(.regular)
             NSApp.activate(ignoringOtherApps: true)
@@ -123,6 +124,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
     private func route(_ urls: [URL]) {
+        // A dropped FOLDER means batch processing.
+        if let folder = urls.first(where: { (try? $0.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true }) {
+            openBatch(folder)
+            return
+        }
         let pdfs = urls.filter(isPDFURL)
         let images = urls.filter(isImageURL)
         if pdfs.count == 1 && images.isEmpty {
@@ -158,6 +164,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popoverVC.onPhotos = { [weak self] in self?.popover.performClose(nil); self?.pickPhotos() }
         popoverVC.onSign = { [weak self] in self?.popover.performClose(nil); self?.pickSign() }
         popoverVC.onOrganize = { [weak self] in self?.popover.performClose(nil); self?.pickOrganize() }
+        popoverVC.onBatch = { [weak self] in self?.popover.performClose(nil); self?.pickBatchFolder() }
         popoverVC.onQuit = { NSApp.terminate(nil) }
         popoverVC.onUpdate = { [weak self] in self?.popover.performClose(nil); self?.updater.checkForUpdates(nil) }
         popoverVC.onToggleLogin = { [weak self] on in self?.setLogin(on) }
@@ -241,6 +248,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             [weak self] in if let u = $0.first { self?.openDocument(u, markup: true) }
         }
     }
+    private func pickBatchFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.message = "Choose a folder of PDFs to process"
+        panel.prompt = "Choose"
+        NSApp.activate(ignoringOtherApps: true)
+        if panel.runModal() == .OK, let url = panel.url { openBatch(url) }
+    }
+
+    private func openBatch(_ folder: URL) {
+        let wc = BatchWindowController(folder: folder)
+        wc.showWindow(nil)
+        wc.window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
     private func pickOrganize() {
         runPicker(.both, multi: true, message: "Choose PDFs and photos to combine, reorder, or extract pages", prompt: "Open") {
             [weak self] in self?.openOrganizer($0)
