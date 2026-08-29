@@ -185,7 +185,23 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             item.menu = menu
             return item
         case ItemID.highlight:
-            return simple(id, "highlighter", "Highlight Selection", #selector(highlightSelection(_:)))
+            let item = NSMenuToolbarItem(itemIdentifier: id)
+            item.image = NSImage(systemSymbolName: "highlighter", accessibilityDescription: "Annotate")
+            item.label = "Annotate"
+            item.toolTip = "Highlight, underline, strikethrough"
+            let menu = NSMenu()
+            for (i, entry) in Self.highlightColors.enumerated() {
+                let m = NSMenuItem(title: "Highlight \(entry.name)", action: #selector(highlightColorPicked(_:)), keyEquivalent: "")
+                m.target = self
+                m.tag = i
+                m.image = Self.swatch(entry.color)
+                menu.addItem(m)
+            }
+            menu.addItem(.separator())
+            menu.addItem({ let m = NSMenuItem(title: "Underline", action: #selector(underlineSelection(_:)), keyEquivalent: ""); m.target = self; m.image = Self.swatch(.systemBlue); return m }())
+            menu.addItem({ let m = NSMenuItem(title: "Strikethrough", action: #selector(strikethroughSelection(_:)), keyEquivalent: ""); m.target = self; m.image = Self.swatch(.systemRed); return m }())
+            item.menu = menu
+            return item
         case ItemID.redact:
             let item = NSToolbarItem(itemIdentifier: id)
             let b = NSButton(image: NSImage(systemSymbolName: "rectangle.slash",
@@ -811,7 +827,33 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
 
     // MARK: - Text annotations (highlight / underline / strikethrough), undoable
 
-    @objc func highlightSelection(_ sender: Any?) { annotateSelection(.highlight, color: .systemYellow, name: "Highlight") }
+    static let highlightColors: [(name: String, color: NSColor)] = [
+        ("Yellow", .systemYellow), ("Green", .systemGreen), ("Blue", .systemBlue),
+        ("Pink", .systemPink), ("Purple", .systemPurple)
+    ]
+
+    static func swatch(_ color: NSColor) -> NSImage {
+        let img = NSImage(size: NSSize(width: 14, height: 14))
+        img.lockFocus()
+        color.setFill()
+        NSBezierPath(ovalIn: NSRect(x: 1, y: 1, width: 12, height: 12)).fill()
+        img.unlockFocus()
+        return img
+    }
+
+    private var savedHighlightColor: NSColor {
+        let i = UserDefaults.standard.integer(forKey: "jack.highlightColor")
+        return Self.highlightColors[(0..<Self.highlightColors.count).contains(i) ? i : 0].color
+    }
+
+    // ⇧⌘H and the Edit menu use the last color picked from the toolbar dropdown.
+    @objc func highlightSelection(_ sender: Any?) { annotateSelection(.highlight, color: savedHighlightColor, name: "Highlight") }
+
+    @objc func highlightColorPicked(_ sender: NSMenuItem) {
+        let i = (0..<Self.highlightColors.count).contains(sender.tag) ? sender.tag : 0
+        UserDefaults.standard.set(i, forKey: "jack.highlightColor")
+        annotateSelection(.highlight, color: Self.highlightColors[i].color, name: "Highlight")
+    }
     @objc func underlineSelection(_ sender: Any?) { annotateSelection(.underline, color: .systemBlue, name: "Underline") }
     @objc func strikethroughSelection(_ sender: Any?) { annotateSelection(.strikeOut, color: .systemRed, name: "Strikethrough") }
 
