@@ -81,22 +81,22 @@ final class BatchWindowController: NSWindowController, NSWindowDelegate {
         runButton.keyEquivalent = "\r"
         runButton.target = self
         runButton.action = #selector(run)
-        runButton.frame = NSRect(x: W - 180, y: H - 150, width: 160, height: 30)
+        runButton.frame = NSRect(x: W - 180, y: H - 194, width: 160, height: 30)
         runButton.isEnabled = !files.isEmpty
         v.addSubview(runButton)
 
         progressBar.isIndeterminate = false
         progressBar.minValue = 0
         progressBar.maxValue = Double(max(1, files.count))
-        progressBar.frame = NSRect(x: 20, y: H - 180, width: W - 40, height: 14)
+        progressBar.frame = NSRect(x: 20, y: H - 218, width: W - 40, height: 14)
         v.addSubview(progressBar)
 
         statusLabel.font = .systemFont(ofSize: 11)
         statusLabel.textColor = .secondaryLabelColor
-        statusLabel.frame = NSRect(x: 20, y: H - 200, width: W - 40, height: 16)
+        statusLabel.frame = NSRect(x: 20, y: H - 238, width: W - 40, height: 16)
         v.addSubview(statusLabel)
 
-        let scroll = NSScrollView(frame: NSRect(x: 20, y: 16, width: W - 40, height: H - 226))
+        let scroll = NSScrollView(frame: NSRect(x: 20, y: 16, width: W - 40, height: H - 264))
         scroll.hasVerticalScroller = true
         scroll.borderType = .bezelBorder
         results.frame = scroll.bounds
