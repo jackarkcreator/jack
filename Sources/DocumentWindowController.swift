@@ -440,10 +440,13 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     }
 
     private func buildAskPanel() {
+        let w = askWidth
+        let h: CGFloat = 700
+        // The container MUST have this frame before children are added — autoresizing
+        // springs are computed against it (zero-frame parent flings everything off-view).
+        askPanel.frame = NSRect(x: 0, y: 0, width: w, height: h)
         askPanel.wantsLayer = true
         askPanel.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
-        let w = askWidth
-        let h: CGFloat = 700   // placeholder; autoresizing keeps children pinned
 
         let divider = NSBox(frame: NSRect(x: 0, y: 0, width: 1, height: h))
         divider.boxType = .separator
