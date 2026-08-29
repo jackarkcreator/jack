@@ -803,11 +803,10 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
                 ok = self.flatten(doc, to: tmp)
                 if ok, let flat = PDFDocument(url: tmp) {
                     for (i, a) in comments {
-                        let type: PDFAnnotationSubtype = a.type == "Text" ? .text : .highlight
-                        let copy = PDFAnnotation(bounds: a.bounds, forType: type, withProperties: nil)
+                        // Export as a standard PDF note so Acrobat/Preview show a clickable comment.
+                        let copy = PDFAnnotation(bounds: a.bounds, forType: .text, withProperties: nil)
                         copy.contents = a.contents
-                        copy.color = a.color
-                        if let quads = a.quadrilateralPoints { copy.quadrilateralPoints = quads }
+                        copy.color = NSColor.systemYellow
                         flat.page(at: i)?.addAnnotation(copy)
                     }
                     ok = flat.write(to: out)
@@ -978,10 +977,8 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     }
     private func partner(of a: PDFAnnotation) -> PDFAnnotation? { commentPartners[ObjectIdentifier(a)] }
 
-    // A comment is a pin note, or a highlight that carries note text (Adobe's "note to text").
-    static func isComment(_ ann: PDFAnnotation) -> Bool {
-        ann.type == "Text" || (ann.type == "Highlight" && !((ann.contents ?? "").isEmpty))
-    }
+    // In-app, a comment IS its badge; the linked highlight is just a visual anchor.
+    static func isComment(_ ann: PDFAnnotation) -> Bool { ann is CommentBadgeAnnotation }
 
     @objc private func addCommentFromMenu(_ sender: NSMenuItem) {
         guard let target = sender.representedObject as? NoteTarget else { return }
@@ -1015,24 +1012,23 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
                     NSValue(point: NSPoint(x: lb.maxX - o.x, y: lb.minY - o.y))
                 ]
             }
+            // The highlight is purely visual — the note itself lives in the badge.
             let ann = PDFAnnotation(bounds: b, forType: .highlight, withProperties: nil)
             ann.color = .systemYellow
             if !quads.isEmpty { ann.quadrilateralPoints = quads }
-            ann.contents = text
             page.addAnnotation(ann)
             added.append((page, ann))
 
-            // The visible tell: a note-icon badge at the highlight's top-right corner.
             let box = page.bounds(for: .mediaBox)
-            let pin = PDFAnnotation(bounds: CGRect(x: min(b.maxX + 3, box.maxX - 24),
-                                                   y: min(b.maxY - 9, box.maxY - 24),
-                                                   width: 20, height: 20),
-                                    forType: .text, withProperties: nil)
-            pin.contents = text
-            pin.color = .systemYellow
-            page.addAnnotation(pin)
-            link(ann, pin)
-            added.append((page, pin))
+            let size: CGFloat = 18
+            let badge = CommentBadgeAnnotation(
+                bounds: CGRect(x: min(b.maxX + 3, box.maxX - size - 2),
+                               y: min(b.maxY + 2, box.maxY - size - 2),
+                               width: size, height: size),
+                text: text)
+            page.addAnnotation(badge)
+            link(ann, badge)
+            added.append((page, badge))
         }
         guard !added.isEmpty else { return }
         pdfView.setCurrentSelection(nil, animate: false)
@@ -1044,10 +1040,13 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
 
     private func addComment(on page: PDFPage, at point: CGPoint) {
         guard let text = promptForCommentText(initial: "") else { return }
-        let ann = PDFAnnotation(bounds: CGRect(x: point.x, y: point.y, width: 22, height: 22),
-                                forType: .text, withProperties: nil)
-        ann.color = .systemYellow
-        ann.contents = text
+        let size: CGFloat = 18
+        let box = page.bounds(for: .mediaBox)
+        let ann = CommentBadgeAnnotation(
+            bounds: CGRect(x: min(max(point.x - size / 2, box.minX + 2), box.maxX - size - 2),
+                           y: min(max(point.y - size / 2, box.minY + 2), box.maxY - size - 2),
+                           width: size, height: size),
+            text: text)
         page.addAnnotation(ann)
         registerAnnotationRemovalUndo([(page, ann)], name: "Add Comment")
         markEdited()
@@ -1118,12 +1117,11 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         guard let ann = activeNote else { return }
         notePopover?.close()
         guard let text = promptForCommentText(initial: ann.contents ?? "") else { return }
-        let pair = [ann, partner(of: ann)].compactMap { $0 }
         let old = ann.contents ?? ""
-        pair.forEach { $0.contents = text }
+        ann.contents = text
         docUndo.registerUndo(withTarget: self) { me in
-            pair.forEach { $0.contents = old }
-            me.docUndo.registerUndo(withTarget: me) { _ in pair.forEach { $0.contents = text } }
+            ann.contents = old
+            me.docUndo.registerUndo(withTarget: me) { _ in ann.contents = text }
         }
         docUndo.setActionName("Edit Comment")
         markEdited()

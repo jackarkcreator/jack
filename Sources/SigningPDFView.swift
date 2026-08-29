@@ -52,12 +52,9 @@ final class SigningPDFView: PDFView {
             rubberBand = band
             return
         }
-        // A comment (pin note, or a highlight that carries a note): open its popover.
-        if let note = page.annotations.last(where: { ann in
-            let hasNote = !((ann.contents ?? "").isEmpty)
-            let isPin = ann.type == "Text"
-            let isTextComment = ann.type == "Highlight" && hasNote
-            return (isPin || isTextComment) && ann.bounds.insetBy(dx: -4, dy: -4).contains(p)
+        // Only the comment badge opens the note; the linked highlight stays plain text.
+        if let note = page.annotations.last(where: {
+            $0 is CommentBadgeAnnotation && $0.bounds.insetBy(dx: -4, dy: -4).contains(p)
         }) {
             stampDelegate?.noteClicked(note)
             return
