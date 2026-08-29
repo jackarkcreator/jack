@@ -33,11 +33,6 @@ final class PageOrganizerWindowController: NSWindowController, NSCollectionViewD
 
     @objc private func backHome() { onCancel?() }
 
-    private var backButton: NSButton?
-
-    // When opened from a reader window, going back means "reveal the PDF", not "show the launcher".
-    func setReturnsToPDF() { backButton?.title = "← Back" }
-
     func windowWillClose(_ notification: Notification) {
         DispatchQueue.main.async {
             AppDelegate.organizers.removeAll { $0 === self }
@@ -62,9 +57,7 @@ final class PageOrganizerWindowController: NSWindowController, NSCollectionViewD
         topBar.wantsLayer = true
         topBar.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
         content.addSubview(topBar)
-        let back = button("← Home", #selector(backHome), NSRect(x: 12, y: 8, width: 96, height: 28), [])
-        backButton = back
-        topBar.addSubview(back)
+        topBar.addSubview(button("← Home", #selector(backHome), NSRect(x: 12, y: 8, width: 96, height: 28), []))
 
         // Left pane — New PDF
         let left = NSView(frame: NSRect(x: 0, y: 0, width: sidebarW, height: cH))

@@ -25,9 +25,10 @@ enum MainMenu {
         file.addItem(item("Open…", openAction, "o", target: target))
         file.addItem(.separator())
         file.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
-        file.addItem(item("Lock for Sharing…", #selector(ReaderWindowController.lockForSharing(_:)), "l"))
+        file.addItem(item("Save PDF…", #selector(DocumentWindowController.saveDocument(_:)), "s"))
+        file.addItem(item("Lock for Sharing…", #selector(DocumentWindowController.lockForSharing(_:)), "l"))
         file.addItem(.separator())
-        file.addItem(item("Print…", #selector(ReaderWindowController.printDocument(_:)), "p"))
+        file.addItem(item("Print…", #selector(DocumentWindowController.printDocument(_:)), "p"))
         fileItem.submenu = file
         main.addItem(fileItem)
 
@@ -42,21 +43,22 @@ enum MainMenu {
         edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         edit.addItem(.separator())
-        edit.addItem(item("Find", #selector(ReaderWindowController.focusSearch(_:)), "f"))
-        edit.addItem(item("Find Next", #selector(ReaderWindowController.nextMatch(_:)), "g"))
-        edit.addItem(item("Find Previous", #selector(ReaderWindowController.previousMatch(_:)), "G"))
+        edit.addItem(item("Find", #selector(DocumentWindowController.focusSearch(_:)), "f"))
+        edit.addItem(item("Find Next", #selector(DocumentWindowController.nextMatch(_:)), "g"))
+        edit.addItem(item("Find Previous", #selector(DocumentWindowController.previousMatch(_:)), "G"))
         editItem.submenu = edit
         main.addItem(editItem)
 
         // View
         let viewItem = NSMenuItem()
         let view = NSMenu(title: "View")
-        view.addItem(item("Zoom In", #selector(ReaderWindowController.zoomIn(_:)), "+"))
-        view.addItem(item("Zoom Out", #selector(ReaderWindowController.zoomOut(_:)), "-"))
-        view.addItem(item("Actual Size", #selector(ReaderWindowController.actualSize(_:)), "0"))
-        view.addItem(item("Zoom to Fit", #selector(ReaderWindowController.zoomToFit(_:)), "9"))
+        view.addItem(item("Zoom In", #selector(DocumentWindowController.zoomIn(_:)), "+"))
+        view.addItem(item("Zoom Out", #selector(DocumentWindowController.zoomOut(_:)), "-"))
+        view.addItem(item("Actual Size", #selector(DocumentWindowController.actualSize(_:)), "0"))
+        view.addItem(item("Zoom to Fit", #selector(DocumentWindowController.zoomToFit(_:)), "9"))
         view.addItem(.separator())
-        view.addItem(item("Show/Hide Thumbnails", #selector(ReaderWindowController.toggleSidebar(_:)), "t"))
+        view.addItem(item("Show/Hide Thumbnails", #selector(DocumentWindowController.toggleSidebar(_:)), "t"))
+        view.addItem(item("Markup", #selector(DocumentWindowController.toggleMarkup(_:)), "A"))
         viewItem.submenu = view
         main.addItem(viewItem)
 
@@ -75,7 +77,9 @@ enum MainMenu {
     private static func item(_ title: String, _ action: Selector, _ key: String, target: AnyObject? = nil) -> NSMenuItem {
         let i = NSMenuItem(title: title, action: action, keyEquivalent: key)
         i.target = target
-        if key == "G" || key == "Z" { i.keyEquivalentModifierMask = [.command, .shift] }
+        if key.count == 1, key.rangeOfCharacter(from: .uppercaseLetters) != nil {
+            i.keyEquivalentModifierMask = [.command, .shift]
+        }
         return i
     }
 }

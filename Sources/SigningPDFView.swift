@@ -2,8 +2,12 @@
 import PDFKit
 import AppKit
 
+protocol StampSelectionDelegate: AnyObject {
+    func didSelect(_ ann: ImageStampAnnotation?)
+}
+
 final class SigningPDFView: PDFView {
-    weak var stampDelegate: SigningWindowController?
+    weak var stampDelegate: StampSelectionDelegate?
     private var dragging: ImageStampAnnotation?
     private var dragPage: PDFPage?
     private var last: CGPoint = .zero

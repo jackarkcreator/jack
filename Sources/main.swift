@@ -65,13 +65,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var didHandleOpen = false
     private var pending: [URL] = []
     private var scheduled = false
-    static var signers: [SigningWindowController] = []
     static var organizers: [PageOrganizerWindowController] = []
-    static var readers: [ReaderWindowController] = []
+    static var documents: [DocumentWindowController] = []
 
     // Menu bar accessory by default; a real Dock/⌘-Tab app while document windows are open.
     static func updateActivationPolicy() {
-        let openDocs = signers.count + organizers.count + readers.count
+        let openDocs = documents.count + organizers.count
         let want: NSApplication.ActivationPolicy = openDocs > 0 ? .regular : .accessory
         if NSApp.activationPolicy() != want {
             NSApp.setActivationPolicy(want)
@@ -121,7 +120,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let pdfs = urls.filter(isPDFURL)
         let images = urls.filter(isImageURL)
         if pdfs.count == 1 && images.isEmpty {
-            openReader(pdfs[0])
+            openDocument(pdfs[0])
         } else if !pdfs.isEmpty {
             openOrganizer(urls)
         } else if !images.isEmpty {
@@ -232,7 +231,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     private func pickSign() {
         runPicker(.pdf, multi: false, message: "Choose a PDF to fill or sign", prompt: "Open") {
-            [weak self] in if let u = $0.first { self?.openSigning(u) }
+            [weak self] in if let u = $0.first { self?.openDocument(u, markup: true) }
         }
     }
     private func pickOrganize() {
@@ -273,57 +272,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Open flows
 
-    private func openReader(_ url: URL) {
-        guard let wc = ReaderWindowController(pdfURL: url) else {
+    private func openDocument(_ url: URL, markup: Bool = false) {
+        guard let wc = DocumentWindowController(pdfURL: url, startInMarkup: markup) else {
             infoAlert("Couldn’t open PDF", "“\(url.lastPathComponent)” couldn’t be read as a PDF.")
             return
         }
-        wc.onFillSign = { [weak self] u in self?.openSigning(u, fromReader: true) }
-        wc.onOrganize = { [weak self] urls in self?.openOrganizer(urls, fromReader: true) }
-        AppDelegate.readers.append(wc)
+        AppDelegate.documents.append(wc)
         AppDelegate.updateActivationPolicy()
         wc.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    private func openSigning(_ url: URL, fromReader: Bool = false) {
-        guard let wc = SigningWindowController(pdfURL: url) else {
-            infoAlert("Couldn’t open PDF", "“\(url.lastPathComponent)” couldn’t be read as a PDF.")
-            return
-        }
-        if fromReader {
-            // The reader window is still open underneath — back just reveals the PDF again.
-            wc.setReturnsToPDF()
-            wc.onCancel = { [weak self, weak wc] in
-                wc?.close()
-                if AppDelegate.readers.isEmpty { self?.showPopover() }
-            }
-        } else {
-            wc.onCancel = { [weak self, weak wc] in wc?.close(); self?.showPopover() }
-        }
-        AppDelegate.signers.append(wc)
-        AppDelegate.updateActivationPolicy()
-        wc.showWindow(nil)
-        NSApp.activate(ignoringOtherApps: true)
-    }
-
-    private func openOrganizer(_ urls: [URL], fromReader: Bool = false) {
+    private func openOrganizer(_ urls: [URL]) {
         let pages = loadPages(from: urls)
         guard !pages.isEmpty else {
             infoAlert("Nothing to organize", "None of the selected files could be read as PDFs or images.")
             return
         }
         let wc = PageOrganizerWindowController(pages: pages)
-        if fromReader {
-            // The reader window is still open underneath — back just reveals the PDF again.
-            wc.setReturnsToPDF()
-            wc.onCancel = { [weak self, weak wc] in
-                wc?.close()
-                if AppDelegate.readers.isEmpty { self?.showPopover() }
-            }
-        } else {
-            wc.onCancel = { [weak self, weak wc] in wc?.close(); self?.showPopover() }
-        }
+        wc.onCancel = { [weak self, weak wc] in wc?.close(); self?.showPopover() }
         AppDelegate.organizers.append(wc)
         AppDelegate.updateActivationPolicy()
         wc.showWindow(nil)
