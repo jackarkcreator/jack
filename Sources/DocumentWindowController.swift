@@ -33,6 +33,8 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     private let removeButton = NSButton()
     private var markupButton: NSButton?
     private var shareButton: NSButton?
+    private var titleChevron: NSButton?
+    private var renamePopover: NSPopover?
 
     // Redact strip controls
     private var redactOn = false
@@ -81,6 +83,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         toolbar.allowsUserCustomization = false
         window.toolbar = toolbar
         if #available(macOS 11.0, *) { window.toolbarStyle = .unified }
+        installTitleChevron(on: window)
 
         sidebar.document = doc
         sidebar.delegate = self
@@ -336,24 +339,82 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         picker.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .minY)
     }
 
-    // MARK: - Rename (on disk, in place)
+    // MARK: - Rename (Preview-style: ⌄ chevron beside the title opens a rename popover)
+
+    private func installTitleChevron(on window: NSWindow) {
+        let acc = NSTitlebarAccessoryViewController()
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 22, height: 20))
+        let b = NSButton(frame: NSRect(x: 0, y: 1, width: 20, height: 18))
+        b.isBordered = false
+        b.image = NSImage(systemSymbolName: "chevron.down", accessibilityDescription: "Rename")?
+            .withSymbolConfiguration(.init(pointSize: 10, weight: .semibold))
+        b.contentTintColor = .tertiaryLabelColor
+        b.target = self
+        b.action = #selector(renameDocument(_:))
+        b.toolTip = "Rename…"
+        container.addSubview(b)
+        titleChevron = b
+        acc.view = container
+        acc.layoutAttribute = .leading
+        window.addTitlebarAccessoryViewController(acc)
+    }
 
     @objc func renameDocument(_ sender: Any?) {
-        let alert = NSAlert()
-        alert.messageText = "Rename"
-        alert.informativeText = "Renames the file on disk."
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
+        renamePopover?.close()
+        let vc = NSViewController()
+        let v = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 96))
+
+        let nameLabel = NSTextField(labelWithString: "Name:")
+        nameLabel.alignment = .right
+        nameLabel.frame = NSRect(x: 10, y: 58, width: 56, height: 18)
+        v.addSubview(nameLabel)
+        let field = NSTextField(frame: NSRect(x: 74, y: 54, width: 252, height: 24))
         field.stringValue = pdfURL.deletingPathExtension().lastPathComponent
-        alert.accessoryView = field
-        alert.addButton(withTitle: "Rename")
-        alert.addButton(withTitle: "Cancel")
-        alert.window.initialFirstResponder = field
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        field.target = self
+        field.action = #selector(commitRename(_:))
+        v.addSubview(field)
+
+        let whereLabel = NSTextField(labelWithString: "Where:")
+        whereLabel.alignment = .right
+        whereLabel.textColor = .secondaryLabelColor
+        whereLabel.frame = NSRect(x: 10, y: 30, width: 56, height: 16)
+        v.addSubview(whereLabel)
+        let folder = NSTextField(labelWithString: pdfURL.deletingLastPathComponent().lastPathComponent)
+        folder.textColor = .secondaryLabelColor
+        folder.frame = NSRect(x: 74, y: 30, width: 252, height: 16)
+        v.addSubview(folder)
+
+        let button = NSButton(title: "Rename", target: self, action: #selector(commitRename(_:)))
+        button.bezelStyle = .rounded
+        button.keyEquivalent = "\r"
+        button.frame = NSRect(x: 246, y: 4, width: 84, height: 26)
+        v.addSubview(button)
+
+        vc.view = v
+        renameField = field
+        let pop = NSPopover()
+        pop.contentViewController = vc
+        pop.behavior = .transient
+        if let chevron = titleChevron {
+            pop.show(relativeTo: chevron.bounds, of: chevron, preferredEdge: .maxY)
+        } else if let content = window?.contentView {
+            pop.show(relativeTo: NSRect(x: content.bounds.midX, y: content.bounds.maxY - 2, width: 1, height: 1),
+                     of: content, preferredEdge: .maxY)
+        }
+        renamePopover = pop
+        pop.contentViewController?.view.window?.makeFirstResponder(field)
+    }
+
+    private weak var renameField: NSTextField?
+
+    @objc private func commitRename(_ sender: Any?) {
+        guard let field = renameField else { return }
         let name = field.stringValue
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "/", with: "-")
             .replacingOccurrences(of: ":", with: "-")
-        guard !name.isEmpty, name != pdfURL.deletingPathExtension().lastPathComponent else { return }
+        let current = pdfURL.deletingPathExtension().lastPathComponent
+        guard !name.isEmpty, name != current else { renamePopover?.close(); return }
         let dest = pdfURL.deletingLastPathComponent().appendingPathComponent(name + ".pdf")
         guard !FileManager.default.fileExists(atPath: dest.path) else {
             infoAlert("Name taken", "A file named “\(dest.lastPathComponent)” already exists here.")
@@ -365,6 +426,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             infoAlert("Couldn’t rename", error.localizedDescription)
             return
         }
+        renamePopover?.close()
         pdfURL = dest
         window?.title = dest.lastPathComponent
         window?.representedURL = dest
