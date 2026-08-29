@@ -754,6 +754,10 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             let info = [kCGPDFContextMediaBox as String: Data(bytes: &box, count: MemoryLayout<CGRect>.size)] as CFDictionary
             ctx.beginPDFPage(info)
 
+            // Pending redaction marks must never be baked in as cosmetic boxes — strip them.
+            let overlays = page.annotations.filter { $0 is RedactionAnnotation }
+            overlays.forEach { page.removeAnnotation($0) }
+
             let stamps = page.annotations.compactMap { $0 as? ImageStampAnnotation }
             stamps.forEach { page.removeAnnotation($0) }
 
@@ -770,6 +774,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
                 }
                 page.addAnnotation(s) // keep the in-memory doc intact
             }
+            overlays.forEach { page.addAnnotation($0) }
             ctx.endPDFPage()
         }
         ctx.closePDF()

@@ -116,7 +116,11 @@ enum RedactionEngine {
     }
 
     // Vector passthrough for clean pages: burn stamps, keep everything else as drawn.
+    // Pending redaction overlays are stripped — they must never be baked in as cosmetic boxes.
     private static func drawFlattened(_ page: PDFPage, into ctx: CGContext) {
+        let overlays = page.annotations.filter { $0 is RedactionAnnotation }
+        overlays.forEach { page.removeAnnotation($0) }
+        defer { overlays.forEach { page.addAnnotation($0) } }
         let stamps = page.annotations.compactMap { $0 as? ImageStampAnnotation }
         stamps.forEach { page.removeAnnotation($0) }
         ctx.saveGState()
