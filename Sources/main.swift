@@ -273,14 +273,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Open flows
 
     private func openDocument(_ url: URL, markup: Bool = false) {
-        guard let wc = DocumentWindowController(pdfURL: url, startInMarkup: markup) else {
-            infoAlert("Couldn’t open PDF", "“\(url.lastPathComponent)” couldn’t be read as a PDF.")
-            return
+        NSDocumentController.shared.openDocument(withContentsOf: url, display: true) { doc, _, error in
+            if let error = error {
+                infoAlert("Couldn’t open PDF", error.localizedDescription)
+                return
+            }
+            NSApp.activate(ignoringOtherApps: true)
+            if markup, let wc = (doc as? JackDocument)?.windowControllers.first as? DocumentWindowController {
+                wc.openInMarkup()
+            }
         }
-        AppDelegate.documents.append(wc)
-        AppDelegate.updateActivationPolicy()
-        wc.showWindow(nil)
-        NSApp.activate(ignoringOtherApps: true)
     }
 
     private func openOrganizer(_ urls: [URL]) {

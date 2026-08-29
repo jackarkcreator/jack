@@ -8,14 +8,20 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
                                       StampSelectionDelegate, PageSidebarDelegate, NSSearchFieldDelegate,
                                       NSMenuDelegate {
 
-    private var pdfURL: URL
+    // v2.0: the file's identity lives with the NSDocument (rename/move/duplicate are native).
+    private var pdfURL: URL {
+        (document as? NSDocument)?.fileURL
+            ?? FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser
+    }
     private let pdfView = SigningPDFView()
     private let sidebar = PageSidebarController()
     private var searchField: NSSearchField?
     private weak var selected: ImageStampAnnotation?
     private var sheet: SignatureSheetController?
 
-    private let docUndo = UndoManager()
+    // Undo lives with the document — registrations drive the dirty state and autosave.
+    private var docUndo: UndoManager { (document as? NSDocument)?.undoManager ?? UndoManager() }
     private var sliderStartBounds: CGRect?   // resize gesture start, so one drag = one undo step
 
     private var matches: [PDFSelection] = []
@@ -33,11 +39,6 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     private let removeButton = NSButton()
     private var markupButton: NSButton?
     private var shareButton: NSButton?
-    private var titleChevron: NSButton?
-    private var renamePopover: NSPopover?
-    private let titleButton = NSButton(title: "", target: nil, action: nil)
-    private let subtitleLabel = NSTextField(labelWithString: "")
-    private var titleContainer: NSView?
 
     // Redact strip controls
     private var redactOn = false
@@ -47,26 +48,31 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     private let redactTermField = NSTextField()
     private var redactedTerms: Set<String> = []   // fed to the verify pass as forbidden terms
 
-    init?(pdfURL: URL, startInMarkup: Bool = false) {
-        guard let doc = PDFDocument(url: pdfURL) else { return nil }
-        self.pdfURL = pdfURL
+    init(document: JackDocument) {
         let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1180, height: 800),
                            styleMask: [.titled, .closable, .miniaturizable, .resizable],
                            backing: .buffered, defer: false)
-        win.title = pdfURL.lastPathComponent
-        win.representedURL = pdfURL            // title-bar proxy icon: drag the file, ⌘-click the path
         win.center()
         win.setFrameAutosaveName("JackDocument")
         super.init(window: win)
+        self.document = document
+        shouldCloseDocument = true
         win.delegate = self
-        buildUI(doc: doc)
-        if startInMarkup { DispatchQueue.main.async { [weak self] in self?.setMarkup(on: true) } }
+        if let doc = document.pdf { buildUI(doc: doc) }
+        AppDelegate.documents.append(self)
+        AppDelegate.updateActivationPolicy()
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
+    func openInMarkup() {
+        DispatchQueue.main.async { [weak self] in self?.setMarkup(on: true) }
+    }
+
     // ⌘Z / Edit menu / toolbar Undo all resolve here through the window.
-    func windowWillReturnUndoManager(_ window: NSWindow) -> UndoManager? { docUndo }
+    func windowWillReturnUndoManager(_ window: NSWindow) -> UndoManager? {
+        (document as? NSDocument)?.undoManager
+    }
 
     func windowWillClose(_ notification: Notification) {
         DispatchQueue.main.async {
@@ -86,7 +92,6 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         toolbar.allowsUserCustomization = false
         window.toolbar = toolbar
         if #available(macOS 11.0, *) { window.toolbarStyle = .unified }
-        installTitleChevron(on: window)
 
         sidebar.document = doc
         sidebar.delegate = self
@@ -111,6 +116,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         // A locked doc builds blank thumbnails; re-render everything once the password lands.
         NotificationCenter.default.addObserver(self, selector: #selector(documentUnlocked),
                                                name: .PDFDocumentDidUnlock, object: doc)
+        // Typing into AcroForm fields bypasses our undo path — count it so autosave captures it.
+        NotificationCenter.default.addObserver(self, selector: #selector(annotationHit(_:)),
+                                               name: .PDFViewAnnotationHit, object: pdfView)
         sidebar.reload()
         pageChanged()
     }
@@ -137,6 +145,12 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         forceRefresh()
     }
 
+    @objc private func annotationHit(_ note: Notification) {
+        if let ann = note.userInfo?["PDFAnnotationHit"] as? PDFAnnotation, ann.type == "Widget" {
+            (document as? NSDocument)?.updateChangeCount(.changeDone)
+        }
+    }
+
     @objc private func pageChanged() {
         guard let doc = pdfView.document, let page = pdfView.currentPage else { return }
         let index = doc.index(for: page)
@@ -145,8 +159,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     }
 
     private func setSubtitle(_ s: String) {
-        let edited = window?.isDocumentEdited == true ? " — Edited" : ""
-        subtitleLabel.stringValue = s + edited
+        if #available(macOS 11.0, *) { window?.subtitle = s }
     }
 
     // MARK: - Toolbar
@@ -281,11 +294,11 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             return item
         case ItemID.save:
             let item = NSToolbarItem(itemIdentifier: id)
-            let b = NSButton(title: "Save PDF…", target: self, action: #selector(saveDocument(_:)))
+            let b = NSButton(title: "Export…", target: self, action: #selector(exportFlattened(_:)))
             b.bezelStyle = .texturedRounded
             item.view = b
-            item.label = "Save"
-            item.toolTip = "Save a copy with your edits (original stays untouched)"
+            item.label = "Export"
+            item.toolTip = "Export a flattened copy (edits save into the file automatically)"
             return item
         case ItemID.search:
             if #available(macOS 11.0, *) {
@@ -331,204 +344,21 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     @objc func shareDocument(_ sender: Any?) {
         guard let anchor = shareButton else { return }
         var url = pdfURL
-        if window?.isDocumentEdited == true, let doc = pdfView.document {
-            // Share what the user sees: edits flattened, comments carried.
+        if (document as? NSDocument)?.isDocumentEdited == true, let doc = pdfView.document {
+            // Share what the user sees — the same representation a save would write.
             let dir = FileManager.default.temporaryDirectory
                 .appendingPathComponent("jack-share-\(UUID().uuidString)", isDirectory: true)
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             let tmp = dir.appendingPathComponent(pdfURL.lastPathComponent)
-            if exportCurrentState(doc, to: tmp) { url = tmp }
+            if let data = JackDocument.buildPersistedDocument(from: doc)?.dataRepresentation(),
+               (try? data.write(to: tmp)) != nil {
+                url = tmp
+            }
         }
         let picker = NSSharingServicePicker(items: [url])
         picker.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .minY)
     }
 
-    // MARK: - Rename (Preview-style: ⌄ chevron beside the title opens a rename popover)
-
-    // Preview's look: the title text and its ⌄ are ONE control — hide the native title and
-    // render our own title + chevron + "Page x of y" subtitle. Clicking either opens rename.
-    private func installTitleChevron(on window: NSWindow) {
-        window.titleVisibility = .hidden
-
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 260, height: 34))
-
-        titleButton.isBordered = false
-        titleButton.alignment = .left
-        titleButton.lineBreakMode = .byTruncatingMiddle
-        titleButton.target = self
-        titleButton.action = #selector(renameDocument(_:))
-        titleButton.toolTip = "Rename…"
-        container.addSubview(titleButton)
-
-        let b = NSButton(frame: .zero)
-        b.isBordered = false
-        b.image = NSImage(systemSymbolName: "chevron.down", accessibilityDescription: "Rename")?
-            .withSymbolConfiguration(.init(pointSize: 9, weight: .semibold))
-        b.contentTintColor = .tertiaryLabelColor
-        b.target = self
-        b.action = #selector(renameDocument(_:))
-        b.toolTip = "Rename…"
-        container.addSubview(b)
-        titleChevron = b
-
-        subtitleLabel.font = .systemFont(ofSize: 11)
-        subtitleLabel.textColor = .secondaryLabelColor
-        subtitleLabel.lineBreakMode = .byTruncatingTail
-        container.addSubview(subtitleLabel)
-
-        titleContainer = container
-        let acc = NSTitlebarAccessoryViewController()
-        acc.view = container
-        acc.layoutAttribute = .leading
-        window.addTitlebarAccessoryViewController(acc)
-        layoutTitleAccessory()
-    }
-
-    private func layoutTitleAccessory() {
-        guard let container = titleContainer else { return }
-        let name = pdfURL.lastPathComponent
-        let font = NSFont.systemFont(ofSize: 13, weight: .semibold)
-        titleButton.attributedTitle = NSAttributedString(string: name, attributes: [
-            .font: font, .foregroundColor: NSColor.labelColor
-        ])
-        let titleWidth = min(ceil(name.size(withAttributes: [.font: font]).width) + 8, 420)
-        titleButton.frame = NSRect(x: 4, y: 15, width: titleWidth, height: 18)
-        titleChevron?.frame = NSRect(x: titleButton.frame.maxX, y: 16, width: 16, height: 16)
-        subtitleLabel.frame = NSRect(x: 6, y: 0, width: max(titleWidth + 40, 200), height: 14)
-        container.frame = NSRect(x: 0, y: 0,
-                                 width: max(titleButton.frame.maxX + 20, subtitleLabel.frame.maxX),
-                                 height: 34)
-    }
-
-    @objc func renameDocument(_ sender: Any?) {
-        renamePopover?.close()
-        let vc = NSViewController()
-        let v = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 96))
-
-        let nameLabel = NSTextField(labelWithString: "Name:")
-        nameLabel.alignment = .right
-        nameLabel.frame = NSRect(x: 10, y: 58, width: 56, height: 18)
-        v.addSubview(nameLabel)
-        let field = NSTextField(frame: NSRect(x: 74, y: 54, width: 252, height: 24))
-        field.stringValue = pdfURL.deletingPathExtension().lastPathComponent
-        field.target = self
-        field.action = #selector(commitRename(_:))
-        v.addSubview(field)
-
-        let whereLabel = NSTextField(labelWithString: "Where:")
-        whereLabel.alignment = .right
-        whereLabel.textColor = .secondaryLabelColor
-        whereLabel.frame = NSRect(x: 10, y: 31, width: 56, height: 16)
-        v.addSubview(whereLabel)
-
-        // Live folder picker, Preview-style: choosing a different folder MOVES the file.
-        let popup = NSPopUpButton(frame: NSRect(x: 72, y: 26, width: 256, height: 26), pullsDown: false)
-        let fm = FileManager.default
-        let current = pendingRenameWhere ?? pdfURL.deletingLastPathComponent()
-        func folderItem(_ url: URL) -> NSMenuItem {
-            let m = NSMenuItem(title: url.lastPathComponent, action: nil, keyEquivalent: "")
-            let icon = NSWorkspace.shared.icon(forFile: url.path)
-            icon.size = NSSize(width: 16, height: 16)
-            m.image = icon
-            m.representedObject = url
-            return m
-        }
-        let menu = NSMenu()
-        menu.addItem(folderItem(current))
-        var commons: [URL] = []
-        for dir: FileManager.SearchPathDirectory in [.desktopDirectory, .documentDirectory, .downloadsDirectory] {
-            if let u = fm.urls(for: dir, in: .userDomainMask).first,
-               u.standardizedFileURL != current.standardizedFileURL { commons.append(u) }
-        }
-        if !commons.isEmpty {
-            menu.addItem(.separator())
-            commons.forEach { menu.addItem(folderItem($0)) }
-        }
-        menu.addItem(.separator())
-        menu.addItem({ let m = NSMenuItem(title: "Other…", action: nil, keyEquivalent: ""); return m }())
-        popup.menu = menu
-        popup.selectItem(at: 0)
-        popup.target = self
-        popup.action = #selector(wherePopupChanged(_:))
-        v.addSubview(popup)
-        renameWherePopup = popup
-        if let pending = pendingRenameName { field.stringValue = pending }
-        pendingRenameName = nil
-
-        let button = NSButton(title: "Rename", target: self, action: #selector(commitRename(_:)))
-        button.bezelStyle = .rounded
-        button.keyEquivalent = "\r"
-        button.frame = NSRect(x: 246, y: 4, width: 84, height: 26)
-        v.addSubview(button)
-
-        vc.view = v
-        renameField = field
-        let pop = NSPopover()
-        pop.contentViewController = vc
-        pop.behavior = .transient
-        if let chevron = titleChevron {
-            pop.show(relativeTo: chevron.bounds, of: chevron, preferredEdge: .maxY)
-        } else if let content = window?.contentView {
-            pop.show(relativeTo: NSRect(x: content.bounds.midX, y: content.bounds.maxY - 2, width: 1, height: 1),
-                     of: content, preferredEdge: .maxY)
-        }
-        renamePopover = pop
-        pop.contentViewController?.view.window?.makeFirstResponder(field)
-    }
-
-    private weak var renameField: NSTextField?
-    private weak var renameWherePopup: NSPopUpButton?
-    private var pendingRenameName: String?
-    private var pendingRenameWhere: URL?
-
-    // "Other…" needs an open panel, which would dismiss the transient popover — stash the
-    // typed name, run the panel, then reopen the popover with the chosen folder selected.
-    @objc private func wherePopupChanged(_ sender: NSPopUpButton) {
-        guard sender.selectedItem?.title == "Other…" else { return }
-        pendingRenameName = renameField?.stringValue
-        renamePopover?.close()
-        guard let window = window else { return }
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = false
-        panel.canChooseDirectories = true
-        panel.canCreateDirectories = true
-        panel.prompt = "Choose"
-        panel.directoryURL = pendingRenameWhere ?? pdfURL.deletingLastPathComponent()
-        panel.beginSheetModal(for: window) { [weak self] resp in
-            guard let self = self else { return }
-            if resp == .OK, let url = panel.url { self.pendingRenameWhere = url }
-            DispatchQueue.main.async { self.renameDocument(nil) }
-        }
-    }
-
-    @objc private func commitRename(_ sender: Any?) {
-        guard let field = renameField else { return }
-        let name = field.stringValue
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: "/", with: "-")
-            .replacingOccurrences(of: ":", with: "-")
-        guard !name.isEmpty else { return }
-        let folder = (renameWherePopup?.selectedItem?.representedObject as? URL)
-            ?? pdfURL.deletingLastPathComponent()
-        pendingRenameWhere = nil
-        let dest = folder.appendingPathComponent(name + ".pdf")
-        guard dest.standardizedFileURL != pdfURL.standardizedFileURL else { renamePopover?.close(); return }
-        guard !FileManager.default.fileExists(atPath: dest.path) else {
-            infoAlert("Name taken", "A file named “\(dest.lastPathComponent)” already exists in \(folder.lastPathComponent).")
-            return
-        }
-        do {
-            try FileManager.default.moveItem(at: pdfURL, to: dest)
-        } catch {
-            infoAlert("Couldn’t rename", error.localizedDescription)
-            return
-        }
-        renamePopover?.close()
-        pdfURL = dest
-        window?.title = dest.lastPathComponent
-        window?.representedURL = dest
-        layoutTitleAccessory()
-    }
     @objc func zoomIn(_ sender: Any?) { pdfView.zoomIn(sender) }
     @objc func zoomOut(_ sender: Any?) { pdfView.zoomOut(sender) }
     @objc func zoomToFit(_ sender: Any?) { pdfView.autoScales = true }
@@ -1026,10 +856,8 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         }
     }
 
-    private func markEdited() {
-        window?.isDocumentEdited = true
-        pageChanged()   // refresh the "— Edited" subtitle
-    }
+    // Dirty state and autosave flow from undo registrations on the document's undo manager.
+    private func markEdited() {}
 
     private func forceRefresh() {
         let page = pdfView.currentPage
@@ -1042,17 +870,15 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
 
     // MARK: - Save (flatten stamps + form values, keep the original file untouched)
 
-    @objc func saveDocument(_ sender: Any?) {
+    @objc func exportFlattened(_ sender: Any?) {
         guard let doc = pdfView.document, let window = window else { return }
         let panel = NSSavePanel()
-        panel.nameFieldStringValue = pdfURL.deletingPathExtension().lastPathComponent + "-edited.pdf"
+        panel.nameFieldStringValue = pdfURL.deletingPathExtension().lastPathComponent + "-flattened.pdf"
         panel.directoryURL = pdfURL.deletingLastPathComponent()
         if #available(macOS 11.0, *) { panel.allowedContentTypes = [.pdf] }
         panel.beginSheetModal(for: window) { [weak self] resp in
             guard resp == .OK, let out = panel.url, let self = self else { return }
             if self.exportCurrentState(doc, to: out) {
-                self.window?.isDocumentEdited = false
-                self.pageChanged()
                 NSWorkspace.shared.activateFileViewerSelecting([out])
                 NSSound(named: "Glass")?.play()
             } else {
