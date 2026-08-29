@@ -981,7 +981,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         clear.autoresizingMask = [.minXMargin]
         strip.addSubview(clear)
 
-        let apply = NSButton(title: "Apply Erase…", target: self, action: #selector(applyErase))
+        let apply = NSButton(title: "Apply Erase", target: self, action: #selector(applyErase))
         apply.bezelStyle = .rounded
         apply.controlSize = .small
         apply.keyEquivalent = "\r"
@@ -1024,8 +1024,10 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         forceRefresh()
     }
 
+    // Erase is an EDIT, not an export: affected pages are swapped in place (undoable via
+    // page identity), autosave persists into the file, Versions is the deep recovery.
     @objc private func applyErase() {
-        guard let doc = pdfView.document, let window = window else { return }
+        guard let doc = pdfView.document else { return }
         let marks = allEraseMarks()
         guard !marks.isEmpty else {
             infoAlert("Nothing marked", "Drag over the content you want removed first.")
@@ -1033,32 +1035,31 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         }
         var regions: [Int: [CGRect]] = [:]
         for (i, a) in marks { regions[i, default: []].append(a.bounds) }
-        let erasedPages = Array(regions.keys).sorted()
 
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = exportBaseName + "-erased.pdf"
-        panel.directoryURL = pdfURL.deletingLastPathComponent()
-        if #available(macOS 11.0, *) { panel.allowedContentTypes = [.pdf] }
-        panel.beginSheetModal(for: window) { [weak self] resp in
-            guard resp == .OK, let out = panel.url, let self = self else { return }
-            guard RedactionEngine.apply(doc, redactions: regions, style: .erase, to: out) else {
-                infoAlert("Erase failed", "Couldn't write the file. Nothing was saved.")
+        // Build every replacement page BEFORE touching the document, and verify each:
+        // a rasterized page must carry zero extractable text or nothing is swapped.
+        var swaps: [(Int, PDFPage, PDFPage)] = []
+        for (i, rects) in regions {
+            guard let old = doc.page(at: i),
+                  let new = RedactionEngine.destroyedPage(old, regions: rects, style: .erase),
+                  (new.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                infoAlert("Erase NOT applied", "Page \(i + 1) couldn't be verified as fully removed — the document was not modified.")
                 return
             }
-            let issues = RedactionEngine.verify(outputURL: out, redactedPages: erasedPages, forbiddenTerms: [])
-            if issues.isEmpty {
-                self.clearEraseMarks()
-                NSWorkspace.shared.activateFileViewerSelecting([out])
-                NSSound(named: "Glass")?.play()
-                let n = erasedPages.count
-                infoAlert("Erase verified",
-                          "\(n) page\(n == 1 ? "" : "s") re-rendered with the marked content removed — verified unrecoverable, metadata dropped. Saved as \(out.lastPathComponent).\n\nErased pages become images; run Make Searchable (OCR) if you need their text layer back.")
-            } else {
-                try? FileManager.default.removeItem(at: out)
-                infoAlert("Erase NOT verified — file deleted",
-                          "The output failed verification and was deleted:\n\n• " + issues.joined(separator: "\n• "))
-            }
+            swaps.append((i, old, new))
         }
+        for (_, a) in marks { a.page?.removeAnnotation(a) }   // marks are consumed
+        for (i, _, new) in swaps {
+            doc.removePage(at: i)
+            doc.insert(new, at: i)
+        }
+        registerPermanentCropUndo(swaps, restoreOld: true, name: "Erase")
+        updateEraseCount()
+        sidebar.reload()
+        forceRefresh()
+        setErase(on: false)   // done editing — hand the page back for logo drops etc.
+        NSSound(named: "Glass")?.play()
+        flashSubtitle("Erased — drop an image to fill the space, ⌘Z to undo")
     }
 
     // MARK: - Form mode (drag-and-drop fillable fields; Word-simple, AcroForm underneath)
@@ -1169,6 +1170,22 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     func fieldMoved(_ items: [(PDFAnnotation, CGRect)]) {
         registerFieldMoveUndo(items, name: "Move Field")
         forceRefresh()
+    }
+
+    // A dropped image lands centered on the drop point as a movable, resizable stamp —
+    // exactly the signature machinery, so drag/resize/remove/undo all come free.
+    func imageDropped(_ image: NSImage, at point: CGPoint, on page: PDFPage) {
+        let box = page.bounds(for: .mediaBox)
+        let width = min(180, box.width * 0.35, max(40, image.size.width))
+        let aspect = image.size.height <= 0 ? 1 : image.size.width / image.size.height
+        let height = width / max(0.01, aspect)
+        let origin = CGPoint(x: min(max(point.x - width / 2, box.minX), box.maxX - width),
+                             y: min(max(point.y - height / 2, box.minY), box.maxY - height))
+        let ann = ImageStampAnnotation(image: image, bounds: CGRect(origin: origin, size: CGSize(width: width, height: height)))
+        addStamp(ann, to: page)
+        didSelect(ann)
+        forceRefresh()
+        flashSubtitle("Image placed — drag to move, ⌘Z to undo")
     }
 
     private func registerFieldMoveUndo(_ items: [(PDFAnnotation, CGRect)], name: String) {

@@ -53,6 +53,27 @@ enum RedactionEngine {
         return true
     }
 
+    /// A pixel-backed replacement for `page` with the regions destroyed — the in-place
+    /// Erase path. Same rasterize discipline as apply(); the caller swaps it into the live
+    /// document (undoable via page identity) and autosave persists it.
+    static func destroyedPage(_ page: PDFPage, regions: [CGRect], style: Style) -> PDFPage? {
+        guard let img = rasterized(page: page, blackout: regions, fill: style.fill) else { return nil }
+        var box = page.bounds(for: .mediaBox)
+        box.origin = .zero
+        let data = NSMutableData()
+        guard let consumer = CGDataConsumer(data: data as CFMutableData),
+              let ctx = CGContext(consumer: consumer, mediaBox: &box, nil) else { return nil }
+        let info = [kCGPDFContextMediaBox as String: Data(bytes: &box, count: MemoryLayout<CGRect>.size)] as CFDictionary
+        ctx.beginPDFPage(info)
+        ctx.saveGState()
+        ctx.interpolationQuality = .high
+        ctx.draw(img, in: box)
+        ctx.restoreGState()
+        ctx.endPDFPage()
+        ctx.closePDF()
+        return PDFDocument(data: data as Data)?.page(at: 0)
+    }
+
     /// Adversarial check of an APPLIED file. Returns human-readable issues; empty == verified.
     static func verify(outputURL: URL, redactedPages: [Int], forbiddenTerms: [String]) -> [String] {
         guard let doc = PDFDocument(url: outputURL) else { return ["Couldn’t reopen the output file."] }

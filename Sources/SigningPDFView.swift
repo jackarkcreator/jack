@@ -9,6 +9,7 @@ protocol StampSelectionDelegate: AnyObject {
     func noteClicked(_ ann: PDFAnnotation)
     func formFieldPlaced(kind: FormFieldKind, rect: CGRect, page: PDFPage)
     func fieldMoved(_ items: [(PDFAnnotation, CGRect)])
+    func imageDropped(_ image: NSImage, at point: CGPoint, on page: PDFPage)
 }
 
 final class SigningPDFView: PDFView {
@@ -283,5 +284,42 @@ final class SigningPDFView: PDFView {
     private func clearSnapGuides() {
         snapGuideV?.removeFromSuperview(); snapGuideV = nil
         snapGuideH?.removeFromSuperview(); snapGuideH = nil
+    }
+
+    // MARK: Image drop — drag a logo (or any image file) straight onto the page
+
+    private static let imageDropTypes: [NSPasteboard.PasteboardType] = [.fileURL, .tiff, .png]
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        registerForDraggedTypes(Self.imageDropTypes)
+    }
+
+    private func droppedImage(from pb: NSPasteboard) -> NSImage? {
+        if let urls = pb.readObjects(forClasses: [NSURL.self],
+                                     options: [.urlReadingContentsConformToTypes: ["public.image"]]) as? [URL],
+           let url = urls.first, let img = NSImage(contentsOf: url) {
+            return img
+        }
+        if let img = NSImage(pasteboard: pb), img.size.width > 0 { return img }
+        return nil
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        droppedImage(from: sender.draggingPasteboard) != nil ? .copy : super.draggingEntered(sender)
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        droppedImage(from: sender.draggingPasteboard) != nil ? .copy : super.draggingUpdated(sender)
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        guard let img = droppedImage(from: sender.draggingPasteboard) else {
+            return super.performDragOperation(sender)
+        }
+        let viewPoint = convert(sender.draggingLocation, from: nil)
+        guard let page = page(for: viewPoint, nearest: true) else { return false }
+        stampDelegate?.imageDropped(img, at: convert(viewPoint, to: page), on: page)
+        return true
     }
 }
