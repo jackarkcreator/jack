@@ -68,13 +68,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     static var organizers: [PageOrganizerWindowController] = []
     static var documents: [DocumentWindowController] = []
 
-    // Menu bar accessory by default; a real Dock/⌘-Tab app while document windows are open.
+    // Menu bar accessory until the first document opens — then a real Dock/⌘-Tab app for the
+    // rest of the session (Preview-like; vanishing from ⌘-Tab on close read as broken).
     static func updateActivationPolicy() {
         let openDocs = documents.count + organizers.count
-        let want: NSApplication.ActivationPolicy = openDocs > 0 ? .regular : .accessory
-        if NSApp.activationPolicy() != want {
-            NSApp.setActivationPolicy(want)
-            if want == .regular { NSApp.activate(ignoringOtherApps: true) }
+        if openDocs > 0 && NSApp.activationPolicy() != .regular {
+            NSApp.setActivationPolicy(.regular)
+            NSApp.activate(ignoringOtherApps: true)
         }
     }
 
@@ -101,6 +101,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setupStatusItem()
         setupPopover()
         configureLoginOnFirstRun()
+        enforceDefaultIfWanted()
         MainMenu.install(openAction: #selector(openDocumentAction),
                          defaultAction: #selector(makeDefaultAction),
                          updateAction: #selector(checkUpdatesAction),
@@ -250,14 +251,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func makeDefaultAction() { makeDefaultPDFApp() }
 
+    // Set once, stays forever: remember the choice and silently re-claim on every launch,
+    // so reinstalls/updates can never quietly hand PDFs back to Preview.
+    static let wantsDefaultKey = "jack.wantsDefault"
+
+    static func isDefaultPDFApp() -> Bool {
+        guard let h = LSCopyDefaultRoleHandlerForContentType("com.adobe.pdf" as CFString, .all)?
+            .takeRetainedValue() as String? else { return false }
+        return h.caseInsensitiveCompare(Bundle.main.bundleIdentifier ?? "") == .orderedSame
+    }
+
+    @discardableResult
+    static func claimDefaultSilently() -> Bool {
+        let bid = (Bundle.main.bundleIdentifier ?? "net.thinkopen.jack") as CFString
+        LSSetDefaultRoleHandlerForContentType("com.adobe.pdf" as CFString, .all, bid)
+        return isDefaultPDFApp()
+    }
+
+    func enforceDefaultIfWanted() {
+        guard UserDefaults.standard.bool(forKey: AppDelegate.wantsDefaultKey),
+              !AppDelegate.isDefaultPDFApp() else { return }
+        AppDelegate.claimDefaultSilently()
+    }
+
     private func makeDefaultPDFApp() {
+        UserDefaults.standard.set(true, forKey: AppDelegate.wantsDefaultKey)
+        if AppDelegate.claimDefaultSilently() {
+            infoAlert("Jack is your PDF app", "Double-clicking any PDF now opens it in Jack — and it stays that way, even across updates.")
+            return
+        }
+        // Silent claim refused (hardened LS) — fall back to the system-mediated request.
         if #available(macOS 12.0, *) {
             NSWorkspace.shared.setDefaultApplication(at: Bundle.main.bundleURL, toOpen: .pdf) { error in
                 DispatchQueue.main.async {
                     if let error = error {
                         infoAlert("Couldn’t set default", error.localizedDescription)
                     } else {
-                        infoAlert("Jack is your PDF app", "Double-clicking any PDF now opens it in Jack.")
+                        infoAlert("Jack is your PDF app", "Double-clicking any PDF now opens it in Jack — and it stays that way, even across updates.")
                     }
                 }
             }
