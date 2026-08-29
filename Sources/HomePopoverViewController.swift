@@ -2,9 +2,11 @@
 import AppKit
 
 final class HomePopoverViewController: NSViewController {
+    var onOpen: (() -> Void)?
     var onPhotos: (() -> Void)?
     var onSign: (() -> Void)?
     var onOrganize: (() -> Void)?
+    var onMakeDefault: (() -> Void)?
     var onQuit: (() -> Void)?
     var onToggleLogin: ((Bool) -> Void)?
     var loginEnabled = false { didSet { loginCheck?.state = loginEnabled ? .on : .off } }
@@ -20,36 +22,46 @@ final class HomePopoverViewController: NSViewController {
     }
 
     override func loadView() {
-        let v = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 392))
+        let v = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 480))
 
         let title = NSTextField(labelWithString: "Jack")
         title.font = .systemFont(ofSize: 20, weight: .semibold)
-        title.frame = NSRect(x: 20, y: 352, width: 260, height: 26)
+        title.frame = NSRect(x: 20, y: 440, width: 260, height: 26)
         v.addSubview(title)
 
         let sub = NSTextField(labelWithString: "Lightweight PDF tools")
         sub.textColor = .secondaryLabelColor
         sub.font = .systemFont(ofSize: 12)
-        sub.frame = NSRect(x: 20, y: 332, width: 260, height: 16)
+        sub.frame = NSRect(x: 20, y: 420, width: 260, height: 16)
         v.addSubview(sub)
 
         let cards: [(String, String, Selector)] = [
+            ("doc.text.magnifyingglass", "Open a PDF", #selector(openPDF)),
             ("photo.on.rectangle", "Combine Photos → PDF", #selector(photos)),
             ("signature", "Fill & Sign a PDF", #selector(sign)),
             ("doc.on.doc", "Organize / Merge Pages", #selector(organize))
         ]
-        var y = 262
+        var y = 350
         for (symbol, label, action) in cards { v.addSubview(card(symbol, label, action, y)); y -= 60 }
 
-        let sep = NSBox(frame: NSRect(x: 16, y: 96, width: 268, height: 1))
+        let sep = NSBox(frame: NSRect(x: 16, y: 124, width: 268, height: 1))
         sep.boxType = .separator
         v.addSubview(sep)
 
         let chk = NSButton(checkboxWithTitle: "Open Jack at login", target: self, action: #selector(toggleLogin))
-        chk.frame = NSRect(x: 20, y: 64, width: 260, height: 20)
+        chk.frame = NSRect(x: 20, y: 96, width: 260, height: 20)
         chk.state = loginEnabled ? .on : .off
         v.addSubview(chk)
         loginCheck = chk
+
+        let def = NSButton(checkboxWithTitle: "", target: self, action: #selector(makeDefault))
+        def.setButtonType(.momentaryPushIn)
+        def.bezelStyle = .inline
+        def.title = "★ Make Jack my default PDF app"
+        def.frame = NSRect(x: 17, y: 66, width: 260, height: 22)
+        def.alignment = .left
+        def.contentTintColor = .controlAccentColor
+        v.addSubview(def)
 
         let tip = NSTextField(wrappingLabelWithString: "Tip: drop photos or PDFs onto the menu bar icon, or right-click a file → Open With → Jack.")
         tip.textColor = .tertiaryLabelColor
@@ -88,6 +100,8 @@ final class HomePopoverViewController: NSViewController {
         return b
     }
 
+    @objc private func openPDF() { onOpen?() }
+    @objc private func makeDefault() { onMakeDefault?() }
     @objc private func photos() { onPhotos?() }
     @objc private func sign() { onSign?() }
     @objc private func organize() { onOrganize?() }

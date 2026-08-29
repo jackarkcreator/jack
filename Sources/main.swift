@@ -66,6 +66,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var scheduled = false
     static var signers: [SigningWindowController] = []
     static var organizers: [PageOrganizerWindowController] = []
+    static var readers: [ReaderWindowController] = []
+
+    // Menu bar accessory by default; a real Dock/⌘-Tab app while document windows are open.
+    static func updateActivationPolicy() {
+        let openDocs = signers.count + organizers.count + readers.count
+        let want: NSApplication.ActivationPolicy = openDocs > 0 ? .regular : .accessory
+        if NSApp.activationPolicy() != want {
+            NSApp.setActivationPolicy(want)
+            if want == .regular { NSApp.activate(ignoringOtherApps: true) }
+        }
+    }
 
     private var statusItem: NSStatusItem!
     private let popover = NSPopover()
@@ -88,6 +99,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setupStatusItem()
         setupPopover()
         configureLoginOnFirstRun()
+        MainMenu.install(openAction: #selector(openDocumentAction),
+                         defaultAction: #selector(makeDefaultAction),
+                         updateAction: #selector(checkUpdatesAction),
+                         target: self)
         checkForUpdate()
         // Show the launcher on a plain launch so the menu bar item is discoverable.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
@@ -103,7 +118,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let pdfs = urls.filter(isPDFURL)
         let images = urls.filter(isImageURL)
         if pdfs.count == 1 && images.isEmpty {
-            openSigning(pdfs[0])
+            openReader(pdfs[0])
         } else if !pdfs.isEmpty {
             openOrganizer(urls)
         } else if !images.isEmpty {
@@ -130,6 +145,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func setupPopover() {
+        popoverVC.onOpen = { [weak self] in self?.popover.performClose(nil); self?.pickOpen() }
+        popoverVC.onMakeDefault = { [weak self] in self?.popover.performClose(nil); self?.makeDefaultPDFApp() }
         popoverVC.onPhotos = { [weak self] in self?.popover.performClose(nil); self?.pickPhotos() }
         popoverVC.onSign = { [weak self] in self?.popover.performClose(nil); self?.pickSign() }
         popoverVC.onOrganize = { [weak self] in self?.popover.performClose(nil); self?.pickOrganize() }
@@ -204,6 +221,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             [weak self] in self?.makeImagePDF($0)
         }
     }
+    private func pickOpen() {
+        runPicker(.pdf, multi: false, message: "Choose a PDF to open", prompt: "Open") {
+            [weak self] in self?.route($0)
+        }
+    }
     private func pickSign() {
         runPicker(.pdf, multi: false, message: "Choose a PDF to fill or sign", prompt: "Open") {
             [weak self] in if let u = $0.first { self?.openSigning(u) }
@@ -215,7 +237,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    // MARK: - Menu actions
+
+    @objc private func openDocumentAction() {
+        runPicker(.both, multi: true, message: "Choose PDFs or photos to open", prompt: "Open") {
+            [weak self] in self?.route($0)
+        }
+    }
+
+    @objc private func makeDefaultAction() { makeDefaultPDFApp() }
+
+    private func makeDefaultPDFApp() {
+        if #available(macOS 12.0, *) {
+            NSWorkspace.shared.setDefaultApplication(at: Bundle.main.bundleURL, toOpen: .pdf) { error in
+                DispatchQueue.main.async {
+                    if let error = error {
+                        infoAlert("Couldn’t set default", error.localizedDescription)
+                    } else {
+                        infoAlert("Jack is your PDF app", "Double-clicking any PDF now opens it in Jack.")
+                    }
+                }
+            }
+        } else {
+            infoAlert("Set Jack as default", "Right-click any PDF → Get Info → Open With → Jack → Change All…")
+        }
+    }
+
+    @objc private func checkUpdatesAction() {
+        UpdateChecker.check { info in
+            if let info = info {
+                let a = NSAlert()
+                a.messageText = "Update available"
+                a.informativeText = "Jack \(info.version) is available (you have \(UpdateChecker.currentVersion()))."
+                a.addButton(withTitle: "Download")
+                a.addButton(withTitle: "Later")
+                if a.runModal() == .alertFirstButtonReturn { NSWorkspace.shared.open(info.url) }
+            } else {
+                infoAlert("You’re up to date", "Jack \(UpdateChecker.currentVersion()) is the latest version.")
+            }
+        }
+    }
+
     // MARK: - Open flows
+
+    private func openReader(_ url: URL) {
+        guard let wc = ReaderWindowController(pdfURL: url) else {
+            infoAlert("Couldn’t open PDF", "“\(url.lastPathComponent)” couldn’t be read as a PDF.")
+            return
+        }
+        wc.onFillSign = { [weak self] u in self?.openSigning(u) }
+        wc.onOrganize = { [weak self] urls in self?.openOrganizer(urls) }
+        AppDelegate.readers.append(wc)
+        AppDelegate.updateActivationPolicy()
+        wc.showWindow(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
 
     private func openSigning(_ url: URL) {
         guard let wc = SigningWindowController(pdfURL: url) else {
@@ -224,6 +300,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         wc.onCancel = { [weak self, weak wc] in wc?.close(); self?.showPopover() }
         AppDelegate.signers.append(wc)
+        AppDelegate.updateActivationPolicy()
         wc.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
@@ -237,6 +314,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let wc = PageOrganizerWindowController(pages: pages)
         wc.onCancel = { [weak self, weak wc] in wc?.close(); self?.showPopover() }
         AppDelegate.organizers.append(wc)
+        AppDelegate.updateActivationPolicy()
         wc.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
     }

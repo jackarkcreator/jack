@@ -31,7 +31,10 @@ final class SigningWindowController: NSWindowController, NSWindowDelegate {
     @objc private func backHome() { onCancel?() }
 
     func windowWillClose(_ notification: Notification) {
-        DispatchQueue.main.async { AppDelegate.signers.removeAll { $0 === self } }
+        DispatchQueue.main.async {
+            AppDelegate.signers.removeAll { $0 === self }
+            AppDelegate.updateActivationPolicy()
+        }
     }
 
     private func buildUI(doc: PDFDocument) {

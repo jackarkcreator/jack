@@ -34,7 +34,10 @@ final class PageOrganizerWindowController: NSWindowController, NSCollectionViewD
     @objc private func backHome() { onCancel?() }
 
     func windowWillClose(_ notification: Notification) {
-        DispatchQueue.main.async { AppDelegate.organizers.removeAll { $0 === self } }
+        DispatchQueue.main.async {
+            AppDelegate.organizers.removeAll { $0 === self }
+            AppDelegate.updateActivationPolicy()
+        }
     }
     required init?(coder: NSCoder) { fatalError() }
 
