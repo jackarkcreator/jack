@@ -166,17 +166,10 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, NSSear
         }
     }
 
-    @objc func fillAndSign(_ sender: Any?) {
-        let url = pdfURL
-        close()
-        onFillSign?(url)
-    }
+    // The reader stays open underneath — closing the tool window lands back on the PDF.
+    @objc func fillAndSign(_ sender: Any?) { onFillSign?(pdfURL) }
 
-    @objc func organizePages(_ sender: Any?) {
-        let url = pdfURL
-        close()
-        onOrganize?([url])
-    }
+    @objc func organizePages(_ sender: Any?) { onOrganize?([pdfURL]) }
 
     // MARK: - Lock for Sharing (password-protect a copy)
 

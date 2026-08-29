@@ -10,6 +10,10 @@ final class SigningWindowController: NSWindowController, NSWindowDelegate {
 
     private let sizeSlider = NSSlider()
     private let removeButton = NSButton()
+    private var backButton: NSButton?
+
+    // When opened from a reader window, going back means "reveal the PDF", not "show the launcher".
+    func setReturnsToPDF() { backButton?.title = "← Back" }
 
     private var sheet: SignatureSheetController?
 
@@ -54,7 +58,7 @@ final class SigningWindowController: NSWindowController, NSWindowDelegate {
             bar.addSubview(b)
             return b
         }
-        _ = tb("← Home", #selector(backHome), 12, 78)
+        backButton = tb("← Home", #selector(backHome), 12, 78)
         _ = tb("Add Signature", #selector(addSignature), 98, 120)
         _ = tb("Add Text", #selector(self.addText), 224, 86)
         _ = tb("✓", #selector(addCheck), 316, 42)

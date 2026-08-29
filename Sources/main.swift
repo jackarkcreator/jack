@@ -278,34 +278,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             infoAlert("Couldn’t open PDF", "“\(url.lastPathComponent)” couldn’t be read as a PDF.")
             return
         }
-        wc.onFillSign = { [weak self] u in self?.openSigning(u) }
-        wc.onOrganize = { [weak self] urls in self?.openOrganizer(urls) }
+        wc.onFillSign = { [weak self] u in self?.openSigning(u, fromReader: true) }
+        wc.onOrganize = { [weak self] urls in self?.openOrganizer(urls, fromReader: true) }
         AppDelegate.readers.append(wc)
         AppDelegate.updateActivationPolicy()
         wc.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    private func openSigning(_ url: URL) {
+    private func openSigning(_ url: URL, fromReader: Bool = false) {
         guard let wc = SigningWindowController(pdfURL: url) else {
             infoAlert("Couldn’t open PDF", "“\(url.lastPathComponent)” couldn’t be read as a PDF.")
             return
         }
-        wc.onCancel = { [weak self, weak wc] in wc?.close(); self?.showPopover() }
+        if fromReader {
+            // The reader window is still open underneath — back just reveals the PDF again.
+            wc.setReturnsToPDF()
+            wc.onCancel = { [weak self, weak wc] in
+                wc?.close()
+                if AppDelegate.readers.isEmpty { self?.showPopover() }
+            }
+        } else {
+            wc.onCancel = { [weak self, weak wc] in wc?.close(); self?.showPopover() }
+        }
         AppDelegate.signers.append(wc)
         AppDelegate.updateActivationPolicy()
         wc.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    private func openOrganizer(_ urls: [URL]) {
+    private func openOrganizer(_ urls: [URL], fromReader: Bool = false) {
         let pages = loadPages(from: urls)
         guard !pages.isEmpty else {
             infoAlert("Nothing to organize", "None of the selected files could be read as PDFs or images.")
             return
         }
         let wc = PageOrganizerWindowController(pages: pages)
-        wc.onCancel = { [weak self, weak wc] in wc?.close(); self?.showPopover() }
+        if fromReader {
+            // The reader window is still open underneath — back just reveals the PDF again.
+            wc.setReturnsToPDF()
+            wc.onCancel = { [weak self, weak wc] in
+                wc?.close()
+                if AppDelegate.readers.isEmpty { self?.showPopover() }
+            }
+        } else {
+            wc.onCancel = { [weak self, weak wc] in wc?.close(); self?.showPopover() }
+        }
         AppDelegate.organizers.append(wc)
         AppDelegate.updateActivationPolicy()
         wc.showWindow(nil)
