@@ -24,6 +24,11 @@ enum MainMenu {
         let file = NSMenu(title: "File")
         file.addItem(item("New PDF", newAction, "n", target: target))
         file.addItem(item("Open…", openAction, "o", target: target))
+        let recentItem = NSMenuItem(title: "Open Recent", action: nil, keyEquivalent: "")
+        let recentMenu = NSMenu(title: "Open Recent")
+        recentMenu.delegate = RecentMenuDelegate.shared
+        recentItem.submenu = recentMenu
+        file.addItem(recentItem)
         file.addItem(.separator())
         file.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         file.addItem(withTitle: "Save", action: Selector(("saveDocument:")), keyEquivalent: "s")

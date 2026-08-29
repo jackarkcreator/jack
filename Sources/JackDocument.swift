@@ -18,6 +18,11 @@ final class JackDocument: NSDocument {
     override class var autosavesInPlace: Bool { true }
     override class func canConcurrentlyReadDocuments(ofType typeName: String) -> Bool { true }
 
+    // Keeps Open Recent fresh across first saves, renames, and moves — not just opens.
+    override var fileURL: URL? {
+        didSet { if let u = fileURL { RecentDocuments.record(u) } }
+    }
+
     // File → New PDF (⌘N): an untitled document is one blank US-Letter page, ready for
     // form fields, markup, and more pages via the sidebar. Saves through the normal flow.
     convenience init(type typeName: String) throws {
@@ -34,6 +39,7 @@ final class JackDocument: NSDocument {
                           userInfo: [NSLocalizedDescriptionKey: "“\(url.lastPathComponent)” couldn’t be read as a PDF."])
         }
         pdf = doc
+        RecentDocuments.record(url)
         // Restoration can build window controllers before this read lands — attach late.
         DispatchQueue.main.async { [weak self] in
             self?.windowControllers.compactMap { $0 as? DocumentWindowController }
