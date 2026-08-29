@@ -107,10 +107,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                          updateAction: #selector(checkUpdatesAction),
                          target: self)
         checkForUpdate()
-        // Show the launcher on a plain launch so the menu bar item is discoverable.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            guard let self = self, !self.didHandleOpen else { return }
-            self.showPopover()
+        // Show the launcher ONCE on the very first launch (discoverability) — never again.
+        // After that, the menu bar icon is the way in.
+        let shownKey = "jack.launcherShown"
+        if !UserDefaults.standard.bool(forKey: shownKey) {
+            UserDefaults.standard.set(true, forKey: shownKey)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                guard let self = self, !self.didHandleOpen else { return }
+                self.showPopover()
+            }
         }
     }
 
@@ -167,6 +172,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func showPopover() {
         guard let button = statusItem.button else { return }
         popoverVC.loginEnabled = isLoginEnabled()
+        popoverVC.defaultEnabled = AppDelegate.isDefaultPDFApp()
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         NSApp.activate(ignoringOtherApps: true)
         checkForUpdate()
@@ -277,6 +283,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func makeDefaultPDFApp() {
         UserDefaults.standard.set(true, forKey: AppDelegate.wantsDefaultKey)
         if AppDelegate.claimDefaultSilently() {
+            popoverVC.defaultEnabled = true
             infoAlert("Jack is your PDF app", "Double-clicking any PDF now opens it in Jack — and it stays that way, even across updates.")
             return
         }

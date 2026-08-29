@@ -11,6 +11,13 @@ final class HomePopoverViewController: NSViewController {
     var onUpdate: (() -> Void)?
     var onToggleLogin: ((Bool) -> Void)?
     var loginEnabled = false { didSet { loginCheck?.state = loginEnabled ? .on : .off } }
+    var defaultEnabled = false {
+        didSet {
+            defaultCheck?.state = defaultEnabled ? .on : .off
+            defaultCheck?.title = defaultEnabled ? "Jack is your default PDF app" : "★ Make Jack my default PDF app"
+        }
+    }
+    private var defaultCheck: NSButton?
 
     private var loginCheck: NSButton?
     private let updateButton = NSButton(title: "↓ Update", target: nil, action: nil)
@@ -55,14 +62,12 @@ final class HomePopoverViewController: NSViewController {
         v.addSubview(chk)
         loginCheck = chk
 
-        let def = NSButton(checkboxWithTitle: "", target: self, action: #selector(makeDefault))
-        def.setButtonType(.momentaryPushIn)
-        def.bezelStyle = .inline
-        def.title = "★ Make Jack my default PDF app"
-        def.frame = NSRect(x: 17, y: 66, width: 260, height: 22)
-        def.alignment = .left
-        def.contentTintColor = .controlAccentColor
+        let def = NSButton(checkboxWithTitle: "★ Make Jack my default PDF app", target: self, action: #selector(makeDefault))
+        def.frame = NSRect(x: 17, y: 66, width: 264, height: 22)
+        def.state = defaultEnabled ? .on : .off
+        if defaultEnabled { def.title = "Jack is your default PDF app" }
         v.addSubview(def)
+        defaultCheck = def
 
         let tip = NSTextField(wrappingLabelWithString: "Tip: drop photos or PDFs onto the menu bar icon, or right-click a file → Open With → Jack.")
         tip.textColor = .tertiaryLabelColor
@@ -102,7 +107,11 @@ final class HomePopoverViewController: NSViewController {
     }
 
     @objc private func openPDF() { onOpen?() }
-    @objc private func makeDefault() { onMakeDefault?() }
+    @objc private func makeDefault() {
+        // Already default: nothing to do — keep the box checked.
+        if defaultEnabled { defaultCheck?.state = .on; return }
+        onMakeDefault?()
+    }
     @objc private func photos() { onPhotos?() }
     @objc private func sign() { onSign?() }
     @objc private func organize() { onOrganize?() }
