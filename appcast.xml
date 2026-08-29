@@ -4,12 +4,12 @@
         <title>Jack</title>
         <item>
             <title>1.4.0</title>
-            <pubDate>Fri, 28 Aug 2026 19:44:32 -0700</pubDate>
+            <pubDate>Fri, 28 Aug 2026 20:29:26 -0700</pubDate>
             <link>https://github.com/jackarkcreator/jack</link>
             <sparkle:version>7</sparkle:version>
             <sparkle:shortVersionString>1.4.0</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>11.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://github.com/jackarkcreator/jack/releases/download/v1.4.0/Jack-mac-universal-v1.4.0.zip" length="2280928" type="application/octet-stream" sparkle:edSignature="UZ0BoYTTIYH4suN7+SvhW01n6XsyE/g5UDzbUKEhsCR8OOUhXiOoXqLe1O3MCROfv7Ybn+LVjZdg0SyMZSQWDw=="/>
+            <enclosure url="https://github.com/jackarkcreator/jack/releases/download/v1.4.0/Jack-mac-universal-v1.4.0.zip" length="2292341" type="application/octet-stream" sparkle:edSignature="vzOSyPCaH9pRPwQWoZ7UhN/Z5Bn/X0xKJk7wye5gFVyYJ9tnpPU37MXbRWzwNFl8q8xDiu3ZZ0YD17Ukp9NiAA=="/>
         </item>
     </channel>
 </rss>
