@@ -8,7 +8,7 @@ protocol StampSelectionDelegate: AnyObject {
     func redactionAdded(_ ann: RedactionAnnotation)
     func noteClicked(_ ann: PDFAnnotation)
     func formFieldPlaced(kind: FormFieldKind, rect: CGRect, page: PDFPage)
-    func widgetMoved(_ ann: PDFAnnotation, from oldBounds: CGRect)
+    func fieldMoved(_ items: [(PDFAnnotation, CGRect)])
 }
 
 final class SigningPDFView: PDFView {
@@ -41,8 +41,13 @@ final class SigningPDFView: PDFView {
         return menu
     }
     private var dragging: ImageStampAnnotation?
-    private var draggingWidget: PDFAnnotation?
+    // Form drag: the whole field moves as a unit — widgets sharing the name + their labels.
+    private var dragSet: [(PDFAnnotation, CGRect)] = []
+    private var dragPrimary: PDFAnnotation?
+    private var snapGuideV: NSView?
+    private var snapGuideH: NSView?
     private var dragPage: PDFPage?
+    private var dragStartMouse: CGPoint = .zero
     private var last: CGPoint = .zero
     private var dragStartBounds: CGRect = .zero
     // Redact rubber band: a plain view-space overlay (PDFView's page cache can't be trusted
@@ -58,9 +63,28 @@ final class SigningPDFView: PDFView {
         let p = convert(viewPoint, to: page)
         if formAuthoringOn {
             // Drag an existing field; with a kind armed, click or drag places a new one.
-            if let widget = page.annotations.last(where: { $0.type == "Widget" && $0.bounds.insetBy(dx: -2, dy: -2).contains(p) }) {
-                draggingWidget = widget; dragPage = page; last = p
-                dragStartBounds = widget.bounds
+            // A hit on a widget OR its label picks up the whole field (widgets + captions).
+            let hit = page.annotations.last(where: { $0.type == "Widget" && $0.bounds.insetBy(dx: -2, dy: -2).contains(p) })
+                ?? page.annotations.last(where: { FormFieldEngine.isLabel($0) && $0.bounds.contains(p) })
+            if let hit {
+                let fieldName: String?
+                if hit.type == "Widget" {
+                    fieldName = hit.fieldName
+                } else if let nm = hit.userName {
+                    let base = String(nm.dropFirst("jack-label:".count))
+                    fieldName = base.components(separatedBy: ":opt:").first
+                } else { fieldName = nil }
+                var set: [PDFAnnotation] = []
+                if let fieldName {
+                    set = page.annotations.filter {
+                        ($0.type == "Widget" && $0.fieldName == fieldName) || FormFieldEngine.isLabel($0, for: fieldName)
+                    }
+                }
+                if set.isEmpty { set = [hit] }
+                dragSet = set.map { ($0, $0.bounds) }
+                dragPrimary = set.first { $0.type == "Widget" } ?? hit
+                dragPage = page; last = p; dragStartMouse = p
+                dragStartBounds = dragPrimary?.bounds ?? hit.bounds
                 return
             }
             if let kind = armedFieldKind {
@@ -115,13 +139,28 @@ final class SigningPDFView: PDFView {
                                 width: abs(p.x - markOriginView.x), height: abs(p.y - markOriginView.y))
             return
         }
-        if let widget = draggingWidget, let page = dragPage {
+        if !dragSet.isEmpty, let page = dragPage {
             let p = convert(convert(event.locationInWindow, from: nil), to: page)
-            var b = widget.bounds
-            b.origin.x += p.x - last.x
-            b.origin.y += p.y - last.y
-            widget.bounds = b
-            last = p
+            // Deltas from the DRAG START (never incremental — snapping would drift).
+            var dx = p.x - dragStartMouse.x
+            var dy = p.y - dragStartMouse.y
+            // Smart snapping: the primary widget's edges pull toward other fields' edges.
+            let proposed = dragStartBounds.offsetBy(dx: dx, dy: dy)
+            let dragged = Set(dragSet.map { ObjectIdentifier($0.0) })
+            let others = page.annotations.filter { $0.type == "Widget" && !dragged.contains(ObjectIdentifier($0)) }
+            let tol: CGFloat = 6
+            var snapX: CGFloat?
+            var snapY: CGFloat?
+            for o in others {
+                for (mine, theirs) in [(proposed.minX, o.bounds.minX), (proposed.midX, o.bounds.midX)] {
+                    if snapX == nil, abs(mine - theirs) < tol { dx += theirs - mine; snapX = theirs }
+                }
+                for (mine, theirs) in [(proposed.maxY, o.bounds.maxY), (proposed.minY, o.bounds.minY)] {
+                    if snapY == nil, abs(mine - theirs) < tol { dy += theirs - mine; snapY = theirs }
+                }
+            }
+            for (a, start) in dragSet { a.bounds = start.offsetBy(dx: dx, dy: dy) }
+            updateSnapGuides(x: snapX, y: snapY, on: page)
             needsDisplay = true
             return
         }
@@ -166,9 +205,11 @@ final class SigningPDFView: PDFView {
             }
             return
         }
-        if let widget = draggingWidget {
-            if widget.bounds != dragStartBounds { stampDelegate?.widgetMoved(widget, from: dragStartBounds) }
-            draggingWidget = nil; dragPage = nil
+        if !dragSet.isEmpty {
+            clearSnapGuides()
+            let moved = dragSet.filter { $0.0.bounds != $0.1 }
+            if !moved.isEmpty { stampDelegate?.fieldMoved(moved) }
+            dragSet = []; dragPrimary = nil; dragPage = nil
             return
         }
         if let ann = dragging {
@@ -177,5 +218,34 @@ final class SigningPDFView: PDFView {
         } else {
             super.mouseUp(with: event)
         }
+    }
+
+    // MARK: Snap guides — plain view-space overlays (zero PDFKit, per the render law)
+
+    private func updateSnapGuides(x: CGFloat?, y: CGFloat?, on page: PDFPage) {
+        func line(_ frame: CGRect, _ existing: inout NSView?) {
+            let v = existing ?? {
+                let v = NSView()
+                v.wantsLayer = true
+                v.layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.7).cgColor
+                addSubview(v)
+                existing = v
+                return v
+            }()
+            v.frame = frame
+        }
+        if let x {
+            let vp = convert(CGPoint(x: x, y: 0), from: page)
+            line(CGRect(x: vp.x - 0.5, y: 0, width: 1, height: bounds.height), &snapGuideV)
+        } else { snapGuideV?.removeFromSuperview(); snapGuideV = nil }
+        if let y {
+            let vp = convert(CGPoint(x: 0, y: y), from: page)
+            line(CGRect(x: 0, y: vp.y - 0.5, width: bounds.width, height: 1), &snapGuideH)
+        } else { snapGuideH?.removeFromSuperview(); snapGuideH = nil }
+    }
+
+    private func clearSnapGuides() {
+        snapGuideV?.removeFromSuperview(); snapGuideV = nil
+        snapGuideH?.removeFromSuperview(); snapGuideH = nil
     }
 }

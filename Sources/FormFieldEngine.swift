@@ -96,6 +96,56 @@ enum FormFieldEngine {
         }
     }
 
+    // MARK: Labels — visible captions that travel with the field
+
+    /// Link prefix tying a caption to its field, stored in userName (/T, the annotation
+    /// author slot) — the ONLY custom-ish key PDFKit's writer actually serializes
+    /// (setValue(forAnnotationKey: .name) is silently dropped on write; probe-verified).
+    static func labelName(for fieldName: String) -> String { "jack-label:\(fieldName)" }
+
+    static func isLabel(_ a: PDFAnnotation, for fieldName: String? = nil) -> Bool {
+        guard let nm = a.userName, nm.hasPrefix("jack-label:") else { return false }
+        guard let fieldName else { return true }
+        return nm == labelName(for: fieldName) || nm.hasPrefix(labelName(for: fieldName) + ":")
+    }
+
+    private static func label(_ text: String, at origin: CGPoint, size: CGFloat, weight: NSFont.Weight = .regular,
+                              width: CGFloat = 220, nm: String) -> PDFAnnotation {
+        let a = PDFAnnotation(bounds: CGRect(x: origin.x, y: origin.y, width: width, height: size + 5),
+                              forType: .freeText, withProperties: nil)
+        a.contents = text
+        a.font = NSFont.systemFont(ofSize: size, weight: weight)
+        a.fontColor = NSColor(calibratedWhite: 0.12, alpha: 1)
+        a.color = .clear
+        a.userName = nm
+        return a
+    }
+
+    /// Captions for a freshly placed field. Text-ish fields: label above. Checkbox: caption
+    /// to the right. Radio group: one caption per option + a group label above.
+    static func makeLabels(kind: FormFieldKind, name: String, widgets: [PDFAnnotation]) -> [PDFAnnotation] {
+        guard let first = widgets.first else { return [] }
+        let nm = labelName(for: name)
+        switch kind {
+        case .text, .multiline, .dropdown, .date:
+            let b = first.bounds
+            return [label(name, at: CGPoint(x: b.minX, y: b.maxY + 3), size: 11, nm: nm)]
+        case .checkbox:
+            let b = first.bounds
+            return [label(name, at: CGPoint(x: b.maxX + 6, y: b.minY - 2), size: 12, nm: nm)]
+        case .radioGroup(let options):
+            var out: [PDFAnnotation] = []
+            let topY = widgets.map { $0.bounds.maxY }.max() ?? first.bounds.maxY
+            out.append(label(name, at: CGPoint(x: first.bounds.minX, y: topY + 4), size: 11,
+                             weight: .semibold, nm: nm))
+            for (i, w) in widgets.enumerated() where i < options.count {
+                out.append(label(options[i], at: CGPoint(x: w.bounds.maxX + 6, y: w.bounds.minY - 2),
+                                 size: 12, nm: "\(nm):opt:\(i)"))
+            }
+            return out
+        }
+    }
+
     /// PDF name-safe export value for a radio option ("Option One" → "Option_One").
     static func exportValue(_ option: String, fallbackIndex: Int) -> String {
         let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_-"))

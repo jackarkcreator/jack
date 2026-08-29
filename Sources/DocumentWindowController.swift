@@ -1005,8 +1005,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         }
         let name = FormFieldEngine.uniqueName(base: kind.baseName, in: doc)
         let anns = FormFieldEngine.makeAnnotations(kind: kind, name: name, bounds: r)
-        anns.forEach { page.addAnnotation($0) }
-        registerAnnotationRemovalUndo(anns.map { (page, $0) }, name: "Add Field")
+        let labels = FormFieldEngine.makeLabels(kind: kind, name: name, widgets: anns)
+        (anns + labels).forEach { page.addAnnotation($0) }
+        registerAnnotationRemovalUndo((anns + labels).map { (page, $0) }, name: "Add Field")
         forceRefresh()
         switch kind {
         case .radioGroup, .dropdown:
@@ -1015,16 +1016,16 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         }
     }
 
-    func widgetMoved(_ ann: PDFAnnotation, from oldBounds: CGRect) {
-        registerWidgetBoundsUndo(ann, oldBounds, name: "Move Field")
+    func fieldMoved(_ items: [(PDFAnnotation, CGRect)]) {
+        registerFieldMoveUndo(items, name: "Move Field")
         forceRefresh()
     }
 
-    private func registerWidgetBoundsUndo(_ ann: PDFAnnotation, _ oldBounds: CGRect, name: String) {
+    private func registerFieldMoveUndo(_ items: [(PDFAnnotation, CGRect)], name: String) {
         docUndo.registerUndo(withTarget: self) { me in
-            let cur = ann.bounds
-            ann.bounds = oldBounds
-            me.registerWidgetBoundsUndo(ann, cur, name: name)
+            let current = items.map { ($0.0, $0.0.bounds) }
+            items.forEach { $0.0.bounds = $0.1 }
+            me.registerFieldMoveUndo(current, name: name)
             me.forceRefresh()
         }
         docUndo.setActionName(name)
@@ -1036,6 +1037,20 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         for i in 0..<doc.pageCount {
             guard let page = doc.page(at: i) else { continue }
             for a in page.annotations where a.type == "Widget" && a.fieldName == name { out.append((page, a)) }
+        }
+        return out
+    }
+
+    /// Widgets AND their caption labels — what Remove / rebuild must act on.
+    private func groupAnnotations(named name: String) -> [(PDFPage, PDFAnnotation)] {
+        guard let doc = pdfView.document else { return [] }
+        var out: [(PDFPage, PDFAnnotation)] = []
+        for i in 0..<doc.pageCount {
+            guard let page = doc.page(at: i) else { continue }
+            for a in page.annotations
+            where (a.type == "Widget" && a.fieldName == name) || FormFieldEngine.isLabel(a, for: name) {
+                out.append((page, a))
+            }
         }
         return out
     }
@@ -1055,7 +1070,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
 
     @objc private func removeFieldFromMenu(_ sender: NSMenuItem) {
         guard let name = sender.representedObject as? String else { return }
-        let items = groupWidgets(named: name)
+        let items = groupAnnotations(named: name)
         guard !items.isEmpty else { return }
         items.forEach { $0.0.removeAnnotation($0.1) }
         registerAnnotationAddUndo(items, name: "Remove Field")
@@ -1134,7 +1149,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     @objc private func removeFieldFromEditor(_ sender: Any?) {
         fieldPopover?.close()
         guard let name = editingFieldName else { return }
-        let items = groupWidgets(named: name)
+        let items = groupAnnotations(named: name)
         guard !items.isEmpty else { return }
         items.forEach { $0.0.removeAnnotation($0.1) }
         registerAnnotationAddUndo(items, name: "Remove Field")
@@ -1159,22 +1174,32 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         if isRadio {
             let oldOptions = widgets.map { $0.1.buttonWidgetStateString.replacingOccurrences(of: "_", with: " ") }
             if !newOptions.isEmpty, newOptions != oldOptions || newName != oldName {
-                // Rebuild the group anchored where the old one started.
+                // Rebuild the group (widgets + captions) anchored where the old one started.
                 let page = first.0
+                let old = groupAnnotations(named: oldName)
                 let minX = widgets.map { $0.1.bounds.minX }.min() ?? first.1.bounds.minX
                 let topY = widgets.map { $0.1.bounds.maxY }.max() ?? first.1.bounds.maxY
                 docUndo.beginUndoGrouping()
-                widgets.forEach { $0.0.removeAnnotation($0.1) }
-                registerAnnotationAddUndo(widgets, name: "Edit Field")
-                let anns = FormFieldEngine.makeAnnotations(kind: .radioGroup(options: newOptions), name: newName,
+                old.forEach { $0.0.removeAnnotation($0.1) }
+                registerAnnotationAddUndo(old, name: "Edit Field")
+                let kind = FormFieldKind.radioGroup(options: newOptions)
+                let anns = FormFieldEngine.makeAnnotations(kind: kind, name: newName,
                                                            bounds: CGRect(x: minX, y: topY - 22, width: 16, height: 22))
-                anns.forEach { page.addAnnotation($0) }
-                registerAnnotationRemovalUndo(anns.map { (page, $0) }, name: "Edit Field")
+                let labels = FormFieldEngine.makeLabels(kind: kind, name: newName, widgets: anns)
+                (anns + labels).forEach { page.addAnnotation($0) }
+                registerAnnotationRemovalUndo((anns + labels).map { (page, $0) }, name: "Edit Field")
                 docUndo.endUndoGrouping()
             }
         } else {
             if isChoice, !newOptions.isEmpty { first.1.choices = newOptions }
-            if newName != oldName { widgets.forEach { $0.1.fieldName = newName } }
+            if newName != oldName {
+                widgets.forEach { $0.1.fieldName = newName }
+                // Captions carry the name — keep text and the /NM link in step.
+                for (_, a) in groupAnnotations(named: oldName) where FormFieldEngine.isLabel(a) {
+                    a.contents = newName
+                    a.userName = FormFieldEngine.labelName(for: newName)
+                }
+            }
             docUndo.registerUndo(withTarget: self) { _ in }   // dirty the document for autosave
             docUndo.setActionName("Edit Field")
         }
