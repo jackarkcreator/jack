@@ -418,12 +418,42 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         let whereLabel = NSTextField(labelWithString: "Where:")
         whereLabel.alignment = .right
         whereLabel.textColor = .secondaryLabelColor
-        whereLabel.frame = NSRect(x: 10, y: 30, width: 56, height: 16)
+        whereLabel.frame = NSRect(x: 10, y: 31, width: 56, height: 16)
         v.addSubview(whereLabel)
-        let folder = NSTextField(labelWithString: pdfURL.deletingLastPathComponent().lastPathComponent)
-        folder.textColor = .secondaryLabelColor
-        folder.frame = NSRect(x: 74, y: 30, width: 252, height: 16)
-        v.addSubview(folder)
+
+        // Live folder picker, Preview-style: choosing a different folder MOVES the file.
+        let popup = NSPopUpButton(frame: NSRect(x: 72, y: 26, width: 256, height: 26), pullsDown: false)
+        let fm = FileManager.default
+        let current = pendingRenameWhere ?? pdfURL.deletingLastPathComponent()
+        func folderItem(_ url: URL) -> NSMenuItem {
+            let m = NSMenuItem(title: url.lastPathComponent, action: nil, keyEquivalent: "")
+            let icon = NSWorkspace.shared.icon(forFile: url.path)
+            icon.size = NSSize(width: 16, height: 16)
+            m.image = icon
+            m.representedObject = url
+            return m
+        }
+        let menu = NSMenu()
+        menu.addItem(folderItem(current))
+        var commons: [URL] = []
+        for dir: FileManager.SearchPathDirectory in [.desktopDirectory, .documentDirectory, .downloadsDirectory] {
+            if let u = fm.urls(for: dir, in: .userDomainMask).first,
+               u.standardizedFileURL != current.standardizedFileURL { commons.append(u) }
+        }
+        if !commons.isEmpty {
+            menu.addItem(.separator())
+            commons.forEach { menu.addItem(folderItem($0)) }
+        }
+        menu.addItem(.separator())
+        menu.addItem({ let m = NSMenuItem(title: "Other…", action: nil, keyEquivalent: ""); return m }())
+        popup.menu = menu
+        popup.selectItem(at: 0)
+        popup.target = self
+        popup.action = #selector(wherePopupChanged(_:))
+        v.addSubview(popup)
+        renameWherePopup = popup
+        if let pending = pendingRenameName { field.stringValue = pending }
+        pendingRenameName = nil
 
         let button = NSButton(title: "Rename", target: self, action: #selector(commitRename(_:)))
         button.bezelStyle = .rounded
@@ -447,6 +477,29 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     }
 
     private weak var renameField: NSTextField?
+    private weak var renameWherePopup: NSPopUpButton?
+    private var pendingRenameName: String?
+    private var pendingRenameWhere: URL?
+
+    // "Other…" needs an open panel, which would dismiss the transient popover — stash the
+    // typed name, run the panel, then reopen the popover with the chosen folder selected.
+    @objc private func wherePopupChanged(_ sender: NSPopUpButton) {
+        guard sender.selectedItem?.title == "Other…" else { return }
+        pendingRenameName = renameField?.stringValue
+        renamePopover?.close()
+        guard let window = window else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.prompt = "Choose"
+        panel.directoryURL = pendingRenameWhere ?? pdfURL.deletingLastPathComponent()
+        panel.beginSheetModal(for: window) { [weak self] resp in
+            guard let self = self else { return }
+            if resp == .OK, let url = panel.url { self.pendingRenameWhere = url }
+            DispatchQueue.main.async { self.renameDocument(nil) }
+        }
+    }
 
     @objc private func commitRename(_ sender: Any?) {
         guard let field = renameField else { return }
@@ -454,11 +507,14 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "/", with: "-")
             .replacingOccurrences(of: ":", with: "-")
-        let current = pdfURL.deletingPathExtension().lastPathComponent
-        guard !name.isEmpty, name != current else { renamePopover?.close(); return }
-        let dest = pdfURL.deletingLastPathComponent().appendingPathComponent(name + ".pdf")
+        guard !name.isEmpty else { return }
+        let folder = (renameWherePopup?.selectedItem?.representedObject as? URL)
+            ?? pdfURL.deletingLastPathComponent()
+        pendingRenameWhere = nil
+        let dest = folder.appendingPathComponent(name + ".pdf")
+        guard dest.standardizedFileURL != pdfURL.standardizedFileURL else { renamePopover?.close(); return }
         guard !FileManager.default.fileExists(atPath: dest.path) else {
-            infoAlert("Name taken", "A file named “\(dest.lastPathComponent)” already exists here.")
+            infoAlert("Name taken", "A file named “\(dest.lastPathComponent)” already exists in \(folder.lastPathComponent).")
             return
         }
         do {
