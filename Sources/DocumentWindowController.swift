@@ -86,6 +86,16 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     private let redactTermField = NSTextField()
     private var redactedTerms: Set<String> = []   // fed to the verify pass as forbidden terms
 
+    // Form strip controls (field authoring)
+    private var formOn = false
+    private var formAccessory: NSTitlebarAccessoryViewController?
+    private var formButton: NSButton?
+    private var formPaletteButtons: [NSButton] = []
+    private var fieldPopover: NSPopover?
+    private weak var fieldNameField: NSTextField?
+    private weak var fieldOptionsView: NSTextView?
+    private var editingFieldName: String?
+
     init(document: JackDocument) {
         let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1180, height: 800),
                            styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -224,6 +234,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         static let zoomOut = NSToolbarItem.Identifier("jack.zoomOut")
         static let zoomIn = NSToolbarItem.Identifier("jack.zoomIn")
         static let markup = NSToolbarItem.Identifier("jack.markup")
+        static let form = NSToolbarItem.Identifier("jack.form")
         static let redact = NSToolbarItem.Identifier("jack.redact")
         static let clean = NSToolbarItem.Identifier("jack.clean")
         static let tools = NSToolbarItem.Identifier("jack.tools")
@@ -239,7 +250,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         var ids: [NSToolbarItem.Identifier] =
         [ItemID.sidebar, .space, ItemID.undo, ItemID.redo, .flexibleSpace, ItemID.zoomOut, ItemID.zoomIn, .space,
-         ItemID.highlight, ItemID.markup, ItemID.redact, ItemID.clean, ItemID.lock, ItemID.tools, ItemID.print, ItemID.share, .flexibleSpace, ItemID.search, ItemID.save]
+         ItemID.highlight, ItemID.markup, ItemID.form, ItemID.redact, ItemID.clean, ItemID.lock, ItemID.tools, ItemID.print, ItemID.share, .flexibleSpace, ItemID.search, ItemID.save]
         if AskEngine.isAvailable, let i = ids.firstIndex(of: ItemID.share) {
             ids.insert(ItemID.ask, at: i + 1)
         }
@@ -349,6 +360,18 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             item.view = b
             item.label = "Redact"
             item.toolTip = "Redact — permanently remove content"
+            return item
+        case ItemID.form:
+            let item = NSToolbarItem(itemIdentifier: id)
+            let b = NSButton(image: NSImage(systemSymbolName: "character.textbox",
+                                            accessibilityDescription: "Form") ?? NSImage(),
+                             target: self, action: #selector(toggleForm(_:)))
+            b.setButtonType(.pushOnPushOff)
+            b.bezelStyle = .texturedRounded
+            formButton = b
+            item.view = b
+            item.label = "Form"
+            item.toolTip = "Prepare Form — add fillable fields"
             return item
         case ItemID.print:   return simple(id, "printer", "Print", #selector(printDocument(_:)))
         case ItemID.markup:
@@ -743,7 +766,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
 
     private func setMarkup(on: Bool) {
         guard markupOn != on, let window = window else { return }
-        if on { setRedact(on: false) }   // one tool strip at a time
+        if on { setRedact(on: false); setForm(on: false) }   // one tool strip at a time
         markupOn = on
         markupButton?.state = on ? .on : .off
         if on {
@@ -813,7 +836,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
 
     private func setRedact(on: Bool) {
         guard redactOn != on, let window = window else { return }
-        if on { setMarkup(on: false) }   // one tool strip at a time
+        if on { setMarkup(on: false); setForm(on: false) }   // one tool strip at a time
         redactOn = on
         redactButton?.state = on ? .on : .off
         pdfView.redactMode = on
@@ -873,6 +896,277 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         strip.addSubview(apply)
 
         return strip
+    }
+
+    // MARK: - Form mode (drag-and-drop fillable fields; Word-simple, AcroForm underneath)
+
+    @objc func toggleForm(_ sender: Any?) { setForm(on: !formOn) }
+
+    private func setForm(on: Bool) {
+        guard formOn != on, let window = window else { return }
+        if on { setMarkup(on: false); setRedact(on: false) }   // one tool strip at a time
+        formOn = on
+        formButton?.state = on ? .on : .off
+        pdfView.formAuthoringOn = on
+        if on {
+            let acc = NSTitlebarAccessoryViewController()
+            acc.view = buildFormStrip(width: window.frame.width)
+            acc.layoutAttribute = .bottom
+            window.addTitlebarAccessoryViewController(acc)
+            formAccessory = acc
+            pdfView.formFieldMenuItems = { [weak self] widget in self?.fieldMenuItems(for: widget) ?? [] }
+        } else {
+            pdfView.armedFieldKind = nil
+            formPaletteButtons.forEach { $0.state = .off }
+            fieldPopover?.close()
+            formAccessory?.removeFromParent()
+            formAccessory = nil
+        }
+    }
+
+    private static let formPalette: [(String, String)] = [
+        ("Text Field", "character.cursor.ibeam"), ("Text Box", "text.justify.left"),
+        ("Checkbox", "checkmark.square"), ("Multiple Choice", "circle.circle"),
+        ("Dropdown", "chevron.down.square"), ("Date", "calendar")]
+
+    private func buildFormStrip(width: CGFloat) -> NSView {
+        let strip = NSView(frame: NSRect(x: 0, y: 0, width: width, height: 40))
+        formPaletteButtons = []
+        var x: CGFloat = 12
+        for (i, entry) in Self.formPalette.enumerated() {
+            let btn = NSButton(title: entry.0, target: self, action: #selector(fieldToolPicked(_:)))
+            btn.image = NSImage(systemSymbolName: entry.1, accessibilityDescription: entry.0)
+            btn.imagePosition = .imageLeading
+            btn.setButtonType(.pushOnPushOff)
+            btn.bezelStyle = .rounded
+            btn.controlSize = .small
+            btn.tag = i
+            let w = btn.intrinsicContentSize.width + 14
+            btn.frame = NSRect(x: x, y: 7, width: w, height: 26)
+            strip.addSubview(btn)
+            formPaletteButtons.append(btn)
+            x += w + 6
+        }
+        let hint = NSTextField(labelWithString: "Pick a field, then click the page to place it — drag fields to move, right-click to edit")
+        hint.textColor = .secondaryLabelColor
+        hint.font = .systemFont(ofSize: 11)
+        hint.alignment = .right
+        hint.frame = NSRect(x: width - 472, y: 12, width: 456, height: 16)
+        hint.autoresizingMask = [.minXMargin]
+        strip.addSubview(hint)
+        return strip
+    }
+
+    private func fieldKind(forTag tag: Int) -> FormFieldKind {
+        switch tag {
+        case 1: return .multiline
+        case 2: return .checkbox
+        case 3: return .radioGroup(options: ["Option 1", "Option 2", "Option 3"])
+        case 4: return .dropdown(options: ["Option 1", "Option 2", "Option 3"])
+        case 5: return .date
+        default: return .text
+        }
+    }
+
+    @objc private func fieldToolPicked(_ sender: NSButton) {
+        formPaletteButtons.forEach { if $0 !== sender { $0.state = .off } }
+        pdfView.armedFieldKind = sender.state == .on ? fieldKind(forTag: sender.tag) : nil
+    }
+
+    // From SigningPDFView: click/drag committed. A bare click arrives tiny — give defaults.
+    func formFieldPlaced(kind: FormFieldKind, rect: CGRect, page: PDFPage) {
+        guard let doc = pdfView.document else { return }
+        var r = rect
+        let defaults: CGSize
+        switch kind {
+        case .text: defaults = CGSize(width: 200, height: 24)
+        case .multiline: defaults = CGSize(width: 300, height: 72)
+        case .checkbox: defaults = CGSize(width: 18, height: 18)
+        case .radioGroup: defaults = CGSize(width: 16, height: 22)
+        case .dropdown: defaults = CGSize(width: 200, height: 24)
+        case .date: defaults = CGSize(width: 120, height: 24)
+        }
+        if r.width < 20 || r.height < 12 {
+            // Click-place: the point is the field's top-left.
+            r = CGRect(x: r.origin.x, y: r.origin.y - defaults.height, width: defaults.width, height: defaults.height)
+        }
+        let name = FormFieldEngine.uniqueName(base: kind.baseName, in: doc)
+        let anns = FormFieldEngine.makeAnnotations(kind: kind, name: name, bounds: r)
+        anns.forEach { page.addAnnotation($0) }
+        registerAnnotationRemovalUndo(anns.map { (page, $0) }, name: "Add Field")
+        forceRefresh()
+        switch kind {
+        case .radioGroup, .dropdown:
+            openFieldEditor(named: name)   // options matter — offer the editor right away
+        default: break
+        }
+    }
+
+    func widgetMoved(_ ann: PDFAnnotation, from oldBounds: CGRect) {
+        registerWidgetBoundsUndo(ann, oldBounds, name: "Move Field")
+        forceRefresh()
+    }
+
+    private func registerWidgetBoundsUndo(_ ann: PDFAnnotation, _ oldBounds: CGRect, name: String) {
+        docUndo.registerUndo(withTarget: self) { me in
+            let cur = ann.bounds
+            ann.bounds = oldBounds
+            me.registerWidgetBoundsUndo(ann, cur, name: name)
+            me.forceRefresh()
+        }
+        docUndo.setActionName(name)
+    }
+
+    private func groupWidgets(named name: String) -> [(PDFPage, PDFAnnotation)] {
+        guard let doc = pdfView.document else { return [] }
+        var out: [(PDFPage, PDFAnnotation)] = []
+        for i in 0..<doc.pageCount {
+            guard let page = doc.page(at: i) else { continue }
+            for a in page.annotations where a.type == "Widget" && a.fieldName == name { out.append((page, a)) }
+        }
+        return out
+    }
+
+    private func fieldMenuItems(for widget: PDFAnnotation) -> [NSMenuItem] {
+        guard let name = widget.fieldName else { return [] }
+        let edit = NSMenuItem(title: "Edit Field…", action: #selector(editFieldFromMenu(_:)), keyEquivalent: "")
+        edit.target = self; edit.representedObject = name
+        let remove = NSMenuItem(title: "Remove Field", action: #selector(removeFieldFromMenu(_:)), keyEquivalent: "")
+        remove.target = self; remove.representedObject = name
+        return [edit, remove]
+    }
+
+    @objc private func editFieldFromMenu(_ sender: NSMenuItem) {
+        if let name = sender.representedObject as? String { openFieldEditor(named: name) }
+    }
+
+    @objc private func removeFieldFromMenu(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String else { return }
+        let items = groupWidgets(named: name)
+        guard !items.isEmpty else { return }
+        items.forEach { $0.0.removeAnnotation($0.1) }
+        registerAnnotationAddUndo(items, name: "Remove Field")
+        forceRefresh()
+    }
+
+    // MARK: Field editor popover (name + options)
+
+    private func openFieldEditor(named name: String) {
+        let widgets = groupWidgets(named: name)
+        guard let first = widgets.first else { return }
+        editingFieldName = name
+        let isRadio = first.1.widgetControlType == .radioButtonControl
+        let isChoice = first.1.widgetFieldType == .choice
+        let hasOptions = isRadio || isChoice
+
+        let content = NSViewController()
+        let v = NSView(frame: NSRect(x: 0, y: 0, width: 260, height: hasOptions ? 208 : 108))
+        content.view = v   // frame BEFORE populating — zero-frame containers fling children
+
+        let nameLabel = NSTextField(labelWithString: "Field name")
+        nameLabel.font = .systemFont(ofSize: 11); nameLabel.textColor = .secondaryLabelColor
+        nameLabel.frame = NSRect(x: 14, y: v.frame.height - 26, width: 160, height: 16)
+        v.addSubview(nameLabel)
+        let nameField = NSTextField(string: name)
+        nameField.font = .systemFont(ofSize: 13)
+        nameField.frame = NSRect(x: 14, y: v.frame.height - 52, width: 232, height: 24)
+        v.addSubview(nameField)
+        fieldNameField = nameField
+
+        if hasOptions {
+            let optLabel = NSTextField(labelWithString: "Options — one per line")
+            optLabel.font = .systemFont(ofSize: 11); optLabel.textColor = .secondaryLabelColor
+            optLabel.frame = NSRect(x: 14, y: v.frame.height - 76, width: 200, height: 16)
+            v.addSubview(optLabel)
+            let scroll = NSScrollView(frame: NSRect(x: 14, y: 48, width: 232, height: v.frame.height - 130))
+            scroll.hasVerticalScroller = true
+            scroll.borderType = .bezelBorder
+            let tv = NSTextView(frame: NSRect(origin: .zero, size: scroll.contentSize))
+            tv.font = .systemFont(ofSize: 13)
+            tv.isRichText = false
+            tv.autoresizingMask = [.width]
+            let options: [String]
+            if isChoice {
+                options = first.1.choices ?? []
+            } else {
+                options = widgets.map { $0.1.buttonWidgetStateString.replacingOccurrences(of: "_", with: " ") }
+            }
+            tv.string = options.joined(separator: "\n")
+            scroll.documentView = tv
+            v.addSubview(scroll)
+            fieldOptionsView = tv
+        }
+
+        let done = NSButton(title: "Done", target: self, action: #selector(commitFieldEdit(_:)))
+        done.bezelStyle = .rounded; done.controlSize = .small
+        done.keyEquivalent = "\r"
+        done.frame = NSRect(x: v.frame.width - 78, y: 12, width: 64, height: 26)
+        v.addSubview(done)
+        let remove = NSButton(title: "Remove", target: self, action: #selector(removeFieldFromEditor(_:)))
+        remove.bezelStyle = .rounded; remove.controlSize = .small
+        remove.frame = NSRect(x: 14, y: 12, width: 76, height: 26)
+        v.addSubview(remove)
+
+        let pop = NSPopover()
+        pop.contentViewController = content
+        pop.behavior = .transient
+        fieldPopover = pop
+        // Anchor on the topmost widget of the group, in view space.
+        let anchor = widgets.max(by: { $0.1.bounds.maxY < $1.1.bounds.maxY }) ?? first
+        let viewRect = pdfView.convert(anchor.1.bounds, from: anchor.0)
+        pop.show(relativeTo: viewRect, of: pdfView, preferredEdge: .maxY)
+        pop.contentViewController?.view.window?.makeFirstResponder(nameField)
+    }
+
+    @objc private func removeFieldFromEditor(_ sender: Any?) {
+        fieldPopover?.close()
+        guard let name = editingFieldName else { return }
+        let items = groupWidgets(named: name)
+        guard !items.isEmpty else { return }
+        items.forEach { $0.0.removeAnnotation($0.1) }
+        registerAnnotationAddUndo(items, name: "Remove Field")
+        forceRefresh()
+    }
+
+    @objc private func commitFieldEdit(_ sender: Any?) {
+        defer { fieldPopover?.close() }
+        guard let doc = pdfView.document, let oldName = editingFieldName else { return }
+        let widgets = groupWidgets(named: oldName)
+        guard let first = widgets.first else { return }
+        var newName = (fieldNameField?.stringValue ?? oldName).trimmingCharacters(in: .whitespaces)
+        if newName.isEmpty { newName = oldName }
+        if newName != oldName, groupWidgets(named: newName).isEmpty == false {
+            newName = FormFieldEngine.uniqueName(base: newName, in: doc)   // avoid silent merges
+        }
+        let newOptions = (fieldOptionsView?.string.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }) ?? []
+
+        let isRadio = first.1.widgetControlType == .radioButtonControl
+        let isChoice = first.1.widgetFieldType == .choice
+        if isRadio {
+            let oldOptions = widgets.map { $0.1.buttonWidgetStateString.replacingOccurrences(of: "_", with: " ") }
+            if !newOptions.isEmpty, newOptions != oldOptions || newName != oldName {
+                // Rebuild the group anchored where the old one started.
+                let page = first.0
+                let minX = widgets.map { $0.1.bounds.minX }.min() ?? first.1.bounds.minX
+                let topY = widgets.map { $0.1.bounds.maxY }.max() ?? first.1.bounds.maxY
+                docUndo.beginUndoGrouping()
+                widgets.forEach { $0.0.removeAnnotation($0.1) }
+                registerAnnotationAddUndo(widgets, name: "Edit Field")
+                let anns = FormFieldEngine.makeAnnotations(kind: .radioGroup(options: newOptions), name: newName,
+                                                           bounds: CGRect(x: minX, y: topY - 22, width: 16, height: 22))
+                anns.forEach { page.addAnnotation($0) }
+                registerAnnotationRemovalUndo(anns.map { (page, $0) }, name: "Edit Field")
+                docUndo.endUndoGrouping()
+            }
+        } else {
+            if isChoice, !newOptions.isEmpty { first.1.choices = newOptions }
+            if newName != oldName { widgets.forEach { $0.1.fieldName = newName } }
+            docUndo.registerUndo(withTarget: self) { _ in }   // dirty the document for autosave
+            docUndo.setActionName("Edit Field")
+        }
+        forceRefresh()
+        editingFieldName = nil
     }
 
     // From SigningPDFView after a rubber-band gesture: the mark exists — make it undoable
