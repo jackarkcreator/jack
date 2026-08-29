@@ -509,9 +509,11 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             } else {
                 let tmp = FileManager.default.temporaryDirectory
                     .appendingPathComponent("jack-clean-\(UUID().uuidString).pdf")
-                ok = RedactionEngine.apply(doc, redactions: [:], to: tmp)
-                    && PDFDocument(url: tmp)?.write(to: out, withOptions: [
-                        .userPasswordOption: password, .ownerPasswordOption: password]) == true
+                var locked = false
+                if RedactionEngine.apply(doc, redactions: [:], to: tmp), let flat = PDFDocument(url: tmp) {
+                    locked = AES256PDF.encrypt(flat, to: out, userPassword: password, ownerPassword: password)
+                }
+                ok = locked
                 try? FileManager.default.removeItem(at: tmp)
             }
             if ok {
@@ -790,7 +792,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
 
         let alert = NSAlert()
         alert.messageText = "Lock for Sharing"
-        alert.informativeText = "Saves a password-protected copy. Anyone with the password can open it; the original file is untouched."
+        alert.informativeText = "Saves an AES-256 encrypted copy (the same protection Adobe Acrobat uses). Anyone with the password can open it; the original file is untouched."
         let box = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 58))
         let pw = NSSecureTextField(frame: NSRect(x: 0, y: 32, width: 300, height: 24))
         pw.placeholderString = "Password"
@@ -814,8 +816,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         if #available(macOS 11.0, *) { panel.allowedContentTypes = [.pdf] }
         panel.beginSheetModal(for: window) { resp in
             guard resp == .OK, let out = panel.url else { return }
-            let options: [PDFDocumentWriteOption: Any] = [.userPasswordOption: password, .ownerPasswordOption: password]
-            if doc.write(to: out, withOptions: options) {
+            if AES256PDF.encrypt(doc, to: out, userPassword: password, ownerPassword: password) {
                 NSWorkspace.shared.activateFileViewerSelecting([out])
                 NSSound(named: "Glass")?.play()
             } else {
