@@ -52,8 +52,13 @@ final class SigningPDFView: PDFView {
             rubberBand = band
             return
         }
-        // A comment note: open its popover instead of selecting text.
-        if let note = page.annotations.last(where: { $0.type == "Text" && $0.bounds.insetBy(dx: -4, dy: -4).contains(p) }) {
+        // A comment (pin note, or a highlight that carries a note): open its popover.
+        if let note = page.annotations.last(where: { ann in
+            let hasNote = !((ann.contents ?? "").isEmpty)
+            let isPin = ann.type == "Text"
+            let isTextComment = ann.type == "Highlight" && hasNote
+            return (isPin || isTextComment) && ann.bounds.insetBy(dx: -4, dy: -4).contains(p)
+        }) {
             stampDelegate?.noteClicked(note)
             return
         }

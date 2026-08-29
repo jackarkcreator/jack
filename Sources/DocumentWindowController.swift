@@ -803,9 +803,11 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
                 ok = self.flatten(doc, to: tmp)
                 if ok, let flat = PDFDocument(url: tmp) {
                     for (i, a) in comments {
-                        let copy = PDFAnnotation(bounds: a.bounds, forType: .text, withProperties: nil)
+                        let type: PDFAnnotationSubtype = a.type == "Text" ? .text : .highlight
+                        let copy = PDFAnnotation(bounds: a.bounds, forType: type, withProperties: nil)
                         copy.contents = a.contents
                         copy.color = a.color
+                        if let quads = a.quadrilateralPoints { copy.quadrilateralPoints = quads }
                         flat.page(at: i)?.addAnnotation(copy)
                     }
                     ok = flat.write(to: out)
@@ -949,8 +951,13 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             s.target = self; s.image = Self.swatch(.systemRed)
             items.append(s)
         }
-        if let page = page {
-            let c = NSMenuItem(title: "Add Comment…", action: #selector(addCommentFromMenu(_:)), keyEquivalent: "")
+        if hasSel {
+            let c = NSMenuItem(title: "Add Comment to Selection…", action: #selector(addComment(_:)), keyEquivalent: "")
+            c.target = self
+            c.image = NSImage(systemSymbolName: "text.bubble", accessibilityDescription: "Add Comment")
+            items.append(c)
+        } else if let page = page {
+            let c = NSMenuItem(title: "Add Comment Here…", action: #selector(addCommentFromMenu(_:)), keyEquivalent: "")
             c.target = self
             c.image = NSImage(systemSymbolName: "text.bubble", accessibilityDescription: "Add Comment")
             c.representedObject = NoteTarget(page, point)
@@ -963,18 +970,56 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
 
     private var notePopover: NSPopover?
 
-    static func isComment(_ ann: PDFAnnotation) -> Bool { ann.type == "Text" }
+    // A comment is a pin note, or a highlight that carries note text (Adobe's "note to text").
+    static func isComment(_ ann: PDFAnnotation) -> Bool {
+        ann.type == "Text" || (ann.type == "Highlight" && !((ann.contents ?? "").isEmpty))
+    }
 
     @objc private func addCommentFromMenu(_ sender: NSMenuItem) {
         guard let target = sender.representedObject as? NoteTarget else { return }
         addComment(on: target.page, at: target.point)
     }
 
+    // Toolbar / ⇧⌘C / context-menu-with-selection: attach the comment to the selected text
+    // (Adobe's "add note to text"). Without a selection, guide to the right-click placement.
     @objc func addComment(_ sender: Any?) {
-        // Toolbar/menu path: anchor near the top-right of the current page.
-        guard let page = pdfView.currentPage ?? pdfView.document?.page(at: 0) else { return }
-        let box = page.bounds(for: .mediaBox)
-        addComment(on: page, at: CGPoint(x: box.maxX - 60, y: box.maxY - 60))
+        let live = pdfView.currentSelection
+        let liveOK = !((live?.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        guard let sel = liveOK ? live : lastSelection else {
+            infoAlert("Where should the comment go?",
+                      "Select the text you want to comment on, or right-click a spot on the page and choose “Add Comment Here…”.")
+            return
+        }
+        guard let text = promptForCommentText(initial: "") else { return }
+        var added: [(PDFPage, PDFAnnotation)] = []
+        for page in sel.pages {
+            let b = sel.bounds(for: page)
+            guard b.width > 0, b.height > 0 else { continue }
+            // One highlight annotation per page, quads per line, carrying the note.
+            var quads: [NSValue] = []
+            for line in sel.selectionsByLine() where line.pages.contains(page) {
+                let lb = line.bounds(for: page)
+                let o = b.origin
+                quads += [
+                    NSValue(point: NSPoint(x: lb.minX - o.x, y: lb.maxY - o.y)),
+                    NSValue(point: NSPoint(x: lb.maxX - o.x, y: lb.maxY - o.y)),
+                    NSValue(point: NSPoint(x: lb.minX - o.x, y: lb.minY - o.y)),
+                    NSValue(point: NSPoint(x: lb.maxX - o.x, y: lb.minY - o.y))
+                ]
+            }
+            let ann = PDFAnnotation(bounds: b, forType: .highlight, withProperties: nil)
+            ann.color = .systemYellow
+            if !quads.isEmpty { ann.quadrilateralPoints = quads }
+            ann.contents = text
+            page.addAnnotation(ann)
+            added.append((page, ann))
+        }
+        guard !added.isEmpty else { return }
+        pdfView.setCurrentSelection(nil, animate: false)
+        lastSelection = nil
+        registerAnnotationRemovalUndo(added, name: "Add Comment")
+        markEdited()
+        forceRefresh()
     }
 
     private func addComment(on page: PDFPage, at point: CGPoint) {
