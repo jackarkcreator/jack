@@ -38,7 +38,10 @@ final class JackDocument: NSDocument {
             throw NSError(domain: NSCocoaErrorDomain, code: NSFileWriteUnknownError,
                           userInfo: [NSLocalizedDescriptionKey: "Couldn’t serialize the PDF."])
         }
-        return data
+        // The fresh-document rebuild drops /AcroForm (fields go dead in Acrobat/Chrome)
+        // and loses radio /V + /AS. Repair both at the byte level; no-op for widget-free docs.
+        guard FormFieldEngine.hasWidgets(live) else { return data }
+        return AcroFormFixup.fix(data: data, radioAsserts: FormFieldEngine.radioAsserts(from: live))
     }
 
     override func makeWindowControllers() {
