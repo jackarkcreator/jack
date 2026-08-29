@@ -2,6 +2,7 @@
 import AppKit
 
 final class HomePopoverViewController: NSViewController {
+    var onNew: (() -> Void)?
     var onOpen: (() -> Void)?
     var onPhotos: (() -> Void)?
     var onSign: (() -> Void)?
@@ -31,27 +32,28 @@ final class HomePopoverViewController: NSViewController {
     }
 
     override func loadView() {
-        let v = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 540))
+        let v = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 600))
 
         let title = NSTextField(labelWithString: "Jack")
         title.font = .systemFont(ofSize: 20, weight: .semibold)
-        title.frame = NSRect(x: 20, y: 500, width: 260, height: 26)
+        title.frame = NSRect(x: 20, y: 560, width: 260, height: 26)
         v.addSubview(title)
 
         let sub = NSTextField(labelWithString: "Lightweight PDF tools")
         sub.textColor = .secondaryLabelColor
         sub.font = .systemFont(ofSize: 12)
-        sub.frame = NSRect(x: 20, y: 480, width: 260, height: 16)
+        sub.frame = NSRect(x: 20, y: 540, width: 260, height: 16)
         v.addSubview(sub)
 
         let cards: [(String, String, Selector)] = [
+            ("doc.badge.plus", "New PDF", #selector(newPDF)),
             ("doc.text.magnifyingglass", "Open a PDF", #selector(openPDF)),
             ("photo.on.rectangle", "Combine Photos → PDF", #selector(photos)),
             ("signature", "Fill & Sign a PDF", #selector(sign)),
             ("doc.on.doc", "Organize / Merge Pages", #selector(organize)),
             ("folder", "Batch Process a Folder", #selector(batch))
         ]
-        var y = 410
+        var y = 470
         for (symbol, label, action) in cards { v.addSubview(card(symbol, label, action, y)); y -= 60 }
 
         let sep = NSBox(frame: NSRect(x: 16, y: 154, width: 268, height: 1))
@@ -108,6 +110,7 @@ final class HomePopoverViewController: NSViewController {
         return b
     }
 
+    @objc private func newPDF() { onNew?() }
     @objc private func openPDF() { onOpen?() }
     @objc private func makeDefault() {
         // Already default: nothing to do — keep the box checked.

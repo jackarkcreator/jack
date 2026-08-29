@@ -103,7 +103,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setupPopover()
         configureLoginOnFirstRun()
         enforceDefaultIfWanted()
-        MainMenu.install(openAction: #selector(openDocumentAction),
+        MainMenu.install(newAction: #selector(newDocumentAction),
+                         openAction: #selector(openDocumentAction),
                          defaultAction: #selector(makeDefaultAction),
                          updateAction: #selector(checkUpdatesAction),
                          target: self)
@@ -159,6 +160,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func setupPopover() {
+        popoverVC.onNew = { [weak self] in self?.popover.performClose(nil); self?.newDocumentAction() }
         popoverVC.onOpen = { [weak self] in self?.popover.performClose(nil); self?.pickOpen() }
         popoverVC.onMakeDefault = { [weak self] in self?.popover.performClose(nil); self?.makeDefaultPDFApp() }
         popoverVC.onPhotos = { [weak self] in self?.popover.performClose(nil); self?.pickPhotos() }
@@ -272,6 +274,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     // MARK: - Menu actions
+
+    @objc func newDocumentAction() {
+        // The document presents its own window (never trust display:true with
+        // hand-built window controllers).
+        try? NSDocumentController.shared.openUntitledDocumentAndDisplay(true)
+    }
 
     @objc private func openDocumentAction() {
         runPicker(.both, multi: true, message: "Choose PDFs or photos to open", prompt: "Open") {

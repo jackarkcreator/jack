@@ -18,6 +18,16 @@ final class JackDocument: NSDocument {
     override class var autosavesInPlace: Bool { true }
     override class func canConcurrentlyReadDocuments(ofType typeName: String) -> Bool { true }
 
+    // File → New PDF (⌘N): an untitled document is one blank US-Letter page, ready for
+    // form fields, markup, and more pages via the sidebar. Saves through the normal flow.
+    convenience init(type typeName: String) throws {
+        self.init()
+        fileType = typeName
+        let blank = PDFDocument()
+        blank.insert(PDFPage(), at: 0)
+        pdf = blank
+    }
+
     override func read(from url: URL, ofType typeName: String) throws {
         guard let doc = PDFDocument(url: url) else {
             throw NSError(domain: NSCocoaErrorDomain, code: NSFileReadCorruptFileError,

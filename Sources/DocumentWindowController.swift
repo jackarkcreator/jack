@@ -9,6 +9,10 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
                                       NSMenuDelegate {
 
     // v2.0: the file's identity lives with the NSDocument (rename/move/duplicate are native).
+    private var exportBaseName: String {
+        (document as? NSDocument)?.fileURL == nil ? "Untitled"
+            : pdfURL.deletingPathExtension().lastPathComponent
+    }
     private var pdfURL: URL {
         (document as? NSDocument)?.fileURL
             ?? FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
@@ -616,7 +620,11 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
 
     private func layoutTitleAccessory() {
         guard let container = titleContainer else { return }
-        let name = pdfURL.lastPathComponent
+        // An untitled document has no fileURL — show NSDocument's name ("Untitled"),
+        // never the fallback directory's name.
+        let name = (document as? NSDocument)?.fileURL == nil
+            ? ((document as? NSDocument)?.displayName ?? "Untitled")
+            : pdfURL.lastPathComponent
         let font = NSFont.systemFont(ofSize: 13, weight: .semibold)
         titleButton.attributedTitle = NSAttributedString(string: name, attributes: [
             .font: font, .foregroundColor: NSColor.labelColor
@@ -632,6 +640,11 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
 
     @objc func renameDocument(_ sender: Any?) {
         renamePopover?.close()
+        // Untitled: there is nothing on disk to rename — the native save panel names it.
+        if (document as? NSDocument)?.fileURL == nil {
+            (document as? NSDocument)?.save(withDelegate: nil, didSave: nil, contextInfo: nil)
+            return
+        }
         let vc = NSViewController()
         let v = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 96))
 
@@ -1256,7 +1269,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         let terms = Array(redactedTerms)
 
         let panel = NSSavePanel()
-        panel.nameFieldStringValue = pdfURL.deletingPathExtension().lastPathComponent + "-redacted.pdf"
+        panel.nameFieldStringValue = exportBaseName + "-redacted.pdf"
         panel.directoryURL = pdfURL.deletingLastPathComponent()
         if #available(macOS 11.0, *) { panel.allowedContentTypes = [.pdf] }
         panel.beginSheetModal(for: window) { [weak self] resp in
@@ -1306,7 +1319,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         let password = pw.stringValue
 
         let panel = NSSavePanel()
-        panel.nameFieldStringValue = pdfURL.deletingPathExtension().lastPathComponent + "-clean.pdf"
+        panel.nameFieldStringValue = exportBaseName + "-clean.pdf"
         panel.directoryURL = pdfURL.deletingLastPathComponent()
         if #available(macOS 11.0, *) { panel.allowedContentTypes = [.pdf] }
         panel.beginSheetModal(for: window) { resp in
@@ -1508,7 +1521,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         }
         guard n > 0 else { return }
         let panel = NSSavePanel()
-        panel.nameFieldStringValue = pdfURL.deletingPathExtension().lastPathComponent + "-pages.pdf"
+        panel.nameFieldStringValue = exportBaseName + "-pages.pdf"
         panel.directoryURL = pdfURL.deletingLastPathComponent()
         if #available(macOS 11.0, *) { panel.allowedContentTypes = [.pdf] }
         panel.beginSheetModal(for: window) { resp in
@@ -1539,7 +1552,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     @objc func exportFlattened(_ sender: Any?) {
         guard let doc = pdfView.document, let window = window else { return }
         let panel = NSSavePanel()
-        panel.nameFieldStringValue = pdfURL.deletingPathExtension().lastPathComponent + "-flattened.pdf"
+        panel.nameFieldStringValue = exportBaseName + "-flattened.pdf"
         panel.directoryURL = pdfURL.deletingLastPathComponent()
         if #available(macOS 11.0, *) { panel.allowedContentTypes = [.pdf] }
         panel.beginSheetModal(for: window) { [weak self] resp in
@@ -1925,7 +1938,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         }
         let originalSize = data.count
         let panel = NSSavePanel()
-        panel.nameFieldStringValue = pdfURL.deletingPathExtension().lastPathComponent + "-compressed.pdf"
+        panel.nameFieldStringValue = exportBaseName + "-compressed.pdf"
         panel.directoryURL = pdfURL.deletingLastPathComponent()
         if #available(macOS 11.0, *) { panel.allowedContentTypes = [.pdf] }
         panel.beginSheetModal(for: window) { resp in
@@ -1964,7 +1977,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             return
         }
         let panel = NSSavePanel()
-        panel.nameFieldStringValue = pdfURL.deletingPathExtension().lastPathComponent + "-searchable.pdf"
+        panel.nameFieldStringValue = exportBaseName + "-searchable.pdf"
         panel.directoryURL = pdfURL.deletingLastPathComponent()
         if #available(macOS 11.0, *) { panel.allowedContentTypes = [.pdf] }
         panel.beginSheetModal(for: window) { resp in
@@ -2017,7 +2030,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         let cornerV = StampEngine.Corner(rawValue: corner.indexOfSelectedItem) ?? .bottomRight
 
         let panel = NSSavePanel()
-        panel.nameFieldStringValue = pdfURL.deletingPathExtension().lastPathComponent + "-bates.pdf"
+        panel.nameFieldStringValue = exportBaseName + "-bates.pdf"
         panel.directoryURL = pdfURL.deletingLastPathComponent()
         if #available(macOS 11.0, *) { panel.allowedContentTypes = [.pdf] }
         panel.beginSheetModal(for: window) { resp in
@@ -2054,7 +2067,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         let opacity: CGFloat = [0.10, 0.18, 0.28][max(0, strength.indexOfSelectedItem)]
 
         let panel = NSSavePanel()
-        panel.nameFieldStringValue = pdfURL.deletingPathExtension().lastPathComponent + "-watermarked.pdf"
+        panel.nameFieldStringValue = exportBaseName + "-watermarked.pdf"
         panel.directoryURL = pdfURL.deletingLastPathComponent()
         if #available(macOS 11.0, *) { panel.allowedContentTypes = [.pdf] }
         panel.beginSheetModal(for: window) { resp in
@@ -2094,7 +2107,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         guard password == verify.stringValue else { infoAlert("Passwords don’t match", "The two password fields must match."); return }
 
         let panel = NSSavePanel()
-        panel.nameFieldStringValue = pdfURL.deletingPathExtension().lastPathComponent + "-locked.pdf"
+        panel.nameFieldStringValue = exportBaseName + "-locked.pdf"
         panel.directoryURL = pdfURL.deletingLastPathComponent()
         if #available(macOS 11.0, *) { panel.allowedContentTypes = [.pdf] }
         panel.beginSheetModal(for: window) { resp in

@@ -3,7 +3,7 @@
 import AppKit
 
 enum MainMenu {
-    static func install(openAction: Selector, defaultAction: Selector, updateAction: Selector, target: AnyObject) {
+    static func install(newAction: Selector, openAction: Selector, defaultAction: Selector, updateAction: Selector, target: AnyObject) {
         let main = NSMenu()
 
         // App menu
@@ -22,6 +22,7 @@ enum MainMenu {
         // File
         let fileItem = NSMenuItem()
         let file = NSMenu(title: "File")
+        file.addItem(item("New PDF", newAction, "n", target: target))
         file.addItem(item("Open…", openAction, "o", target: target))
         file.addItem(.separator())
         file.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
