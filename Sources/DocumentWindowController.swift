@@ -368,19 +368,21 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         return strip
     }
 
-    // From SigningPDFView after a rubber-band gesture: the mark exists — make it undoable.
+    // From SigningPDFView after a rubber-band gesture: the mark exists — make it undoable
+    // and force the repaint (PDFView's page cache doesn't reliably show annotation adds).
     func redactionAdded(_ ann: RedactionAnnotation) {
         docUndo.registerUndo(withTarget: self) { $0.removeRedactionMark(ann) }
         docUndo.setActionName("Mark Redaction")
         updateRedactCount()
+        forceRefresh()
     }
 
-    private func addRedactionMark(_ ann: RedactionAnnotation, to page: PDFPage) {
+    private func addRedactionMark(_ ann: RedactionAnnotation, to page: PDFPage, refresh: Bool = true) {
         page.addAnnotation(ann)
         docUndo.registerUndo(withTarget: self) { $0.removeRedactionMark(ann) }
         docUndo.setActionName("Mark Redaction")
         updateRedactCount()
-        pdfView.needsDisplay = true
+        if refresh { forceRefresh() }
     }
 
     private func removeRedactionMark(_ ann: RedactionAnnotation) {
@@ -417,12 +419,12 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             for page in sel.pages {
                 let r = sel.bounds(for: page).insetBy(dx: -2, dy: -2)
                 guard r.width > 0, r.height > 0 else { continue }
-                addRedactionMark(RedactionAnnotation(bounds: r), to: page)
+                addRedactionMark(RedactionAnnotation(bounds: r), to: page, refresh: false)
             }
         }
         redactedTerms.insert(term)
         redactTermField.stringValue = ""
-        pdfView.needsDisplay = true
+        forceRefresh()
     }
 
     @objc private func clearRedactionMarks() {

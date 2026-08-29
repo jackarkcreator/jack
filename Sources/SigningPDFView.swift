@@ -15,8 +15,10 @@ final class SigningPDFView: PDFView {
     private var dragPage: PDFPage?
     private var last: CGPoint = .zero
     private var dragStartBounds: CGRect = .zero
-    private var marking: RedactionAnnotation?
-    private var markOrigin: CGPoint = .zero
+    // Redact rubber band: a plain view-space overlay (PDFView's page cache can't be trusted
+    // to repaint annotation mutations live — see forceRefresh in DocumentWindowController).
+    private var rubberBand: NSView?
+    private var markOriginView: CGPoint = .zero
     private var markingPage: PDFPage?
 
     override func mouseDown(with event: NSEvent) {
@@ -24,12 +26,15 @@ final class SigningPDFView: PDFView {
         guard let page = page(for: viewPoint, nearest: true) else { super.mouseDown(with: event); return }
         let p = convert(viewPoint, to: page)
         if redactMode {
-            // Rubber-band a redaction mark.
-            markOrigin = p
-            let ann = RedactionAnnotation(bounds: CGRect(origin: p, size: .zero))
-            page.addAnnotation(ann)
-            marking = ann
+            markOriginView = viewPoint
             markingPage = page
+            let band = NSView(frame: CGRect(origin: viewPoint, size: .zero))
+            band.wantsLayer = true
+            band.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.45).cgColor
+            band.layer?.borderColor = NSColor.systemRed.cgColor
+            band.layer?.borderWidth = 1.5
+            addSubview(band)
+            rubberBand = band
             return
         }
         if let ann = page.annotations.compactMap({ $0 as? ImageStampAnnotation }).last(where: { $0.bounds.contains(p) }) {
@@ -43,11 +48,10 @@ final class SigningPDFView: PDFView {
     }
 
     override func mouseDragged(with event: NSEvent) {
-        if let m = marking, let page = markingPage {
-            let p = convert(convert(event.locationInWindow, from: nil), to: page)
-            m.bounds = CGRect(x: min(markOrigin.x, p.x), y: min(markOrigin.y, p.y),
-                              width: abs(p.x - markOrigin.x), height: abs(p.y - markOrigin.y))
-            needsDisplay = true
+        if let band = rubberBand {
+            let p = convert(event.locationInWindow, from: nil)
+            band.frame = CGRect(x: min(markOriginView.x, p.x), y: min(markOriginView.y, p.y),
+                                width: abs(p.x - markOriginView.x), height: abs(p.y - markOriginView.y))
             return
         }
         guard let ann = dragging, let page = dragPage else { super.mouseDragged(with: event); return }
@@ -61,14 +65,22 @@ final class SigningPDFView: PDFView {
     }
 
     override func mouseUp(with event: NSEvent) {
-        if let m = marking {
-            if m.bounds.width < 4 || m.bounds.height < 4 {
-                markingPage?.removeAnnotation(m)   // stray click, not a mark
-            } else {
-                stampDelegate?.redactionAdded(m)
+        if let band = rubberBand {
+            let viewRect = band.frame
+            band.removeFromSuperview()
+            rubberBand = nil
+            defer { markingPage = nil }
+            // Commit as one annotation with final bounds on the page where the drag started.
+            if viewRect.width >= 4, viewRect.height >= 4, let page = markingPage {
+                let a = convert(viewRect.origin, to: page)
+                let b = convert(CGPoint(x: viewRect.maxX, y: viewRect.maxY), to: page)
+                let pageRect = CGRect(x: min(a.x, b.x), y: min(a.y, b.y),
+                                      width: abs(b.x - a.x), height: abs(b.y - a.y))
+                guard pageRect.width >= 2, pageRect.height >= 2 else { return }
+                let ann = RedactionAnnotation(bounds: pageRect)
+                page.addAnnotation(ann)
+                stampDelegate?.redactionAdded(ann)
             }
-            marking = nil; markingPage = nil
-            needsDisplay = true
             return
         }
         if let ann = dragging {
