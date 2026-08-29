@@ -35,6 +35,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     private var shareButton: NSButton?
     private var titleChevron: NSButton?
     private var renamePopover: NSPopover?
+    private let titleButton = NSButton(title: "", target: nil, action: nil)
+    private let subtitleLabel = NSTextField(labelWithString: "")
+    private var titleContainer: NSView?
 
     // Redact strip controls
     private var redactOn = false
@@ -142,7 +145,8 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     }
 
     private func setSubtitle(_ s: String) {
-        if #available(macOS 11.0, *) { window?.subtitle = s }
+        let edited = window?.isDocumentEdited == true ? " — Edited" : ""
+        subtitleLabel.stringValue = s + edited
     }
 
     // MARK: - Toolbar
@@ -341,22 +345,59 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
 
     // MARK: - Rename (Preview-style: ⌄ chevron beside the title opens a rename popover)
 
+    // Preview's look: the title text and its ⌄ are ONE control — hide the native title and
+    // render our own title + chevron + "Page x of y" subtitle. Clicking either opens rename.
     private func installTitleChevron(on window: NSWindow) {
-        let acc = NSTitlebarAccessoryViewController()
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 22, height: 20))
-        let b = NSButton(frame: NSRect(x: 0, y: 1, width: 20, height: 18))
+        window.titleVisibility = .hidden
+
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 260, height: 34))
+
+        titleButton.isBordered = false
+        titleButton.alignment = .left
+        titleButton.lineBreakMode = .byTruncatingMiddle
+        titleButton.target = self
+        titleButton.action = #selector(renameDocument(_:))
+        titleButton.toolTip = "Rename…"
+        container.addSubview(titleButton)
+
+        let b = NSButton(frame: .zero)
         b.isBordered = false
         b.image = NSImage(systemSymbolName: "chevron.down", accessibilityDescription: "Rename")?
-            .withSymbolConfiguration(.init(pointSize: 10, weight: .semibold))
+            .withSymbolConfiguration(.init(pointSize: 9, weight: .semibold))
         b.contentTintColor = .tertiaryLabelColor
         b.target = self
         b.action = #selector(renameDocument(_:))
         b.toolTip = "Rename…"
         container.addSubview(b)
         titleChevron = b
+
+        subtitleLabel.font = .systemFont(ofSize: 11)
+        subtitleLabel.textColor = .secondaryLabelColor
+        subtitleLabel.lineBreakMode = .byTruncatingTail
+        container.addSubview(subtitleLabel)
+
+        titleContainer = container
+        let acc = NSTitlebarAccessoryViewController()
         acc.view = container
         acc.layoutAttribute = .leading
         window.addTitlebarAccessoryViewController(acc)
+        layoutTitleAccessory()
+    }
+
+    private func layoutTitleAccessory() {
+        guard let container = titleContainer else { return }
+        let name = pdfURL.lastPathComponent
+        let font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        titleButton.attributedTitle = NSAttributedString(string: name, attributes: [
+            .font: font, .foregroundColor: NSColor.labelColor
+        ])
+        let titleWidth = min(ceil(name.size(withAttributes: [.font: font]).width) + 8, 420)
+        titleButton.frame = NSRect(x: 4, y: 15, width: titleWidth, height: 18)
+        titleChevron?.frame = NSRect(x: titleButton.frame.maxX, y: 16, width: 16, height: 16)
+        subtitleLabel.frame = NSRect(x: 6, y: 0, width: max(titleWidth + 40, 200), height: 14)
+        container.frame = NSRect(x: 0, y: 0,
+                                 width: max(titleButton.frame.maxX + 20, subtitleLabel.frame.maxX),
+                                 height: 34)
     }
 
     @objc func renameDocument(_ sender: Any?) {
@@ -430,6 +471,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         pdfURL = dest
         window?.title = dest.lastPathComponent
         window?.representedURL = dest
+        layoutTitleAccessory()
     }
     @objc func zoomIn(_ sender: Any?) { pdfView.zoomIn(sender) }
     @objc func zoomOut(_ sender: Any?) { pdfView.zoomOut(sender) }
@@ -928,7 +970,10 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         }
     }
 
-    private func markEdited() { window?.isDocumentEdited = true }
+    private func markEdited() {
+        window?.isDocumentEdited = true
+        pageChanged()   // refresh the "— Edited" subtitle
+    }
 
     private func forceRefresh() {
         let page = pdfView.currentPage
@@ -951,6 +996,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             guard resp == .OK, let out = panel.url, let self = self else { return }
             if self.exportCurrentState(doc, to: out) {
                 self.window?.isDocumentEdited = false
+                self.pageChanged()
                 NSWorkspace.shared.activateFileViewerSelecting([out])
                 NSSound(named: "Glass")?.play()
             } else {
