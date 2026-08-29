@@ -2146,11 +2146,26 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in self?.pageChanged() }
     }
 
+    // Explicit flavors, not writeObjects: NSImage alone puts TIFF on the pasteboard and
+    // leaves PNG/JPEG to lazy translation — which some paste targets (browsers, Office)
+    // never ask for. Declaring PNG + TIFF + the original JPEG makes paste work everywhere.
     @objc private func copyHitImage(_ sender: Any?) {
         guard let (hit, page) = lastImageHit,
-              let img = ImageHitEngine.extract(hit, from: page) else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.writeObjects([img])
+              let img = ImageHitEngine.extract(hit, from: page),
+              let tiff = img.tiffRepresentation,
+              let rep = NSBitmapImageRep(data: tiff),
+              let png = rep.representation(using: .png, properties: [:]) else {
+            infoAlert("Couldn't copy image", "This image couldn't be extracted from the PDF.")
+            return
+        }
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        var types: [NSPasteboard.PasteboardType] = [.png, .tiff]
+        if hit.jpegData != nil { types.append(NSPasteboard.PasteboardType("public.jpeg")) }
+        pb.declareTypes(types, owner: nil)
+        pb.setData(png, forType: .png)
+        pb.setData(tiff, forType: .tiff)
+        if let jpeg = hit.jpegData { pb.setData(jpeg, forType: NSPasteboard.PasteboardType("public.jpeg")) }
         NSSound(named: "Pop")?.play()
         flashSubtitle("Image copied — paste anywhere")
     }
