@@ -2146,9 +2146,11 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in self?.pageChanged() }
     }
 
-    // Explicit flavors, not writeObjects: NSImage alone puts TIFF on the pasteboard and
-    // leaves PNG/JPEG to lazy translation — which some paste targets (browsers, Office)
-    // never ask for. Declaring PNG + TIFF + the original JPEG makes paste work everywhere.
+    // One pasteboard item carrying EVERY flavor a paste target can want:
+    // - PNG + TIFF + original JPEG data → Mail, Word, Notes, browsers
+    // - a real file on disk + its file-URL flavor → Finder/Desktop paste works too
+    //   (image data alone leaves Finder's Paste greyed out — the classic complaint)
+    // Then a read-back self-check: if the write didn't land, SAY so.
     @objc private func copyHitImage(_ sender: Any?) {
         guard let (hit, page) = lastImageHit,
               let img = ImageHitEngine.extract(hit, from: page),
@@ -2158,16 +2160,46 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             infoAlert("Couldn't copy image", "This image couldn't be extracted from the PDF.")
             return
         }
+
+        // A pasted file needs to exist when Finder resolves it — keep copies in Jack's
+        // cache and prune anything older than a week.
+        let cacheDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Jack/Clipboard", isDirectory: true)
+        try? FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
+        if let old = try? FileManager.default.contentsOfDirectory(at: cacheDir, includingPropertiesForKeys: [.creationDateKey]) {
+            for u in old {
+                if let d = (try? u.resourceValues(forKeys: [.creationDateKey]))?.creationDate,
+                   d < Date(timeIntervalSinceNow: -7 * 86400) {
+                    try? FileManager.default.removeItem(at: u)
+                }
+            }
+        }
+        let df = DateFormatter()
+        df.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
+        let ext = hit.jpegData != nil ? "jpg" : "png"
+        let fileURL = cacheDir.appendingPathComponent("Jack Image \(df.string(from: Date())).\(ext)")
+        try? (hit.jpegData ?? png).write(to: fileURL)
+
+        let item = NSPasteboardItem()
+        item.setData(png, forType: .png)
+        item.setData(tiff, forType: .tiff)
+        if let jpeg = hit.jpegData { item.setData(jpeg, forType: NSPasteboard.PasteboardType("public.jpeg")) }
+        if FileManager.default.fileExists(atPath: fileURL.path) {
+            item.setString(fileURL.absoluteString, forType: .fileURL)
+        }
         let pb = NSPasteboard.general
         pb.clearContents()
-        var types: [NSPasteboard.PasteboardType] = [.png, .tiff]
-        if hit.jpegData != nil { types.append(NSPasteboard.PasteboardType("public.jpeg")) }
-        pb.declareTypes(types, owner: nil)
-        pb.setData(png, forType: .png)
-        pb.setData(tiff, forType: .tiff)
-        if let jpeg = hit.jpegData { pb.setData(jpeg, forType: NSPasteboard.PasteboardType("public.jpeg")) }
+        let wrote = pb.writeObjects([item])
+
+        // Trust nothing: confirm the clipboard actually holds what we just wrote.
+        if !wrote || pb.data(forType: .png) == nil {
+            infoAlert("Copy didn't reach the clipboard",
+                      "Something on this Mac (often a clipboard manager) blocked the copy. The image was saved instead — you can drag it from there.")
+            NSWorkspace.shared.activateFileViewerSelecting([fileURL])
+            return
+        }
         NSSound(named: "Pop")?.play()
-        flashSubtitle("Image copied — paste anywhere")
+        flashSubtitle("Image copied — paste into any app or folder")
     }
 
     @objc private func saveHitImage(_ sender: Any?) {
