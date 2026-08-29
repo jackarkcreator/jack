@@ -5,9 +5,10 @@ import AppKit
 import PDFKit
 
 final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSToolbarDelegate,
-                                      StampSelectionDelegate, PageSidebarDelegate, NSSearchFieldDelegate {
+                                      StampSelectionDelegate, PageSidebarDelegate, NSSearchFieldDelegate,
+                                      NSMenuDelegate {
 
-    private let pdfURL: URL
+    private var pdfURL: URL
     private let pdfView = SigningPDFView()
     private let sidebar = PageSidebarController()
     private var searchField: NSSearchField?
@@ -31,6 +32,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     private let sizeSlider = NSSlider()
     private let removeButton = NSButton()
     private var markupButton: NSButton?
+    private var shareButton: NSButton?
 
     // Redact strip controls
     private var redactOn = false
@@ -152,6 +154,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         static let redact = NSToolbarItem.Identifier("jack.redact")
         static let clean = NSToolbarItem.Identifier("jack.clean")
         static let tools = NSToolbarItem.Identifier("jack.tools")
+        static let share = NSToolbarItem.Identifier("jack.share")
         static let highlight = NSToolbarItem.Identifier("jack.highlight")
         static let lock = NSToolbarItem.Identifier("jack.lock")
         static let print = NSToolbarItem.Identifier("jack.print")
@@ -161,7 +164,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         [ItemID.sidebar, .space, ItemID.undo, ItemID.redo, .flexibleSpace, ItemID.zoomOut, ItemID.zoomIn, .space,
-         ItemID.highlight, ItemID.markup, ItemID.redact, ItemID.clean, ItemID.lock, ItemID.tools, ItemID.print, .flexibleSpace, ItemID.search, ItemID.save]
+         ItemID.highlight, ItemID.markup, ItemID.redact, ItemID.clean, ItemID.lock, ItemID.tools, ItemID.print, ItemID.share, .flexibleSpace, ItemID.search, ItemID.save]
     }
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         toolbarDefaultItemIdentifiers(toolbar)
@@ -180,7 +183,32 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             return item
         }
         switch id {
-        case ItemID.sidebar: return simple(id, "sidebar.left", "Thumbnails", #selector(toggleSidebar(_:)))
+        case ItemID.sidebar:
+            // Preview-style view pull-down: Thumbnails toggle + page display modes.
+            let item = NSMenuToolbarItem(itemIdentifier: id)
+            item.image = NSImage(systemSymbolName: "sidebar.left", accessibilityDescription: "View")
+            item.label = "View"
+            item.toolTip = "Thumbnails and page layout"
+            let menu = NSMenu()
+            menu.delegate = self
+            menu.addItem({ let m = NSMenuItem(title: "Thumbnails", action: #selector(toggleSidebar(_:)), keyEquivalent: ""); m.target = self; m.tag = 100; return m }())
+            menu.addItem(.separator())
+            menu.addItem({ let m = NSMenuItem(title: "Continuous Scroll", action: #selector(displayContinuous(_:)), keyEquivalent: ""); m.target = self; m.tag = 101; return m }())
+            menu.addItem({ let m = NSMenuItem(title: "Single Page", action: #selector(displaySinglePage(_:)), keyEquivalent: ""); m.target = self; m.tag = 102; return m }())
+            menu.addItem({ let m = NSMenuItem(title: "Two Pages", action: #selector(displayTwoPages(_:)), keyEquivalent: ""); m.target = self; m.tag = 103; return m }())
+            item.menu = menu
+            return item
+        case ItemID.share:
+            let item = NSToolbarItem(itemIdentifier: id)
+            let b = NSButton(image: NSImage(systemSymbolName: "square.and.arrow.up",
+                                            accessibilityDescription: "Share") ?? NSImage(),
+                             target: self, action: #selector(shareDocument(_:)))
+            b.bezelStyle = .texturedRounded
+            shareButton = b
+            item.view = b
+            item.label = "Share"
+            item.toolTip = "Share — AirDrop, Mail, Messages…"
+            return item
         case ItemID.undo:    return simple(id, "arrow.uturn.backward", "Undo", #selector(undoEdit(_:)))
         case ItemID.redo:    return simple(id, "arrow.uturn.forward", "Redo", #selector(redoEdit(_:)))
         case ItemID.zoomOut: return simple(id, "minus.magnifyingglass", "Zoom Out", #selector(zoomOut(_:)))
@@ -274,6 +302,73 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     @objc func toggleSidebar(_ sender: Any?) { sidebarVisible.toggle(); layoutViews() }
     @objc func undoEdit(_ sender: Any?) { docUndo.undo() }
     @objc func redoEdit(_ sender: Any?) { docUndo.redo() }
+    @objc func displayContinuous(_ sender: Any?) { pdfView.displayMode = .singlePageContinuous; pdfView.autoScales = true }
+    @objc func displaySinglePage(_ sender: Any?) { pdfView.displayMode = .singlePage; pdfView.autoScales = true }
+    @objc func displayTwoPages(_ sender: Any?) { pdfView.displayMode = .twoUpContinuous; pdfView.autoScales = true }
+
+    // Keep the View pull-down's checkmarks true to the current state.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        for item in menu.items {
+            switch item.tag {
+            case 100: item.state = sidebarVisible ? .on : .off
+            case 101: item.state = pdfView.displayMode == .singlePageContinuous ? .on : .off
+            case 102: item.state = pdfView.displayMode == .singlePage ? .on : .off
+            case 103: item.state = pdfView.displayMode == .twoUpContinuous ? .on : .off
+            default: break
+            }
+        }
+    }
+
+    // MARK: - Share (native picker: AirDrop, Mail, Messages…) — shares the state on screen
+
+    @objc func shareDocument(_ sender: Any?) {
+        guard let anchor = shareButton else { return }
+        var url = pdfURL
+        if window?.isDocumentEdited == true, let doc = pdfView.document {
+            // Share what the user sees: edits flattened, comments carried.
+            let dir = FileManager.default.temporaryDirectory
+                .appendingPathComponent("jack-share-\(UUID().uuidString)", isDirectory: true)
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let tmp = dir.appendingPathComponent(pdfURL.lastPathComponent)
+            if exportCurrentState(doc, to: tmp) { url = tmp }
+        }
+        let picker = NSSharingServicePicker(items: [url])
+        picker.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .minY)
+    }
+
+    // MARK: - Rename (on disk, in place)
+
+    @objc func renameDocument(_ sender: Any?) {
+        let alert = NSAlert()
+        alert.messageText = "Rename"
+        alert.informativeText = "Renames the file on disk."
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
+        field.stringValue = pdfURL.deletingPathExtension().lastPathComponent
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Rename")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let name = field.stringValue
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: ":", with: "-")
+        guard !name.isEmpty, name != pdfURL.deletingPathExtension().lastPathComponent else { return }
+        let dest = pdfURL.deletingLastPathComponent().appendingPathComponent(name + ".pdf")
+        guard !FileManager.default.fileExists(atPath: dest.path) else {
+            infoAlert("Name taken", "A file named “\(dest.lastPathComponent)” already exists here.")
+            return
+        }
+        do {
+            try FileManager.default.moveItem(at: pdfURL, to: dest)
+        } catch {
+            infoAlert("Couldn’t rename", error.localizedDescription)
+            return
+        }
+        pdfURL = dest
+        window?.title = dest.lastPathComponent
+        window?.representedURL = dest
+    }
     @objc func zoomIn(_ sender: Any?) { pdfView.zoomIn(sender) }
     @objc func zoomOut(_ sender: Any?) { pdfView.zoomOut(sender) }
     @objc func zoomToFit(_ sender: Any?) { pdfView.autoScales = true }
@@ -790,30 +885,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         panel.nameFieldStringValue = pdfURL.deletingPathExtension().lastPathComponent + "-edited.pdf"
         panel.directoryURL = pdfURL.deletingLastPathComponent()
         if #available(macOS 11.0, *) { panel.allowedContentTypes = [.pdf] }
-        let comments = collectComments()
         panel.beginSheetModal(for: window) { [weak self] resp in
             guard resp == .OK, let out = panel.url, let self = self else { return }
-            var ok: Bool
-            if comments.isEmpty {
-                ok = self.flatten(doc, to: out)
-            } else {
-                // Flatten content + stamps, then carry the comments over as live notes.
-                let tmp = FileManager.default.temporaryDirectory
-                    .appendingPathComponent("jack-save-\(UUID().uuidString).pdf")
-                ok = self.flatten(doc, to: tmp)
-                if ok, let flat = PDFDocument(url: tmp) {
-                    for (i, a) in comments {
-                        // Export as a standard PDF note so Acrobat/Preview show a clickable comment.
-                        let copy = PDFAnnotation(bounds: a.bounds, forType: .text, withProperties: nil)
-                        copy.contents = a.contents
-                        copy.color = NSColor.systemYellow
-                        flat.page(at: i)?.addAnnotation(copy)
-                    }
-                    ok = flat.write(to: out)
-                } else { ok = false }
-                try? FileManager.default.removeItem(at: tmp)
-            }
-            if ok {
+            if self.exportCurrentState(doc, to: out) {
                 self.window?.isDocumentEdited = false
                 NSWorkspace.shared.activateFileViewerSelecting([out])
                 NSSound(named: "Glass")?.play()
@@ -821,6 +895,24 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
                 infoAlert("Save failed", "Couldn’t write the PDF.")
             }
         }
+    }
+
+    // Everything Save/Share exports: content + stamps flattened, comments carried as live notes.
+    private func exportCurrentState(_ doc: PDFDocument, to out: URL) -> Bool {
+        let comments = collectComments()
+        if comments.isEmpty { return flatten(doc, to: out) }
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("jack-save-\(UUID().uuidString).pdf")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        guard flatten(doc, to: tmp), let flat = PDFDocument(url: tmp) else { return false }
+        for (i, a) in comments {
+            // Standard PDF note so Acrobat/Preview show a clickable comment.
+            let copy = PDFAnnotation(bounds: a.bounds, forType: .text, withProperties: nil)
+            copy.contents = a.contents
+            copy.color = NSColor.systemYellow
+            flat.page(at: i)?.addAnnotation(copy)
+        }
+        return flat.write(to: out)
     }
 
     // Burn stamps (and rendered form-field values) into page content so the result is portable.

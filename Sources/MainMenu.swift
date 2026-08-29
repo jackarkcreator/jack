@@ -26,6 +26,7 @@ enum MainMenu {
         file.addItem(.separator())
         file.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         file.addItem(item("Save PDF…", #selector(DocumentWindowController.saveDocument(_:)), "s"))
+        file.addItem(item("Rename…", #selector(DocumentWindowController.renameDocument(_:)), ""))
         file.addItem(item("Clean for Sharing…", #selector(DocumentWindowController.cleanForSharing(_:)), "L"))
         file.addItem(item("Lock for Sharing…", #selector(DocumentWindowController.lockForSharing(_:)), "l"))
         file.addItem(.separator())
@@ -64,6 +65,10 @@ enum MainMenu {
         view.addItem(item("Zoom to Fit", #selector(DocumentWindowController.zoomToFit(_:)), "9"))
         view.addItem(.separator())
         view.addItem(item("Show/Hide Thumbnails", #selector(DocumentWindowController.toggleSidebar(_:)), "t"))
+        view.addItem(.separator())
+        view.addItem(item("Continuous Scroll", #selector(DocumentWindowController.displayContinuous(_:)), ""))
+        view.addItem(item("Single Page", #selector(DocumentWindowController.displaySinglePage(_:)), ""))
+        view.addItem(item("Two Pages", #selector(DocumentWindowController.displayTwoPages(_:)), ""))
         view.addItem(item("Markup", #selector(DocumentWindowController.toggleMarkup(_:)), "A"))
         view.addItem(item("Redact", #selector(DocumentWindowController.toggleRedact(_:)), "R"))
         viewItem.submenu = view
