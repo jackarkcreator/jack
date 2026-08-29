@@ -61,6 +61,16 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     private var markupOn = false
     private let sidebarWidth: CGFloat = 172
 
+    // Ask panel (on-device model; only exists when Apple Intelligence is available)
+    private var askVisible = false
+    private let askWidth: CGFloat = 320
+    private let askPanel = NSView()
+    private let askQuestion = NSTextField()
+    private let askAnswer = NSTextView()
+    private let askSpinner = NSProgressIndicator()
+    private var askButton: NSButton?
+    private var askRunning = false
+
     // Markup strip controls
     private var markupAccessory: NSTitlebarAccessoryViewController?
     private let sizeSlider = NSSlider()
@@ -134,6 +144,8 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         pdfView.backgroundColor = NSColor.underPageBackgroundColor
         pdfView.stampDelegate = self
         content.addSubview(pdfView)
+        if AskEngine.isAvailable { buildAskPanel() }
+        content.addSubview(askPanel)
         layoutViews()
 
         NotificationCenter.default.addObserver(self, selector: #selector(pageChanged),
@@ -156,11 +168,15 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     private func layoutViews() {
         guard let content = window?.contentView else { return }
         let sw = sidebarVisible ? sidebarWidth : 0
+        let aw = askVisible ? askWidth : 0
         sidebar.scrollView.frame = NSRect(x: 0, y: 0, width: sw, height: content.bounds.height)
         sidebar.scrollView.isHidden = !sidebarVisible
         sidebar.scrollView.autoresizingMask = [.height]
-        pdfView.frame = NSRect(x: sw, y: 0, width: content.bounds.width - sw, height: content.bounds.height)
+        pdfView.frame = NSRect(x: sw, y: 0, width: content.bounds.width - sw - aw, height: content.bounds.height)
         pdfView.autoresizingMask = [.width, .height]
+        askPanel.frame = NSRect(x: content.bounds.width - aw, y: 0, width: askWidth, height: content.bounds.height)
+        askPanel.isHidden = !askVisible
+        askPanel.autoresizingMask = [.height, .minXMargin]
     }
 
     @objc private func selectionChanged() {
@@ -212,6 +228,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         static let clean = NSToolbarItem.Identifier("jack.clean")
         static let tools = NSToolbarItem.Identifier("jack.tools")
         static let share = NSToolbarItem.Identifier("jack.share")
+        static let ask = NSToolbarItem.Identifier("jack.ask")
         static let highlight = NSToolbarItem.Identifier("jack.highlight")
         static let lock = NSToolbarItem.Identifier("jack.lock")
         static let print = NSToolbarItem.Identifier("jack.print")
@@ -220,8 +237,13 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        var ids: [NSToolbarItem.Identifier] =
         [ItemID.sidebar, .space, ItemID.undo, ItemID.redo, .flexibleSpace, ItemID.zoomOut, ItemID.zoomIn, .space,
          ItemID.highlight, ItemID.markup, ItemID.redact, ItemID.clean, ItemID.lock, ItemID.tools, ItemID.print, ItemID.share, .flexibleSpace, ItemID.search, ItemID.save]
+        if AskEngine.isAvailable, let i = ids.firstIndex(of: ItemID.share) {
+            ids.insert(ItemID.ask, at: i + 1)
+        }
+        return ids
     }
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         toolbarDefaultItemIdentifiers(toolbar)
@@ -254,6 +276,18 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             menu.addItem({ let m = NSMenuItem(title: "Single Page", action: #selector(displaySinglePage(_:)), keyEquivalent: ""); m.target = self; m.tag = 102; return m }())
             menu.addItem({ let m = NSMenuItem(title: "Two Pages", action: #selector(displayTwoPages(_:)), keyEquivalent: ""); m.target = self; m.tag = 103; return m }())
             item.menu = menu
+            return item
+        case ItemID.ask:
+            let item = NSToolbarItem(itemIdentifier: id)
+            let b = NSButton(image: NSImage(systemSymbolName: "wand.and.stars",
+                                            accessibilityDescription: "Ask") ?? NSImage(),
+                             target: self, action: #selector(toggleAsk(_:)))
+            b.setButtonType(.pushOnPushOff)
+            b.bezelStyle = .texturedRounded
+            askButton = b
+            item.view = b
+            item.label = "Ask"
+            item.toolTip = "Ask this PDF — answers on this Mac, nothing uploaded"
             return item
         case ItemID.share:
             let item = NSToolbarItem(itemIdentifier: id)
@@ -394,6 +428,125 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         }
         let picker = NSSharingServicePicker(items: [url])
         picker.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .minY)
+    }
+
+    // MARK: - Ask panel (on-device model)
+
+    @objc func toggleAsk(_ sender: Any?) {
+        askVisible.toggle()
+        askButton?.state = askVisible ? .on : .off
+        layoutViews()
+        if askVisible { window?.makeFirstResponder(askQuestion) }
+    }
+
+    private func buildAskPanel() {
+        askPanel.wantsLayer = true
+        askPanel.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        let w = askWidth
+        let h: CGFloat = 700   // placeholder; autoresizing keeps children pinned
+
+        let divider = NSBox(frame: NSRect(x: 0, y: 0, width: 1, height: h))
+        divider.boxType = .separator
+        divider.autoresizingMask = [.height]
+        askPanel.addSubview(divider)
+
+        let title = NSTextField(labelWithString: "Ask this PDF")
+        title.font = .systemFont(ofSize: 14, weight: .semibold)
+        title.frame = NSRect(x: 16, y: h - 34, width: w - 60, height: 20)
+        title.autoresizingMask = [.minYMargin]
+        askPanel.addSubview(title)
+
+        askSpinner.style = .spinning
+        askSpinner.controlSize = .small
+        askSpinner.isDisplayedWhenStopped = false
+        askSpinner.frame = NSRect(x: w - 36, y: h - 34, width: 18, height: 18)
+        askSpinner.autoresizingMask = [.minYMargin]
+        askPanel.addSubview(askSpinner)
+
+        let privacy = NSTextField(labelWithString: "Answers on this Mac — nothing is uploaded.")
+        privacy.font = .systemFont(ofSize: 10)
+        privacy.textColor = .secondaryLabelColor
+        privacy.frame = NSRect(x: 16, y: h - 52, width: w - 32, height: 14)
+        privacy.autoresizingMask = [.minYMargin]
+        askPanel.addSubview(privacy)
+
+        func quick(_ label: String, _ q: String, x: CGFloat, width: CGFloat) -> NSButton {
+            let b = NSButton(title: label, target: self, action: #selector(quickAsk(_:)))
+            b.bezelStyle = .rounded
+            b.controlSize = .small
+            b.frame = NSRect(x: x, y: h - 84, width: width, height: 24)
+            b.autoresizingMask = [.minYMargin]
+            b.toolTip = q
+            b.identifier = NSUserInterfaceItemIdentifier(q)
+            askPanel.addSubview(b)
+            return b
+        }
+        _ = quick("Summarize", "__summarize__", x: 16, width: 92)
+        _ = quick("Key dates", "List every date and deadline mentioned in the document.", x: 112, width: 92)
+        _ = quick("Amounts", "List every dollar amount mentioned and what it is for.", x: 208, width: 92)
+
+        askQuestion.placeholderString = "Ask a question about this document…"
+        askQuestion.font = .systemFont(ofSize: 12)
+        askQuestion.frame = NSRect(x: 16, y: h - 118, width: w - 88, height: 24)
+        askQuestion.autoresizingMask = [.minYMargin]
+        askQuestion.target = self
+        askQuestion.action = #selector(askSubmitted(_:))
+        askPanel.addSubview(askQuestion)
+
+        let go = NSButton(title: "Ask", target: self, action: #selector(askSubmitted(_:)))
+        go.bezelStyle = .rounded
+        go.frame = NSRect(x: w - 66, y: h - 121, width: 50, height: 28)
+        go.autoresizingMask = [.minYMargin]
+        askPanel.addSubview(go)
+
+        let scroll = NSScrollView(frame: NSRect(x: 16, y: 14, width: w - 32, height: h - 146))
+        scroll.autoresizingMask = [.height]
+        scroll.hasVerticalScroller = true
+        scroll.drawsBackground = false
+        askAnswer.frame = scroll.bounds
+        askAnswer.isEditable = false
+        askAnswer.font = .systemFont(ofSize: 12.5)
+        askAnswer.drawsBackground = false
+        askAnswer.textContainerInset = NSSize(width: 0, height: 4)
+        askAnswer.autoresizingMask = [.width]
+        scroll.documentView = askAnswer
+        askPanel.addSubview(scroll)
+    }
+
+    @objc private func quickAsk(_ sender: NSButton) {
+        runAsk(sender.identifier?.rawValue ?? "")
+    }
+
+    @objc private func askSubmitted(_ sender: Any?) {
+        let q = askQuestion.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return }
+        runAsk(q)
+    }
+
+    private func runAsk(_ question: String) {
+        guard !askRunning, let doc = pdfView.document else { return }
+        askRunning = true
+        askSpinner.startAnimation(nil)
+        askAnswer.string = question == "__summarize__" ? "Summarizing…" : "Thinking…"
+        Task { [weak self] in
+            var result: String
+            do {
+                if question == "__summarize__" {
+                    result = try await AskEngine.summarize(doc: doc) { done, total in
+                        DispatchQueue.main.async { self?.askAnswer.string = "Reading page group \(done) of \(total)…" }
+                    }
+                } else {
+                    result = try await AskEngine.answer(question: question, doc: doc)
+                }
+            } catch {
+                result = "Couldn’t get an answer: \(error.localizedDescription)"
+            }
+            await MainActor.run {
+                self?.askAnswer.string = result
+                self?.askSpinner.stopAnimation(nil)
+                self?.askRunning = false
+            }
+        }
     }
 
     // MARK: - Title control + rename popover (v1.8 UX on the NSDocument backbone)

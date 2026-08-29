@@ -20,8 +20,11 @@ for f in "$DIR"/Sources/*.swift; do
   APP_SRCS+=("$f")
 done
 SPARKLE_FLAGS=(-F "$DIR/Frameworks" -framework Sparkle -Xlinker -rpath -Xlinker @executable_path/../Frameworks)
-swiftc -O -target arm64-apple-macos11  "${APP_SRCS[@]}" "${SPARKLE_FLAGS[@]}" -o "$BUILD/jack-arm64"
-swiftc -O -target x86_64-apple-macos11 "${APP_SRCS[@]}" "${SPARKLE_FLAGS[@]}" -o "$BUILD/jack-x86_64"
+# FoundationModels (Ask) is macOS 26+ — weak-link so Jack still launches on older macOS.
+FM_FLAGS=(-Xfrontend -disable-autolink-framework -Xfrontend FoundationModels
+          -Xlinker -weak_framework -Xlinker FoundationModels)
+swiftc -O -target arm64-apple-macos11  "${APP_SRCS[@]}" "${SPARKLE_FLAGS[@]}" "${FM_FLAGS[@]}" -o "$BUILD/jack-arm64"
+swiftc -O -target x86_64-apple-macos11 "${APP_SRCS[@]}" "${SPARKLE_FLAGS[@]}" "${FM_FLAGS[@]}" -o "$BUILD/jack-x86_64"
 lipo -create "$BUILD/jack-arm64" "$BUILD/jack-x86_64" -o "$APPDIR/Contents/MacOS/$APP"
 chmod +x "$APPDIR/Contents/MacOS/$APP"
 
