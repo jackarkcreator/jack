@@ -17,6 +17,17 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     private let pdfView = SigningPDFView()
     private var uiBuilt = false
 
+    // Custom title control (v1.8 look Keno approved): title + ⌄ + subtitle as one unit.
+    private var titleChevron: NSButton?
+    private var renamePopover: NSPopover?
+    private let titleButton = NSButton(title: "", target: nil, action: nil)
+    private let subtitleLabel = NSTextField(labelWithString: "")
+    private var titleContainer: NSView?
+    private weak var renameField: NSTextField?
+    private weak var renameWherePopup: NSPopUpButton?
+    private var pendingRenameName: String?
+    private var pendingRenameWhere: URL?
+
     // Restoration builds this controller before the document's read completes.
     func attachDocumentIfNeeded() {
         guard !uiBuilt, let doc = (document as? JackDocument)?.pdf else { return }
@@ -110,6 +121,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         toolbar.allowsUserCustomization = false
         window.toolbar = toolbar
         if #available(macOS 11.0, *) { window.toolbarStyle = .unified }
+        installTitleChevron(on: window)
 
         sidebar.document = doc
         sidebar.delegate = self
@@ -177,7 +189,14 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     }
 
     private func setSubtitle(_ s: String) {
-        if #available(macOS 11.0, *) { window?.subtitle = s }
+        let edited = (document as? NSDocument)?.isDocumentEdited == true ? " — Edited" : ""
+        subtitleLabel.stringValue = s + edited
+    }
+
+    // NSDocument re-syncs the title on rename/move/duplicate — keep our control in step.
+    override func windowTitle(forDocumentDisplayName displayName: String) -> String {
+        DispatchQueue.main.async { [weak self] in self?.layoutTitleAccessory() }
+        return displayName
     }
 
     // MARK: - Toolbar
@@ -375,6 +394,178 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         }
         let picker = NSSharingServicePicker(items: [url])
         picker.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .minY)
+    }
+
+    // MARK: - Title control + rename popover (v1.8 UX on the NSDocument backbone)
+
+    private func installTitleChevron(on window: NSWindow) {
+        window.titleVisibility = .hidden
+
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 260, height: 34))
+
+        titleButton.isBordered = false
+        titleButton.alignment = .left
+        titleButton.lineBreakMode = .byTruncatingMiddle
+        titleButton.target = self
+        titleButton.action = #selector(renameDocument(_:))
+        titleButton.toolTip = "Rename…"
+        container.addSubview(titleButton)
+
+        let b = NSButton(frame: .zero)
+        b.isBordered = false
+        b.image = NSImage(systemSymbolName: "chevron.down", accessibilityDescription: "Rename")?
+            .withSymbolConfiguration(.init(pointSize: 9, weight: .semibold))
+        b.contentTintColor = .tertiaryLabelColor
+        b.target = self
+        b.action = #selector(renameDocument(_:))
+        b.toolTip = "Rename…"
+        container.addSubview(b)
+        titleChevron = b
+
+        subtitleLabel.font = .systemFont(ofSize: 11)
+        subtitleLabel.textColor = .secondaryLabelColor
+        subtitleLabel.lineBreakMode = .byTruncatingTail
+        container.addSubview(subtitleLabel)
+
+        titleContainer = container
+        let acc = NSTitlebarAccessoryViewController()
+        acc.view = container
+        acc.layoutAttribute = .leading
+        window.addTitlebarAccessoryViewController(acc)
+        layoutTitleAccessory()
+    }
+
+    private func layoutTitleAccessory() {
+        guard let container = titleContainer else { return }
+        let name = pdfURL.lastPathComponent
+        let font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        titleButton.attributedTitle = NSAttributedString(string: name, attributes: [
+            .font: font, .foregroundColor: NSColor.labelColor
+        ])
+        let titleWidth = min(ceil(name.size(withAttributes: [.font: font]).width) + 8, 420)
+        titleButton.frame = NSRect(x: 4, y: 15, width: titleWidth, height: 18)
+        titleChevron?.frame = NSRect(x: titleButton.frame.maxX, y: 16, width: 16, height: 16)
+        subtitleLabel.frame = NSRect(x: 6, y: 0, width: max(titleWidth + 40, 200), height: 14)
+        container.frame = NSRect(x: 0, y: 0,
+                                 width: max(titleButton.frame.maxX + 20, subtitleLabel.frame.maxX),
+                                 height: 34)
+    }
+
+    @objc func renameDocument(_ sender: Any?) {
+        renamePopover?.close()
+        let vc = NSViewController()
+        let v = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 96))
+
+        let nameLabel = NSTextField(labelWithString: "Name:")
+        nameLabel.alignment = .right
+        nameLabel.frame = NSRect(x: 10, y: 58, width: 56, height: 18)
+        v.addSubview(nameLabel)
+        let field = NSTextField(frame: NSRect(x: 74, y: 54, width: 252, height: 24))
+        field.stringValue = pdfURL.deletingPathExtension().lastPathComponent
+        field.target = self
+        field.action = #selector(commitRename(_:))
+        v.addSubview(field)
+
+        let whereLabel = NSTextField(labelWithString: "Where:")
+        whereLabel.alignment = .right
+        whereLabel.textColor = .secondaryLabelColor
+        whereLabel.frame = NSRect(x: 10, y: 31, width: 56, height: 16)
+        v.addSubview(whereLabel)
+
+        // Live folder picker: choosing a different folder MOVES the file (via NSDocument).
+        let popup = NSPopUpButton(frame: NSRect(x: 72, y: 26, width: 256, height: 26), pullsDown: false)
+        let fm = FileManager.default
+        let current = pendingRenameWhere ?? pdfURL.deletingLastPathComponent()
+        func folderItem(_ url: URL) -> NSMenuItem {
+            let m = NSMenuItem(title: url.lastPathComponent, action: nil, keyEquivalent: "")
+            let icon = NSWorkspace.shared.icon(forFile: url.path)
+            icon.size = NSSize(width: 16, height: 16)
+            m.image = icon
+            m.representedObject = url
+            return m
+        }
+        let menu = NSMenu()
+        menu.addItem(folderItem(current))
+        var commons: [URL] = []
+        for dir: FileManager.SearchPathDirectory in [.desktopDirectory, .documentDirectory, .downloadsDirectory] {
+            if let u = fm.urls(for: dir, in: .userDomainMask).first,
+               u.standardizedFileURL != current.standardizedFileURL { commons.append(u) }
+        }
+        if !commons.isEmpty {
+            menu.addItem(.separator())
+            commons.forEach { menu.addItem(folderItem($0)) }
+        }
+        menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: "Other…", action: nil, keyEquivalent: ""))
+        popup.menu = menu
+        popup.selectItem(at: 0)
+        popup.target = self
+        popup.action = #selector(wherePopupChanged(_:))
+        v.addSubview(popup)
+        renameWherePopup = popup
+        if let pending = pendingRenameName { field.stringValue = pending }
+        pendingRenameName = nil
+
+        let button = NSButton(title: "Rename", target: self, action: #selector(commitRename(_:)))
+        button.bezelStyle = .rounded
+        button.keyEquivalent = "\r"
+        button.frame = NSRect(x: 246, y: 4, width: 84, height: 26)
+        v.addSubview(button)
+
+        vc.view = v
+        renameField = field
+        let pop = NSPopover()
+        pop.contentViewController = vc
+        pop.behavior = .transient
+        if let chevron = titleChevron {
+            pop.show(relativeTo: chevron.bounds, of: chevron, preferredEdge: .maxY)
+        }
+        renamePopover = pop
+        pop.contentViewController?.view.window?.makeFirstResponder(field)
+    }
+
+    // "Other…" needs an open panel, which dismisses the transient popover — stash the typed
+    // name, run the panel, then reopen the popover with the chosen folder selected.
+    @objc private func wherePopupChanged(_ sender: NSPopUpButton) {
+        guard sender.selectedItem?.title == "Other…" else { return }
+        pendingRenameName = renameField?.stringValue
+        renamePopover?.close()
+        guard let window = window else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.prompt = "Choose"
+        panel.directoryURL = pendingRenameWhere ?? pdfURL.deletingLastPathComponent()
+        panel.beginSheetModal(for: window) { [weak self] resp in
+            guard let self = self else { return }
+            if resp == .OK, let url = panel.url { self.pendingRenameWhere = url }
+            DispatchQueue.main.async { self.renameDocument(nil) }
+        }
+    }
+
+    @objc private func commitRename(_ sender: Any?) {
+        guard let field = renameField, let doc = document as? NSDocument else { return }
+        let name = field.stringValue
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: ":", with: "-")
+        guard !name.isEmpty else { return }
+        let folder = (renameWherePopup?.selectedItem?.representedObject as? URL)
+            ?? pdfURL.deletingLastPathComponent()
+        pendingRenameWhere = nil
+        let dest = folder.appendingPathComponent(name + ".pdf")
+        guard dest.standardizedFileURL != pdfURL.standardizedFileURL else { renamePopover?.close(); return }
+        guard !FileManager.default.fileExists(atPath: dest.path) else {
+            infoAlert("Name taken", "A file named “\(dest.lastPathComponent)” already exists in \(folder.lastPathComponent).")
+            return
+        }
+        renamePopover?.close()
+        // NSDocument keeps autosave/Versions pointed at the new identity.
+        doc.move(to: dest) { [weak self] error in
+            if let error = error { infoAlert("Couldn’t rename", error.localizedDescription) }
+            self?.layoutTitleAccessory()
+        }
     }
 
     @objc func zoomIn(_ sender: Any?) { pdfView.zoomIn(sender) }
