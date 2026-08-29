@@ -154,7 +154,7 @@ internal static class Program
 }
 
 // Natural ("IMG_2" before "IMG_10") filename ordering, matching the Mac app.
-internal sealed class NaturalComparer : IComparer<string>
+internal sealed class NaturalComparer : IComparer<string?>
 {
     public int Compare(string? a, string? b)
     {

@@ -47,6 +47,10 @@ enum MainMenu {
         edit.addItem(item("Find", #selector(DocumentWindowController.focusSearch(_:)), "f"))
         edit.addItem(item("Find Next", #selector(DocumentWindowController.nextMatch(_:)), "g"))
         edit.addItem(item("Find Previous", #selector(DocumentWindowController.previousMatch(_:)), "G"))
+        edit.addItem(.separator())
+        edit.addItem(item("Highlight Selection", #selector(DocumentWindowController.highlightSelection(_:)), "H"))
+        edit.addItem(item("Underline Selection", #selector(DocumentWindowController.underlineSelection(_:)), "U"))
+        edit.addItem(item("Strikethrough Selection", #selector(DocumentWindowController.strikethroughSelection(_:)), "K"))
         editItem.submenu = edit
         main.addItem(editItem)
 
@@ -70,6 +74,7 @@ enum MainMenu {
         tools.addItem(item("Make Searchable (OCR)…", #selector(DocumentWindowController.makeSearchable(_:)), ""))
         tools.addItem(item("Bates Numbering…", #selector(DocumentWindowController.batesNumbering(_:)), ""))
         tools.addItem(item("Watermark…", #selector(DocumentWindowController.addWatermark(_:)), ""))
+        tools.addItem(item("Compress…", #selector(DocumentWindowController.compressDocument(_:)), ""))
         toolsItem.submenu = tools
         main.addItem(toolsItem)
 

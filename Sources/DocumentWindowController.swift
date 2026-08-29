@@ -137,6 +137,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         static let redact = NSToolbarItem.Identifier("jack.redact")
         static let clean = NSToolbarItem.Identifier("jack.clean")
         static let tools = NSToolbarItem.Identifier("jack.tools")
+        static let highlight = NSToolbarItem.Identifier("jack.highlight")
         static let lock = NSToolbarItem.Identifier("jack.lock")
         static let print = NSToolbarItem.Identifier("jack.print")
         static let save = NSToolbarItem.Identifier("jack.save")
@@ -145,7 +146,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         [ItemID.sidebar, .space, ItemID.undo, ItemID.redo, .flexibleSpace, ItemID.zoomOut, ItemID.zoomIn, .space,
-         ItemID.markup, ItemID.redact, ItemID.clean, ItemID.lock, ItemID.tools, ItemID.print, .flexibleSpace, ItemID.search, ItemID.save]
+         ItemID.highlight, ItemID.markup, ItemID.redact, ItemID.clean, ItemID.lock, ItemID.tools, ItemID.print, .flexibleSpace, ItemID.search, ItemID.save]
     }
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         toolbarDefaultItemIdentifiers(toolbar)
@@ -180,8 +181,11 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             menu.addItem({ let m = NSMenuItem(title: "Make Searchable (OCR)…", action: #selector(makeSearchable(_:)), keyEquivalent: ""); m.target = self; return m }())
             menu.addItem({ let m = NSMenuItem(title: "Bates Numbering…", action: #selector(batesNumbering(_:)), keyEquivalent: ""); m.target = self; return m }())
             menu.addItem({ let m = NSMenuItem(title: "Watermark…", action: #selector(addWatermark(_:)), keyEquivalent: ""); m.target = self; return m }())
+            menu.addItem({ let m = NSMenuItem(title: "Compress…", action: #selector(compressDocument(_:)), keyEquivalent: ""); m.target = self; return m }())
             item.menu = menu
             return item
+        case ItemID.highlight:
+            return simple(id, "highlighter", "Highlight Selection", #selector(highlightSelection(_:)))
         case ItemID.redact:
             let item = NSToolbarItem(itemIdentifier: id)
             let b = NSButton(image: NSImage(systemSymbolName: "rectangle.slash",
@@ -803,6 +807,97 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         }
         ctx.closePDF()
         return true
+    }
+
+    // MARK: - Text annotations (highlight / underline / strikethrough), undoable
+
+    @objc func highlightSelection(_ sender: Any?) { annotateSelection(.highlight, color: .systemYellow, name: "Highlight") }
+    @objc func underlineSelection(_ sender: Any?) { annotateSelection(.underline, color: .systemBlue, name: "Underline") }
+    @objc func strikethroughSelection(_ sender: Any?) { annotateSelection(.strikeOut, color: .systemRed, name: "Strikethrough") }
+
+    private func annotateSelection(_ type: PDFAnnotationSubtype, color: NSColor, name: String) {
+        guard let sel = pdfView.currentSelection,
+              !(sel.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            infoAlert("Nothing selected", "Select some text first, then \(name.lowercased()) it.")
+            return
+        }
+        var added: [(PDFPage, PDFAnnotation)] = []
+        for line in sel.selectionsByLine() {
+            for page in line.pages {
+                let b = line.bounds(for: page)
+                guard b.width > 0, b.height > 0 else { continue }
+                let a = PDFAnnotation(bounds: b, forType: type, withProperties: nil)
+                a.color = color
+                a.quadrilateralPoints = [
+                    NSValue(point: NSPoint(x: 0, y: b.height)), NSValue(point: NSPoint(x: b.width, y: b.height)),
+                    NSValue(point: NSPoint(x: 0, y: 0)), NSValue(point: NSPoint(x: b.width, y: 0))
+                ]
+                page.addAnnotation(a)
+                added.append((page, a))
+            }
+        }
+        guard !added.isEmpty else { return }
+        pdfView.setCurrentSelection(nil, animate: false)
+        registerAnnotationRemovalUndo(added, name: name)
+        markEdited()
+        forceRefresh()
+    }
+
+    // Mutually recursive add/remove so redo comes free.
+    private func registerAnnotationRemovalUndo(_ items: [(PDFPage, PDFAnnotation)], name: String) {
+        docUndo.registerUndo(withTarget: self) { me in
+            items.forEach { $0.0.removeAnnotation($0.1) }
+            me.registerAnnotationAddUndo(items, name: name)
+            me.markEdited(); me.forceRefresh()
+        }
+        docUndo.setActionName(name)
+    }
+    private func registerAnnotationAddUndo(_ items: [(PDFPage, PDFAnnotation)], name: String) {
+        docUndo.registerUndo(withTarget: self) { me in
+            items.forEach { $0.0.addAnnotation($0.1) }
+            me.registerAnnotationRemovalUndo(items, name: name)
+            me.markEdited(); me.forceRefresh()
+        }
+        docUndo.setActionName(name)
+    }
+
+    // MARK: - Compress
+
+    @objc func compressDocument(_ sender: Any?) {
+        guard let doc = pdfView.document, let window = window else { return }
+        guard let data = doc.dataRepresentation(), let workCopy = PDFDocument(data: data) else {
+            infoAlert("Couldn’t prepare document", "The document couldn’t be copied for compression.")
+            return
+        }
+        let originalSize = data.count
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = pdfURL.deletingPathExtension().lastPathComponent + "-compressed.pdf"
+        panel.directoryURL = pdfURL.deletingLastPathComponent()
+        if #available(macOS 11.0, *) { panel.allowedContentTypes = [.pdf] }
+        panel.beginSheetModal(for: window) { resp in
+            guard resp == .OK, let out = panel.url else { return }
+            DispatchQueue.global(qos: .userInitiated).async {
+                let (ok, n) = CompressEngine.compress(workCopy, to: out)
+                let newSize = (try? Data(contentsOf: out).count) ?? 0
+                DispatchQueue.main.async {
+                    guard ok, newSize > 0 else {
+                        infoAlert("Compress failed", "Couldn’t write the compressed PDF.")
+                        return
+                    }
+                    guard newSize < originalSize else {
+                        try? FileManager.default.removeItem(at: out)
+                        infoAlert("Nothing to gain", "This document is already compact — a compressed copy would not be smaller, so nothing was saved.")
+                        return
+                    }
+                    NSWorkspace.shared.activateFileViewerSelecting([out])
+                    NSSound(named: "Glass")?.play()
+                    let fmt = ByteCountFormatter()
+                    let saved = 100 - newSize * 100 / max(1, originalSize)
+                    infoAlert("Compressed",
+                              "\(fmt.string(fromByteCount: Int64(originalSize))) → \(fmt.string(fromByteCount: Int64(newSize))) (\(saved)% smaller). \(n) scanned page\(n == 1 ? "" : "s") downsampled; pages with text were left untouched.")
+                }
+            }
+        }
     }
 
     // MARK: - Tools: Make Searchable (OCR), Bates, Watermark
