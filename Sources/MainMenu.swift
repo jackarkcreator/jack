@@ -64,6 +64,15 @@ enum MainMenu {
         viewItem.submenu = view
         main.addItem(viewItem)
 
+        // Tools
+        let toolsItem = NSMenuItem()
+        let tools = NSMenu(title: "Tools")
+        tools.addItem(item("Make Searchable (OCR)…", #selector(DocumentWindowController.makeSearchable(_:)), ""))
+        tools.addItem(item("Bates Numbering…", #selector(DocumentWindowController.batesNumbering(_:)), ""))
+        tools.addItem(item("Watermark…", #selector(DocumentWindowController.addWatermark(_:)), ""))
+        toolsItem.submenu = tools
+        main.addItem(toolsItem)
+
         // Window
         let windowItem = NSMenuItem()
         let window = NSMenu(title: "Window")

@@ -136,6 +136,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         static let markup = NSToolbarItem.Identifier("jack.markup")
         static let redact = NSToolbarItem.Identifier("jack.redact")
         static let clean = NSToolbarItem.Identifier("jack.clean")
+        static let tools = NSToolbarItem.Identifier("jack.tools")
         static let lock = NSToolbarItem.Identifier("jack.lock")
         static let print = NSToolbarItem.Identifier("jack.print")
         static let save = NSToolbarItem.Identifier("jack.save")
@@ -144,7 +145,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         [ItemID.sidebar, .space, ItemID.undo, ItemID.redo, .flexibleSpace, ItemID.zoomOut, ItemID.zoomIn, .space,
-         ItemID.markup, ItemID.redact, ItemID.clean, ItemID.lock, ItemID.print, .flexibleSpace, ItemID.search, ItemID.save]
+         ItemID.markup, ItemID.redact, ItemID.clean, ItemID.lock, ItemID.tools, ItemID.print, .flexibleSpace, ItemID.search, ItemID.save]
     }
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         toolbarDefaultItemIdentifiers(toolbar)
@@ -170,6 +171,17 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         case ItemID.zoomIn:  return simple(id, "plus.magnifyingglass", "Zoom In", #selector(zoomIn(_:)))
         case ItemID.lock:    return simple(id, "lock", "Lock for Sharing", #selector(lockForSharing(_:)))
         case ItemID.clean:   return simple(id, "sparkles", "Clean for Sharing", #selector(cleanForSharing(_:)))
+        case ItemID.tools:
+            let item = NSMenuToolbarItem(itemIdentifier: id)
+            item.image = NSImage(systemSymbolName: "wrench.and.screwdriver", accessibilityDescription: "Tools")
+            item.label = "Tools"
+            item.toolTip = "Document tools"
+            let menu = NSMenu()
+            menu.addItem({ let m = NSMenuItem(title: "Make Searchable (OCR)…", action: #selector(makeSearchable(_:)), keyEquivalent: ""); m.target = self; return m }())
+            menu.addItem({ let m = NSMenuItem(title: "Bates Numbering…", action: #selector(batesNumbering(_:)), keyEquivalent: ""); m.target = self; return m }())
+            menu.addItem({ let m = NSMenuItem(title: "Watermark…", action: #selector(addWatermark(_:)), keyEquivalent: ""); m.target = self; return m }())
+            item.menu = menu
+            return item
         case ItemID.redact:
             let item = NSToolbarItem(itemIdentifier: id)
             let b = NSButton(image: NSImage(systemSymbolName: "rectangle.slash",
@@ -791,6 +803,120 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         }
         ctx.closePDF()
         return true
+    }
+
+    // MARK: - Tools: Make Searchable (OCR), Bates, Watermark
+
+    @objc func makeSearchable(_ sender: Any?) {
+        guard let doc = pdfView.document, let window = window else { return }
+        // OCR runs off-main; PDFKit isn't thread-safe, so hand the worker its own copy.
+        guard let data = doc.dataRepresentation(), let workCopy = PDFDocument(data: data) else {
+            infoAlert("Couldn’t prepare document", "The document couldn’t be copied for recognition.")
+            return
+        }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = pdfURL.deletingPathExtension().lastPathComponent + "-searchable.pdf"
+        panel.directoryURL = pdfURL.deletingLastPathComponent()
+        if #available(macOS 11.0, *) { panel.allowedContentTypes = [.pdf] }
+        panel.beginSheetModal(for: window) { resp in
+            guard resp == .OK, let out = panel.url else { return }
+            let sheet = ProgressSheetController(title: "Recognizing text on this Mac…", total: workCopy.pageCount)
+            window.beginSheet(sheet.window)
+            DispatchQueue.global(qos: .userInitiated).async {
+                let (ok, n) = OCREngine.makeSearchable(workCopy, to: out) { i, total in
+                    DispatchQueue.main.async { sheet.update(done: i + 1, of: total) }
+                }
+                DispatchQueue.main.async {
+                    window.endSheet(sheet.window)
+                    if ok {
+                        NSWorkspace.shared.activateFileViewerSelecting([out])
+                        NSSound(named: "Glass")?.play()
+                        infoAlert("Made searchable",
+                                  n == 0 ? "Every page already had a text layer — saved an unchanged copy."
+                                         : "\(n) scanned page\(n == 1 ? "" : "s") recognized — entirely on this Mac, nothing was uploaded. Saved as \(out.lastPathComponent).")
+                    } else {
+                        infoAlert("Recognition failed", "Couldn’t write the searchable PDF.")
+                    }
+                }
+            }
+        }
+    }
+
+    @objc func batesNumbering(_ sender: Any?) {
+        guard let doc = pdfView.document, let window = window else { return }
+        let alert = NSAlert()
+        alert.messageText = "Bates Numbering"
+        alert.informativeText = "Stamps a sequential number on every page (as real, searchable text). The original file is untouched."
+        let box = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 58))
+        let prefix = NSTextField(frame: NSRect(x: 0, y: 32, width: 150, height: 24))
+        prefix.placeholderString = "Prefix (e.g. TRC-)"
+        let start = NSTextField(frame: NSRect(x: 158, y: 32, width: 74, height: 24))
+        start.placeholderString = "Start"; start.stringValue = "1"
+        let digits = NSPopUpButton(frame: NSRect(x: 240, y: 30, width: 80, height: 26))
+        digits.addItems(withTitles: ["4 digits", "6 digits", "8 digits"])
+        digits.selectItem(at: 1)
+        let corner = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 232, height: 26))
+        corner.addItems(withTitles: ["Bottom Right", "Bottom Left", "Top Right", "Top Left"])
+        box.addSubview(prefix); box.addSubview(start); box.addSubview(digits); box.addSubview(corner)
+        alert.accessoryView = box
+        alert.addButton(withTitle: "Stamp…")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = prefix
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let startN = Int(start.stringValue.trimmingCharacters(in: .whitespaces)) ?? 1
+        let digitsN = [4, 6, 8][max(0, digits.indexOfSelectedItem)]
+        let cornerV = StampEngine.Corner(rawValue: corner.indexOfSelectedItem) ?? .bottomRight
+
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = pdfURL.deletingPathExtension().lastPathComponent + "-bates.pdf"
+        panel.directoryURL = pdfURL.deletingLastPathComponent()
+        if #available(macOS 11.0, *) { panel.allowedContentTypes = [.pdf] }
+        panel.beginSheetModal(for: window) { resp in
+            guard resp == .OK, let out = panel.url else { return }
+            if StampEngine.bates(doc, to: out, prefix: prefix.stringValue, start: startN,
+                                 digits: digitsN, corner: cornerV) {
+                NSWorkspace.shared.activateFileViewerSelecting([out])
+                NSSound(named: "Glass")?.play()
+            } else {
+                infoAlert("Stamp failed", "Couldn’t write the numbered PDF.")
+            }
+        }
+    }
+
+    @objc func addWatermark(_ sender: Any?) {
+        guard let doc = pdfView.document, let window = window else { return }
+        let alert = NSAlert()
+        alert.messageText = "Watermark"
+        alert.informativeText = "Stamps a diagonal watermark across every page. The original file is untouched."
+        let box = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 26))
+        let text = NSTextField(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
+        text.stringValue = "CONFIDENTIAL"
+        let strength = NSPopUpButton(frame: NSRect(x: 208, y: -1, width: 112, height: 26))
+        strength.addItems(withTitles: ["Light", "Medium", "Strong"])
+        strength.selectItem(at: 1)
+        box.addSubview(text); box.addSubview(strength)
+        alert.accessoryView = box
+        alert.addButton(withTitle: "Stamp…")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = text
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let wmText = text.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !wmText.isEmpty else { return }
+        let opacity: CGFloat = [0.10, 0.18, 0.28][max(0, strength.indexOfSelectedItem)]
+
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = pdfURL.deletingPathExtension().lastPathComponent + "-watermarked.pdf"
+        panel.directoryURL = pdfURL.deletingLastPathComponent()
+        if #available(macOS 11.0, *) { panel.allowedContentTypes = [.pdf] }
+        panel.beginSheetModal(for: window) { resp in
+            guard resp == .OK, let out = panel.url else { return }
+            if StampEngine.watermark(doc, to: out, text: wmText, opacity: opacity) {
+                NSWorkspace.shared.activateFileViewerSelecting([out])
+                NSSound(named: "Glass")?.play()
+            } else {
+                infoAlert("Watermark failed", "Couldn’t write the watermarked PDF.")
+            }
+        }
     }
 
     // MARK: - Lock for Sharing
