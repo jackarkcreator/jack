@@ -26,6 +26,7 @@ enum MainMenu {
         file.addItem(.separator())
         file.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         file.addItem(item("Save PDF…", #selector(DocumentWindowController.saveDocument(_:)), "s"))
+        file.addItem(item("Clean for Sharing…", #selector(DocumentWindowController.cleanForSharing(_:)), "L"))
         file.addItem(item("Lock for Sharing…", #selector(DocumentWindowController.lockForSharing(_:)), "l"))
         file.addItem(.separator())
         file.addItem(item("Print…", #selector(DocumentWindowController.printDocument(_:)), "p"))
@@ -59,6 +60,7 @@ enum MainMenu {
         view.addItem(.separator())
         view.addItem(item("Show/Hide Thumbnails", #selector(DocumentWindowController.toggleSidebar(_:)), "t"))
         view.addItem(item("Markup", #selector(DocumentWindowController.toggleMarkup(_:)), "A"))
+        view.addItem(item("Redact", #selector(DocumentWindowController.toggleRedact(_:)), "R"))
         viewItem.submenu = view
         main.addItem(viewItem)
 

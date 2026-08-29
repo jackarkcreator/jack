@@ -29,6 +29,14 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     private let removeButton = NSButton()
     private var markupButton: NSButton?
 
+    // Redact strip controls
+    private var redactOn = false
+    private var redactAccessory: NSTitlebarAccessoryViewController?
+    private var redactButton: NSButton?
+    private let redactCountLabel = NSTextField(labelWithString: "")
+    private let redactTermField = NSTextField()
+    private var redactedTerms: Set<String> = []   // fed to the verify pass as forbidden terms
+
     init?(pdfURL: URL, startInMarkup: Bool = false) {
         guard let doc = PDFDocument(url: pdfURL) else { return nil }
         self.pdfURL = pdfURL
@@ -118,6 +126,8 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         static let zoomOut = NSToolbarItem.Identifier("jack.zoomOut")
         static let zoomIn = NSToolbarItem.Identifier("jack.zoomIn")
         static let markup = NSToolbarItem.Identifier("jack.markup")
+        static let redact = NSToolbarItem.Identifier("jack.redact")
+        static let clean = NSToolbarItem.Identifier("jack.clean")
         static let lock = NSToolbarItem.Identifier("jack.lock")
         static let print = NSToolbarItem.Identifier("jack.print")
         static let save = NSToolbarItem.Identifier("jack.save")
@@ -126,7 +136,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         [ItemID.sidebar, .space, ItemID.undo, ItemID.redo, .flexibleSpace, ItemID.zoomOut, ItemID.zoomIn, .space,
-         ItemID.markup, ItemID.lock, ItemID.print, .flexibleSpace, ItemID.search, ItemID.save]
+         ItemID.markup, ItemID.redact, ItemID.clean, ItemID.lock, ItemID.print, .flexibleSpace, ItemID.search, ItemID.save]
     }
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         toolbarDefaultItemIdentifiers(toolbar)
@@ -151,6 +161,19 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         case ItemID.zoomOut: return simple(id, "minus.magnifyingglass", "Zoom Out", #selector(zoomOut(_:)))
         case ItemID.zoomIn:  return simple(id, "plus.magnifyingglass", "Zoom In", #selector(zoomIn(_:)))
         case ItemID.lock:    return simple(id, "lock", "Lock for Sharing", #selector(lockForSharing(_:)))
+        case ItemID.clean:   return simple(id, "sparkles", "Clean for Sharing", #selector(cleanForSharing(_:)))
+        case ItemID.redact:
+            let item = NSToolbarItem(itemIdentifier: id)
+            let b = NSButton(image: NSImage(systemSymbolName: "rectangle.slash",
+                                            accessibilityDescription: "Redact") ?? NSImage(),
+                             target: self, action: #selector(toggleRedact(_:)))
+            b.setButtonType(.pushOnPushOff)
+            b.bezelStyle = .texturedRounded
+            redactButton = b
+            item.view = b
+            item.label = "Redact"
+            item.toolTip = "Redact — permanently remove content"
+            return item
         case ItemID.print:   return simple(id, "printer", "Print", #selector(printDocument(_:)))
         case ItemID.markup:
             let item = NSToolbarItem(itemIdentifier: id)
@@ -213,6 +236,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
 
     private func setMarkup(on: Bool) {
         guard markupOn != on, let window = window else { return }
+        if on { setRedact(on: false) }   // one tool strip at a time
         markupOn = on
         markupButton?.state = on ? .on : .off
         if on {
@@ -274,6 +298,227 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             strip.addSubview(hint)
         }
         return strip
+    }
+
+    // MARK: - Redact mode (mark → apply destroys, then the output is adversarially verified)
+
+    @objc func toggleRedact(_ sender: Any?) { setRedact(on: !redactOn) }
+
+    private func setRedact(on: Bool) {
+        guard redactOn != on, let window = window else { return }
+        if on { setMarkup(on: false) }   // one tool strip at a time
+        redactOn = on
+        redactButton?.state = on ? .on : .off
+        pdfView.redactMode = on
+        if on {
+            let acc = NSTitlebarAccessoryViewController()
+            acc.view = buildRedactStrip(width: window.frame.width)
+            acc.layoutAttribute = .bottom
+            window.addTitlebarAccessoryViewController(acc)
+            redactAccessory = acc
+            updateRedactCount()
+        } else {
+            redactAccessory?.removeFromParent()
+            redactAccessory = nil
+        }
+    }
+
+    private func buildRedactStrip(width: CGFloat) -> NSView {
+        let strip = NSView(frame: NSRect(x: 0, y: 0, width: width, height: 40))
+
+        let hint = NSTextField(labelWithString: "Drag over anything to mark it for redaction")
+        hint.textColor = .secondaryLabelColor
+        hint.font = .systemFont(ofSize: 11)
+        hint.frame = NSRect(x: 12, y: 12, width: 250, height: 16)
+        strip.addSubview(hint)
+
+        redactTermField.placeholderString = "Redact every occurrence of…"
+        redactTermField.font = .systemFont(ofSize: 12)
+        redactTermField.frame = NSRect(x: 268, y: 8, width: 200, height: 24)
+        redactTermField.target = self
+        redactTermField.action = #selector(redactAllMatches)
+        strip.addSubview(redactTermField)
+
+        let all = NSButton(title: "Mark All", target: self, action: #selector(redactAllMatches))
+        all.bezelStyle = .rounded
+        all.controlSize = .small
+        all.frame = NSRect(x: 474, y: 7, width: 78, height: 26)
+        strip.addSubview(all)
+
+        redactCountLabel.textColor = .secondaryLabelColor
+        redactCountLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        redactCountLabel.frame = NSRect(x: 560, y: 12, width: 90, height: 16)
+        strip.addSubview(redactCountLabel)
+
+        let clear = NSButton(title: "Clear Marks", target: self, action: #selector(clearRedactionMarks))
+        clear.bezelStyle = .rounded
+        clear.controlSize = .small
+        clear.frame = NSRect(x: width - 268, y: 7, width: 100, height: 26)
+        clear.autoresizingMask = [.minXMargin]
+        strip.addSubview(clear)
+
+        let apply = NSButton(title: "Apply Redactions…", target: self, action: #selector(applyRedactions))
+        apply.bezelStyle = .rounded
+        apply.controlSize = .small
+        apply.keyEquivalent = "\r"
+        apply.frame = NSRect(x: width - 160, y: 7, width: 148, height: 26)
+        apply.autoresizingMask = [.minXMargin]
+        strip.addSubview(apply)
+
+        return strip
+    }
+
+    // From SigningPDFView after a rubber-band gesture: the mark exists — make it undoable.
+    func redactionAdded(_ ann: RedactionAnnotation) {
+        docUndo.registerUndo(withTarget: self) { $0.removeRedactionMark(ann) }
+        docUndo.setActionName("Mark Redaction")
+        updateRedactCount()
+    }
+
+    private func addRedactionMark(_ ann: RedactionAnnotation, to page: PDFPage) {
+        page.addAnnotation(ann)
+        docUndo.registerUndo(withTarget: self) { $0.removeRedactionMark(ann) }
+        docUndo.setActionName("Mark Redaction")
+        updateRedactCount()
+        pdfView.needsDisplay = true
+    }
+
+    private func removeRedactionMark(_ ann: RedactionAnnotation) {
+        guard let page = ann.page else { return }
+        page.removeAnnotation(ann)
+        docUndo.registerUndo(withTarget: self) { $0.addRedactionMark(ann, to: page) }
+        docUndo.setActionName("Mark Redaction")
+        updateRedactCount()
+        forceRefresh()   // custom-annotation removal needs a forced repaint
+    }
+
+    private func allRedactionMarks() -> [(Int, RedactionAnnotation)] {
+        guard let doc = pdfView.document else { return [] }
+        var out: [(Int, RedactionAnnotation)] = []
+        for i in 0..<doc.pageCount {
+            for a in doc.page(at: i)?.annotations.compactMap({ $0 as? RedactionAnnotation }) ?? [] {
+                out.append((i, a))
+            }
+        }
+        return out
+    }
+
+    private func updateRedactCount() {
+        let n = allRedactionMarks().count
+        redactCountLabel.stringValue = n == 0 ? "" : "\(n) mark\(n == 1 ? "" : "s")"
+    }
+
+    @objc private func redactAllMatches() {
+        let term = redactTermField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !term.isEmpty, let doc = pdfView.document else { return }
+        let found = doc.findString(term, withOptions: [.caseInsensitive])
+        guard !found.isEmpty else { infoAlert("No matches", "“\(term)” wasn’t found in the document."); return }
+        for sel in found {
+            for page in sel.pages {
+                let r = sel.bounds(for: page).insetBy(dx: -2, dy: -2)
+                guard r.width > 0, r.height > 0 else { continue }
+                addRedactionMark(RedactionAnnotation(bounds: r), to: page)
+            }
+        }
+        redactedTerms.insert(term)
+        redactTermField.stringValue = ""
+        pdfView.needsDisplay = true
+    }
+
+    @objc private func clearRedactionMarks() {
+        let marks = allRedactionMarks()
+        guard !marks.isEmpty, let doc = pdfView.document else { return }
+        for (_, a) in marks { a.page?.removeAnnotation(a) }
+        docUndo.registerUndo(withTarget: self) { me in
+            for (i, a) in marks { (me.pdfView.document ?? doc).page(at: i)?.addAnnotation(a) }
+            me.docUndo.registerUndo(withTarget: me) { $0.clearRedactionMarks() }
+            me.updateRedactCount()
+            me.pdfView.needsDisplay = true
+        }
+        docUndo.setActionName("Clear Redaction Marks")
+        updateRedactCount()
+        forceRefresh()
+    }
+
+    @objc private func applyRedactions() {
+        guard let doc = pdfView.document, let window = window else { return }
+        let marks = allRedactionMarks()
+        guard !marks.isEmpty else {
+            infoAlert("Nothing marked", "Drag over content (or use “Redact every occurrence of…”) to mark it first.")
+            return
+        }
+        var redactions: [Int: [CGRect]] = [:]
+        for (i, a) in marks { redactions[i, default: []].append(a.bounds) }
+        let redactedPages = Array(redactions.keys).sorted()
+        let terms = Array(redactedTerms)
+
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = pdfURL.deletingPathExtension().lastPathComponent + "-redacted.pdf"
+        panel.directoryURL = pdfURL.deletingLastPathComponent()
+        if #available(macOS 11.0, *) { panel.allowedContentTypes = [.pdf] }
+        panel.beginSheetModal(for: window) { [weak self] resp in
+            guard resp == .OK, let out = panel.url, let self = self else { return }
+            guard RedactionEngine.apply(doc, redactions: redactions, to: out) else {
+                infoAlert("Redaction failed", "Couldn’t write the redacted PDF. Nothing was saved.")
+                return
+            }
+            let issues = RedactionEngine.verify(outputURL: out, redactedPages: redactedPages, forbiddenTerms: terms)
+            if issues.isEmpty {
+                self.clearRedactionMarks()
+                NSWorkspace.shared.activateFileViewerSelecting([out])
+                NSSound(named: "Glass")?.play()
+                let n = redactedPages.count
+                infoAlert("Redaction verified",
+                          "\(n) page\(n == 1 ? "" : "s") permanently flattened — 0 recoverable characters under the redactions, metadata removed. Saved as \(out.lastPathComponent).")
+            } else {
+                // Never leave a leaky artifact on disk.
+                try? FileManager.default.removeItem(at: out)
+                infoAlert("Redaction NOT verified — file deleted",
+                          "The output failed verification and was deleted:\n\n• " + issues.joined(separator: "\n• "))
+            }
+        }
+    }
+
+    // MARK: - Clean for Sharing (flatten everything + strip metadata + optional lock)
+
+    @objc func cleanForSharing(_ sender: Any?) {
+        guard let doc = pdfView.document, let window = window else { return }
+
+        let alert = NSAlert()
+        alert.messageText = "Clean for Sharing"
+        alert.informativeText = "Saves a copy with signatures and form entries flattened and all metadata (author, title, editing history) removed. Add a password to lock it too — or leave blank."
+        let pw = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
+        pw.placeholderString = "Password (optional)"
+        alert.accessoryView = pw
+        alert.addButton(withTitle: "Clean…")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let password = pw.stringValue
+
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = pdfURL.deletingPathExtension().lastPathComponent + "-clean.pdf"
+        panel.directoryURL = pdfURL.deletingLastPathComponent()
+        if #available(macOS 11.0, *) { panel.allowedContentTypes = [.pdf] }
+        panel.beginSheetModal(for: window) { resp in
+            guard resp == .OK, let out = panel.url else { return }
+            let ok: Bool
+            if password.isEmpty {
+                ok = RedactionEngine.apply(doc, redactions: [:], to: out)
+            } else {
+                let tmp = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("jack-clean-\(UUID().uuidString).pdf")
+                ok = RedactionEngine.apply(doc, redactions: [:], to: tmp)
+                    && PDFDocument(url: tmp)?.write(to: out, withOptions: [
+                        .userPasswordOption: password, .ownerPasswordOption: password]) == true
+                try? FileManager.default.removeItem(at: tmp)
+            }
+            if ok {
+                NSWorkspace.shared.activateFileViewerSelecting([out])
+                NSSound(named: "Glass")?.play()
+            } else {
+                infoAlert("Clean failed", "Couldn’t write the cleaned PDF.")
+            }
+        }
     }
 
     @objc private func addSignature() {
