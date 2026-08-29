@@ -97,7 +97,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
                                                name: .PDFViewPageChanged, object: pdfView)
         NotificationCenter.default.addObserver(self, selector: #selector(selectionChanged),
                                                name: .PDFViewSelectionChanged, object: pdfView)
-        pdfView.annotateMenuItems = { [weak self] in self?.buildAnnotateMenuItems() ?? [] }
+        pdfView.annotateMenuItems = { [weak self] page, point in
+            self?.buildAnnotateMenuItems(page: page, point: point) ?? []
+        }
         // A locked doc builds blank thumbnails; re-render everything once the password lands.
         NotificationCenter.default.addObserver(self, selector: #selector(documentUnlocked),
                                                name: .PDFDocumentDidUnlock, object: doc)
@@ -213,6 +215,8 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             menu.addItem(.separator())
             menu.addItem({ let m = NSMenuItem(title: "Underline", action: #selector(underlineSelection(_:)), keyEquivalent: ""); m.target = self; m.image = Self.swatch(.systemBlue); return m }())
             menu.addItem({ let m = NSMenuItem(title: "Strikethrough", action: #selector(strikethroughSelection(_:)), keyEquivalent: ""); m.target = self; m.image = Self.swatch(.systemRed); return m }())
+            menu.addItem(.separator())
+            menu.addItem({ let m = NSMenuItem(title: "Add Comment…", action: #selector(addComment(_:)), keyEquivalent: ""); m.target = self; m.image = NSImage(systemSymbolName: "text.bubble", accessibilityDescription: nil); return m }())
             item.menu = menu
             return item
         case ItemID.redact:
@@ -786,9 +790,29 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         panel.nameFieldStringValue = pdfURL.deletingPathExtension().lastPathComponent + "-edited.pdf"
         panel.directoryURL = pdfURL.deletingLastPathComponent()
         if #available(macOS 11.0, *) { panel.allowedContentTypes = [.pdf] }
+        let comments = collectComments()
         panel.beginSheetModal(for: window) { [weak self] resp in
             guard resp == .OK, let out = panel.url, let self = self else { return }
-            if self.flatten(doc, to: out) {
+            var ok: Bool
+            if comments.isEmpty {
+                ok = self.flatten(doc, to: out)
+            } else {
+                // Flatten content + stamps, then carry the comments over as live notes.
+                let tmp = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("jack-save-\(UUID().uuidString).pdf")
+                ok = self.flatten(doc, to: tmp)
+                if ok, let flat = PDFDocument(url: tmp) {
+                    for (i, a) in comments {
+                        let copy = PDFAnnotation(bounds: a.bounds, forType: .text, withProperties: nil)
+                        copy.contents = a.contents
+                        copy.color = a.color
+                        flat.page(at: i)?.addAnnotation(copy)
+                    }
+                    ok = flat.write(to: out)
+                } else { ok = false }
+                try? FileManager.default.removeItem(at: tmp)
+            }
+            if ok {
                 self.window?.isDocumentEdited = false
                 NSWorkspace.shared.activateFileViewerSelecting([out])
                 NSSound(named: "Glass")?.play()
@@ -811,8 +835,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             let info = [kCGPDFContextMediaBox as String: Data(bytes: &box, count: MemoryLayout<CGRect>.size)] as CFDictionary
             ctx.beginPDFPage(info)
 
-            // Pending redaction marks must never be baked in as cosmetic boxes — strip them.
-            let overlays = page.annotations.filter { $0 is RedactionAnnotation }
+            // Pending redaction marks must never bake in as cosmetic boxes, and comment notes
+            // are re-added as live annotations after flattening — strip both before drawing.
+            let overlays = page.annotations.filter { $0 is RedactionAnnotation || Self.isComment($0) }
             overlays.forEach { page.removeAnnotation($0) }
 
             let stamps = page.annotations.compactMap { $0 as? ImageStampAnnotation }
@@ -900,25 +925,160 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         forceRefresh()
     }
 
-    // Context-menu items for a right-click on selected text (built fresh each time).
-    private func buildAnnotateMenuItems() -> [NSMenuItem] {
+    // Context-menu items for a right-click in the page (built fresh each time).
+    private final class NoteTarget {
+        let page: PDFPage; let point: CGPoint
+        init(_ p: PDFPage, _ pt: CGPoint) { page = p; point = pt }
+    }
+
+    private func buildAnnotateMenuItems(page: PDFPage?, point: CGPoint) -> [NSMenuItem] {
+        var items: [NSMenuItem] = []
         let live = pdfView.currentSelection
         let hasSel = !((live?.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             || lastSelection != nil
-        guard hasSel else { return [] }
-        var items: [NSMenuItem] = []
-        for (i, entry) in Self.highlightColors.enumerated() {
-            let m = NSMenuItem(title: "Highlight \(entry.name)", action: #selector(highlightColorPicked(_:)), keyEquivalent: "")
-            m.target = self; m.tag = i; m.image = Self.swatch(entry.color)
-            items.append(m)
+        if hasSel {
+            for (i, entry) in Self.highlightColors.enumerated() {
+                let m = NSMenuItem(title: "Highlight \(entry.name)", action: #selector(highlightColorPicked(_:)), keyEquivalent: "")
+                m.target = self; m.tag = i; m.image = Self.swatch(entry.color)
+                items.append(m)
+            }
+            let u = NSMenuItem(title: "Underline", action: #selector(underlineSelection(_:)), keyEquivalent: "")
+            u.target = self; u.image = Self.swatch(.systemBlue)
+            items.append(u)
+            let s = NSMenuItem(title: "Strikethrough", action: #selector(strikethroughSelection(_:)), keyEquivalent: "")
+            s.target = self; s.image = Self.swatch(.systemRed)
+            items.append(s)
         }
-        let u = NSMenuItem(title: "Underline", action: #selector(underlineSelection(_:)), keyEquivalent: "")
-        u.target = self; u.image = Self.swatch(.systemBlue)
-        items.append(u)
-        let s = NSMenuItem(title: "Strikethrough", action: #selector(strikethroughSelection(_:)), keyEquivalent: "")
-        s.target = self; s.image = Self.swatch(.systemRed)
-        items.append(s)
+        if let page = page {
+            let c = NSMenuItem(title: "Add Comment…", action: #selector(addCommentFromMenu(_:)), keyEquivalent: "")
+            c.target = self
+            c.image = NSImage(systemSymbolName: "text.bubble", accessibilityDescription: "Add Comment")
+            c.representedObject = NoteTarget(page, point)
+            items.append(c)
+        }
         return items
+    }
+
+    // MARK: - Comments (sticky notes) — click to read, editable, survive Save as real notes
+
+    private var notePopover: NSPopover?
+
+    static func isComment(_ ann: PDFAnnotation) -> Bool { ann.type == "Text" }
+
+    @objc private func addCommentFromMenu(_ sender: NSMenuItem) {
+        guard let target = sender.representedObject as? NoteTarget else { return }
+        addComment(on: target.page, at: target.point)
+    }
+
+    @objc func addComment(_ sender: Any?) {
+        // Toolbar/menu path: anchor near the top-right of the current page.
+        guard let page = pdfView.currentPage ?? pdfView.document?.page(at: 0) else { return }
+        let box = page.bounds(for: .mediaBox)
+        addComment(on: page, at: CGPoint(x: box.maxX - 60, y: box.maxY - 60))
+    }
+
+    private func addComment(on page: PDFPage, at point: CGPoint) {
+        guard let text = promptForCommentText(initial: "") else { return }
+        let ann = PDFAnnotation(bounds: CGRect(x: point.x, y: point.y, width: 22, height: 22),
+                                forType: .text, withProperties: nil)
+        ann.color = .systemYellow
+        ann.contents = text
+        page.addAnnotation(ann)
+        registerAnnotationRemovalUndo([(page, ann)], name: "Add Comment")
+        markEdited()
+        forceRefresh()
+    }
+
+    private func promptForCommentText(initial: String) -> String? {
+        let alert = NSAlert()
+        alert.messageText = initial.isEmpty ? "Add Comment" : "Edit Comment"
+        alert.informativeText = "Comments stay editable in the saved PDF."
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 320, height: 90))
+        let tv = NSTextView(frame: scroll.bounds)
+        tv.font = .systemFont(ofSize: 13)
+        tv.string = initial
+        tv.isRichText = false
+        scroll.documentView = tv
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .bezelBorder
+        alert.accessoryView = scroll
+        alert.addButton(withTitle: initial.isEmpty ? "Add" : "Save")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = tv
+        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        let text = tv.string.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? nil : text
+    }
+
+    func noteClicked(_ ann: PDFAnnotation) {
+        guard let page = ann.page, let _ = window else { return }
+        notePopover?.close()
+
+        let vc = NSViewController()
+        let v = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 140))
+        let scroll = NSScrollView(frame: NSRect(x: 12, y: 44, width: 276, height: 84))
+        let tv = NSTextView(frame: scroll.bounds)
+        tv.string = ann.contents ?? ""
+        tv.font = .systemFont(ofSize: 13)
+        tv.isEditable = false
+        tv.drawsBackground = false
+        scroll.documentView = tv
+        scroll.hasVerticalScroller = true
+        scroll.drawsBackground = false
+        v.addSubview(scroll)
+
+        let edit = NSButton(title: "Edit…", target: self, action: #selector(editNote(_:)))
+        edit.bezelStyle = .rounded; edit.controlSize = .small
+        edit.frame = NSRect(x: 12, y: 10, width: 70, height: 26)
+        v.addSubview(edit)
+        let remove = NSButton(title: "Remove", target: self, action: #selector(removeNote(_:)))
+        remove.bezelStyle = .rounded; remove.controlSize = .small
+        remove.frame = NSRect(x: 88, y: 10, width: 80, height: 26)
+        v.addSubview(remove)
+        vc.view = v
+
+        // Hand the annotation to the buttons via the popover's ivar.
+        activeNote = ann
+        let pop = NSPopover()
+        pop.contentViewController = vc
+        pop.behavior = .transient
+        let rect = pdfView.convert(ann.bounds, from: page)
+        pop.show(relativeTo: rect, of: pdfView, preferredEdge: .maxY)
+        notePopover = pop
+    }
+
+    private weak var activeNote: PDFAnnotation?
+
+    @objc private func editNote(_ sender: Any?) {
+        guard let ann = activeNote else { return }
+        notePopover?.close()
+        guard let text = promptForCommentText(initial: ann.contents ?? "") else { return }
+        let old = ann.contents ?? ""
+        ann.contents = text
+        docUndo.registerUndo(withTarget: self) { me in
+            ann.contents = old
+            me.docUndo.registerUndo(withTarget: me) { _ in ann.contents = text }
+        }
+        docUndo.setActionName("Edit Comment")
+        markEdited()
+    }
+
+    @objc private func removeNote(_ sender: Any?) {
+        guard let ann = activeNote, let page = ann.page else { return }
+        notePopover?.close()
+        page.removeAnnotation(ann)
+        registerAnnotationAddUndo([(page, ann)], name: "Remove Comment")
+        markEdited()
+        forceRefresh()
+    }
+
+    private func collectComments() -> [(Int, PDFAnnotation)] {
+        guard let doc = pdfView.document else { return [] }
+        var out: [(Int, PDFAnnotation)] = []
+        for i in 0..<doc.pageCount {
+            for a in doc.page(at: i)?.annotations.filter({ Self.isComment($0) }) ?? [] { out.append((i, a)) }
+        }
+        return out
     }
 
     // Mutually recursive add/remove so redo comes free.

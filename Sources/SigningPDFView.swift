@@ -6,17 +6,21 @@ protocol StampSelectionDelegate: AnyObject {
     func didSelect(_ ann: ImageStampAnnotation?)
     func stampMoved(_ ann: ImageStampAnnotation, from oldBounds: CGRect)
     func redactionAdded(_ ann: RedactionAnnotation)
+    func noteClicked(_ ann: PDFAnnotation)
 }
 
 final class SigningPDFView: PDFView {
     weak var stampDelegate: StampSelectionDelegate?
     var redactMode = false
-    var annotateMenuItems: (() -> [NSMenuItem])?
+    var annotateMenuItems: ((PDFPage?, CGPoint) -> [NSMenuItem])?
 
-    // Right-click on selected text → annotate directly from the context menu.
+    // Right-click → annotate/comment directly from the context menu (page + point captured).
     override func menu(for event: NSEvent) -> NSMenu? {
         let base = super.menu(for: event)
-        guard let extra = annotateMenuItems?(), !extra.isEmpty else { return base }
+        let viewPoint = convert(event.locationInWindow, from: nil)
+        let page = page(for: viewPoint, nearest: true)
+        let pagePoint = page.map { convert(viewPoint, to: $0) } ?? .zero
+        guard let extra = annotateMenuItems?(page, pagePoint), !extra.isEmpty else { return base }
         let menu = base ?? NSMenu()
         if menu.items.isEmpty == false { menu.insertItem(.separator(), at: 0) }
         for item in extra.reversed() { menu.insertItem(item, at: 0) }
@@ -46,6 +50,11 @@ final class SigningPDFView: PDFView {
             band.layer?.borderWidth = 1.5
             addSubview(band)
             rubberBand = band
+            return
+        }
+        // A comment note: open its popover instead of selecting text.
+        if let note = page.annotations.last(where: { $0.type == "Text" && $0.bounds.insetBy(dx: -4, dy: -4).contains(p) }) {
+            stampDelegate?.noteClicked(note)
             return
         }
         if let ann = page.annotations.compactMap({ $0 as? ImageStampAnnotation }).last(where: { $0.bounds.contains(p) }) {
