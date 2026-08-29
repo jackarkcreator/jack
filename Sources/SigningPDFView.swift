@@ -4,6 +4,7 @@ import AppKit
 
 protocol StampSelectionDelegate: AnyObject {
     func didSelect(_ ann: ImageStampAnnotation?)
+    func stampMoved(_ ann: ImageStampAnnotation, from oldBounds: CGRect)
 }
 
 final class SigningPDFView: PDFView {
@@ -11,6 +12,7 @@ final class SigningPDFView: PDFView {
     private var dragging: ImageStampAnnotation?
     private var dragPage: PDFPage?
     private var last: CGPoint = .zero
+    private var dragStartBounds: CGRect = .zero
 
     override func mouseDown(with event: NSEvent) {
         let viewPoint = convert(event.locationInWindow, from: nil)
@@ -18,6 +20,7 @@ final class SigningPDFView: PDFView {
         let p = convert(viewPoint, to: page)
         if let ann = page.annotations.compactMap({ $0 as? ImageStampAnnotation }).last(where: { $0.bounds.contains(p) }) {
             dragging = ann; dragPage = page; last = p
+            dragStartBounds = ann.bounds
             stampDelegate?.didSelect(ann)
         } else {
             // Don't deselect on a background click — keep the active signature selected.
@@ -37,6 +40,11 @@ final class SigningPDFView: PDFView {
     }
 
     override func mouseUp(with event: NSEvent) {
-        if dragging != nil { dragging = nil; dragPage = nil } else { super.mouseUp(with: event) }
+        if let ann = dragging {
+            if ann.bounds != dragStartBounds { stampDelegate?.stampMoved(ann, from: dragStartBounds) }
+            dragging = nil; dragPage = nil
+        } else {
+            super.mouseUp(with: event)
+        }
     }
 }

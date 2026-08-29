@@ -23,6 +23,7 @@ final class SidebarCollectionView: NSCollectionView {
 final class PageSidebarController: NSObject, NSCollectionViewDataSource, NSCollectionViewDelegate {
     weak var document: PDFDocument?
     weak var delegate: PageSidebarDelegate?
+    var undoProvider: (() -> UndoManager?)?
     let scrollView = NSScrollView()
     private let collectionView = SidebarCollectionView()
 
@@ -100,19 +101,57 @@ final class PageSidebarController: NSObject, NSCollectionViewDataSource, NSColle
         let dest = indexPath.item
 
         if let s = draggingInfo.draggingPasteboard.string(forType: pageDragType), let src = Int(s) {
-            guard src != dest, src != dest - 1, let page = doc.page(at: src) else { return src == dest || src == dest - 1 }
-            doc.removePage(at: src)
-            doc.insert(page, at: src < dest ? dest - 1 : dest)
-            changed()
+            guard src != dest, src != dest - 1 else { return true } // dropped back in place
+            movePage(from: src, to: src < dest ? dest - 1 : dest)
             return true
         }
 
         let urls = (draggingInfo.draggingPasteboard.readObjects(forClasses: [NSURL.self]) as? [URL]) ?? []
         let pages = loadPages(from: urls)
         guard !pages.isEmpty else { return false }
-        for (i, p) in pages.enumerated() { doc.insert(p, at: min(dest + i, doc.pageCount)) }
-        changed()
+        insertPages(pages, at: min(dest, doc.pageCount))
         return true
+    }
+
+    // MARK: - Undoable primitives (each registers its own inverse, so redo comes free)
+
+    private func registerUndo(_ name: String, _ inverse: @escaping (PageSidebarController) -> Void) {
+        guard let um = undoProvider?() else { return }
+        um.registerUndo(withTarget: self) { inverse($0) }
+        um.setActionName(name)
+    }
+
+    private func movePage(from src: Int, to dest: Int) {
+        guard let doc = document, let page = doc.page(at: src) else { return }
+        doc.removePage(at: src)
+        doc.insert(page, at: dest)
+        registerUndo("Move Page") { $0.movePage(from: dest, to: src) }
+        changed()
+    }
+
+    private func insertPages(_ pages: [PDFPage], at index: Int) {
+        guard let doc = document, !pages.isEmpty else { return }
+        for (i, p) in pages.enumerated() { doc.insert(p, at: min(index + i, doc.pageCount)) }
+        registerUndo("Add Pages") { $0.removePages(at: Array(index..<(index + pages.count))) }
+        changed()
+    }
+
+    private func removePages(at indexes: [Int]) {
+        guard let doc = document else { return }
+        var removed: [(Int, PDFPage)] = []
+        for i in indexes.sorted(by: >) {
+            guard let p = doc.page(at: i) else { continue }
+            removed.append((i, p))
+            doc.removePage(at: i)
+        }
+        guard !removed.isEmpty else { return }
+        registerUndo("Delete \(removed.count == 1 ? "Page" : "Pages")") { me in
+            guard let d = me.document else { return }
+            for (i, p) in removed.reversed() { d.insert(p, at: min(i, d.pageCount)) }
+            me.registerUndo("Delete Pages") { $0.removePages(at: indexes) }
+            me.changed()
+        }
+        changed()
     }
 
     // MARK: - Context menu
@@ -143,15 +182,15 @@ final class PageSidebarController: NSObject, NSCollectionViewDataSource, NSColle
     private final class MenuHandler { let run: () -> Void; init(_ r: @escaping () -> Void) { run = r } }
     @objc private func runHandler(_ sender: NSMenuItem) { (sender.representedObject as? MenuHandler)?.run() }
 
-    private func rotate(_ indexes: [Int]) {
-        for i in indexes { document?.page(at: i)?.rotation += 90 }
+    private func rotate(_ indexes: [Int], by degrees: Int = 90) {
+        for i in indexes { document?.page(at: i)?.rotation += degrees }
+        registerUndo("Rotate") { $0.rotate(indexes, by: -degrees) }
         changed()
     }
 
     private func delete(_ indexes: [Int]) {
         guard let doc = document, doc.pageCount > indexes.count else { return }
-        for i in indexes.sorted(by: >) { doc.removePage(at: i) }
-        changed()
+        removePages(at: indexes)
     }
 
     private func changed() {

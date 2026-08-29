@@ -14,6 +14,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     private weak var selected: ImageStampAnnotation?
     private var sheet: SignatureSheetController?
 
+    private let docUndo = UndoManager()
+    private var sliderStartBounds: CGRect?   // resize gesture start, so one drag = one undo step
+
     private var matches: [PDFSelection] = []
     private var matchIndex = 0
     private var sidebarVisible = true
@@ -44,6 +47,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
 
     required init?(coder: NSCoder) { fatalError() }
 
+    // ⌘Z / Edit menu / toolbar Undo all resolve here through the window.
+    func windowWillReturnUndoManager(_ window: NSWindow) -> UndoManager? { docUndo }
+
     func windowWillClose(_ notification: Notification) {
         DispatchQueue.main.async {
             AppDelegate.documents.removeAll { $0 === self }
@@ -65,6 +71,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
 
         sidebar.document = doc
         sidebar.delegate = self
+        sidebar.undoProvider = { [weak self] in self?.docUndo }
         content.addSubview(sidebar.scrollView)
 
         pdfView.document = doc
@@ -105,6 +112,8 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     // MARK: - Toolbar
 
     private enum ItemID {
+        static let undo = NSToolbarItem.Identifier("jack.undo")
+        static let redo = NSToolbarItem.Identifier("jack.redo")
         static let sidebar = NSToolbarItem.Identifier("jack.sidebar")
         static let zoomOut = NSToolbarItem.Identifier("jack.zoomOut")
         static let zoomIn = NSToolbarItem.Identifier("jack.zoomIn")
@@ -116,7 +125,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [ItemID.sidebar, .flexibleSpace, ItemID.zoomOut, ItemID.zoomIn, .space,
+        [ItemID.sidebar, .space, ItemID.undo, ItemID.redo, .flexibleSpace, ItemID.zoomOut, ItemID.zoomIn, .space,
          ItemID.markup, ItemID.lock, ItemID.print, .flexibleSpace, ItemID.search, ItemID.save]
     }
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -137,6 +146,8 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         }
         switch id {
         case ItemID.sidebar: return simple(id, "sidebar.left", "Thumbnails", #selector(toggleSidebar(_:)))
+        case ItemID.undo:    return simple(id, "arrow.uturn.backward", "Undo", #selector(undoEdit(_:)))
+        case ItemID.redo:    return simple(id, "arrow.uturn.forward", "Redo", #selector(redoEdit(_:)))
         case ItemID.zoomOut: return simple(id, "minus.magnifyingglass", "Zoom Out", #selector(zoomOut(_:)))
         case ItemID.zoomIn:  return simple(id, "plus.magnifyingglass", "Zoom In", #selector(zoomIn(_:)))
         case ItemID.lock:    return simple(id, "lock", "Lock for Sharing", #selector(lockForSharing(_:)))
@@ -181,6 +192,8 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     // MARK: - View actions
 
     @objc func toggleSidebar(_ sender: Any?) { sidebarVisible.toggle(); layoutViews() }
+    @objc func undoEdit(_ sender: Any?) { docUndo.undo() }
+    @objc func redoEdit(_ sender: Any?) { docUndo.redo() }
     @objc func zoomIn(_ sender: Any?) { pdfView.zoomIn(sender) }
     @objc func zoomOut(_ sender: Any?) { pdfView.zoomOut(sender) }
     @objc func zoomToFit(_ sender: Any?) { pdfView.autoScales = true }
@@ -314,10 +327,57 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         let height = width / max(0.01, aspect)
         let origin = CGPoint(x: box.midX - width / 2, y: box.midY - height / 2)
         let ann = ImageStampAnnotation(image: image, bounds: CGRect(x: origin.x, y: origin.y, width: width, height: height))
-        page.addAnnotation(ann)
-        markEdited()
+        addStamp(ann, to: page)
         didSelect(ann)
+    }
+
+    // MARK: - Undoable stamp primitives (each registers its inverse, so redo comes free)
+
+    private func addStamp(_ ann: ImageStampAnnotation, to page: PDFPage) {
+        page.addAnnotation(ann)
+        docUndo.registerUndo(withTarget: self) { $0.removeStampUndoable(ann) }
+        docUndo.setActionName("Add Mark")
+        markEdited()
         pdfView.needsDisplay = true
+    }
+
+    private func removeStampUndoable(_ ann: ImageStampAnnotation) {
+        guard let page = ann.page ?? pageContaining(ann) else { return }
+        page.removeAnnotation(ann)
+        docUndo.registerUndo(withTarget: self) { me in
+            me.addStamp(ann, to: page)
+            me.didSelect(ann)
+        }
+        docUndo.setActionName("Remove Mark")
+        markEdited()
+        if selected === ann { selected = nil }
+        forceRefresh()   // PDFView caches page renders; deletes need a forced repaint
+        didSelect(lastStamp())
+    }
+
+    private func pageContaining(_ ann: ImageStampAnnotation) -> PDFPage? {
+        guard let doc = pdfView.document else { return nil }
+        for i in 0..<doc.pageCount where doc.page(at: i)?.annotations.contains(ann) == true {
+            return doc.page(at: i)
+        }
+        return nil
+    }
+
+    // One drag or one slider gesture = one undo step, restoring the pre-gesture bounds.
+    private func registerBoundsUndo(_ ann: ImageStampAnnotation, _ oldBounds: CGRect, name: String) {
+        docUndo.registerUndo(withTarget: self) { me in
+            let current = ann.bounds
+            ann.bounds = oldBounds
+            me.registerBoundsUndo(ann, current, name: name)
+            if me.selected === ann { me.sizeSlider.doubleValue = Double(oldBounds.width) }
+            me.pdfView.needsDisplay = true
+        }
+        docUndo.setActionName(name)
+        markEdited()
+    }
+
+    func stampMoved(_ ann: ImageStampAnnotation, from oldBounds: CGRect) {
+        registerBoundsUndo(ann, oldBounds, name: "Move Mark")
     }
 
     private func hasFormFields(_ doc: PDFDocument) -> Bool {
@@ -351,24 +411,23 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
 
     @objc private func resizeSelected() {
         guard let ann = selected ?? lastStamp() else { return }
+        if sliderStartBounds == nil { sliderStartBounds = ann.bounds }
         let newW = CGFloat(sizeSlider.doubleValue)
         let newH = newW / max(0.01, ann.aspect)
         let cx = ann.bounds.midX, cy = ann.bounds.midY
         ann.bounds = CGRect(x: cx - newW / 2, y: cy - newH / 2, width: newW, height: newH)
         pdfView.needsDisplay = true
+        if NSApp.currentEvent?.type == .leftMouseUp {   // gesture ended
+            if let start = sliderStartBounds, start != ann.bounds {
+                registerBoundsUndo(ann, start, name: "Resize Mark")
+            }
+            sliderStartBounds = nil
+        }
     }
 
     @objc private func removeSelected() {
         guard let ann = selected ?? lastStamp() else { return }
-        if let p = ann.page { p.removeAnnotation(ann) } else {
-            guard let doc = pdfView.document else { return }
-            for i in 0..<doc.pageCount where doc.page(at: i)?.annotations.contains(ann) == true {
-                doc.page(at: i)?.removeAnnotation(ann); break
-            }
-        }
-        selected = nil
-        forceRefresh()   // PDFView caches page renders; deletes need a forced repaint
-        didSelect(lastStamp())
+        removeStampUndoable(ann)
     }
 
     // MARK: - Sidebar (organizer) delegate
