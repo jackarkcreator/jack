@@ -3,6 +3,15 @@
     <channel>
         <title>Jack</title>
         <item>
+            <title>1.5.1</title>
+            <pubDate>Fri, 28 Aug 2026 21:55:34 -0700</pubDate>
+            <link>https://github.com/jackarkcreator/jack</link>
+            <sparkle:version>9</sparkle:version>
+            <sparkle:shortVersionString>1.5.1</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>11.0</sparkle:minimumSystemVersion>
+            <enclosure url="https://github.com/jackarkcreator/jack/releases/download/v1.5.1/Jack-mac-universal-v1.5.1.zip" length="2386012" type="application/octet-stream" sparkle:edSignature="JouX59dRZMuGdbcBSvQgL0j4NExoNtw2jVaK8y9Z6MHCrKvxcreGLZsLXWz3+APAH0YviscIV0QIfhTXJYKSCw=="/>
+        </item>
+        <item>
             <title>1.5.0</title>
             <pubDate>Fri, 28 Aug 2026 21:23:28 -0700</pubDate>
             <link>https://github.com/jackarkcreator/jack</link>
