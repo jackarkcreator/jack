@@ -974,11 +974,18 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             let issues = RedactionEngine.verify(outputURL: out, redactedPages: redactedPages, forbiddenTerms: terms)
             if issues.isEmpty {
                 self.clearRedactionMarks()
-                NSWorkspace.shared.activateFileViewerSelecting([out])
+                // The differentiator: a verification certificate beside every verified redaction.
+                let certURL = out.deletingPathExtension().appendingPathExtension("certificate.pdf")
+                let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+                let certOK = CertificateEngine.generate(forRedacted: out, redactedPages: redactedPages,
+                                                        regionCount: marks.count, terms: terms,
+                                                        appVersion: version, to: certURL)
+                NSWorkspace.shared.activateFileViewerSelecting(certOK ? [out, certURL] : [out])
                 NSSound(named: "Glass")?.play()
                 let n = redactedPages.count
                 infoAlert("Redaction verified",
-                          "\(n) page\(n == 1 ? "" : "s") permanently flattened — 0 recoverable characters under the redactions, metadata removed. Saved as \(out.lastPathComponent).")
+                          "\(n) page\(n == 1 ? "" : "s") permanently flattened — 0 recoverable characters under the redactions, metadata removed. Saved as \(out.lastPathComponent)."
+                          + (certOK ? "\n\nA verification certificate with the file's SHA-256 digest was saved alongside it." : ""))
             } else {
                 // Never leave a leaky artifact on disk.
                 try? FileManager.default.removeItem(at: out)
