@@ -77,6 +77,7 @@ enum MainMenu {
         view.addItem(item("Two Pages", #selector(DocumentWindowController.displayTwoPages(_:)), ""))
         view.addItem(item("Markup", #selector(DocumentWindowController.toggleMarkup(_:)), "A"))
         view.addItem(item("Prepare Form", #selector(DocumentWindowController.toggleForm(_:)), "F"))
+        view.addItem(item("Erase", #selector(DocumentWindowController.toggleErase(_:)), ""))
         view.addItem(item("Redact", #selector(DocumentWindowController.toggleRedact(_:)), "R"))
         viewItem.submenu = view
         main.addItem(viewItem)
@@ -88,6 +89,12 @@ enum MainMenu {
         tools.addItem(item("Bates Numbering…", #selector(DocumentWindowController.batesNumbering(_:)), ""))
         tools.addItem(item("Watermark…", #selector(DocumentWindowController.addWatermark(_:)), ""))
         tools.addItem(item("Compress…", #selector(DocumentWindowController.compressDocument(_:)), ""))
+        tools.addItem(.separator())
+        tools.addItem(item("Copy Region as Image", #selector(DocumentWindowController.copyRegionAsImage(_:)), ""))
+        tools.addItem(item("Save Region as Image…", #selector(DocumentWindowController.saveRegionAsImage(_:)), ""))
+        tools.addItem(.separator())
+        tools.addItem(item("Crop Pages…", #selector(DocumentWindowController.cropPages(_:)), ""))
+        tools.addItem(item("Remove Crop", #selector(DocumentWindowController.removeCrop(_:)), ""))
         toolsItem.submenu = tools
         main.addItem(toolsItem)
 

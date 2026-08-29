@@ -15,9 +15,16 @@ enum RedactionEngine {
     static let rasterScale: CGFloat = 4.0   // 288 DPI — text-legible, size-sane
     static let jpegQuality: CGFloat = 0.8
 
+    /// How a marked region is destroyed: blackout = classic redaction box; erase = whiteout —
+    /// the region reads as blank paper (logo/address removal). Both rasterize the page, so the
+    /// removal is real either way; only the paint differs.
+    enum Style { case blackout, erase
+        var fill: NSColor { self == .blackout ? .black : .white }
+    }
+
     /// Write `doc` to `url` with the given redactions applied (page index → rects in page space).
     /// Pass an empty map to get "Clean for Sharing": everything flattened, metadata dropped.
-    static func apply(_ doc: PDFDocument, redactions: [Int: [CGRect]], to url: URL) -> Bool {
+    static func apply(_ doc: PDFDocument, redactions: [Int: [CGRect]], style: Style = .blackout, to url: URL) -> Bool {
         guard let firstPage = doc.page(at: 0) else { return false }
         var firstBox = firstPage.bounds(for: .mediaBox)
         guard let consumer = CGDataConsumer(url: url as CFURL),
@@ -31,7 +38,7 @@ enum RedactionEngine {
 
             if let rects = redactions[i], !rects.isEmpty {
                 // Kill path: page becomes pixels; the black is painted into the pixels.
-                if let cg = rasterized(page: page, blackout: rects) {
+                if let cg = rasterized(page: page, blackout: rects, fill: style.fill) {
                     ctx.saveGState()
                     ctx.interpolationQuality = .high
                     ctx.draw(cg, in: box)
@@ -75,7 +82,7 @@ enum RedactionEngine {
     // Render the page to a JPEG-backed CGImage with the redaction rects filled solid black.
     // Redaction overlays and stamps are handled explicitly so nothing depends on custom
     // annotation subclasses drawing themselves through page.draw.
-    private static func rasterized(page: PDFPage, blackout: [CGRect]) -> CGImage? {
+    private static func rasterized(page: PDFPage, blackout: [CGRect], fill: NSColor = .black) -> CGImage? {
         let box = page.bounds(for: .mediaBox)
         let w = Int(box.width * rasterScale), h = Int(box.height * rasterScale)
         guard w > 0, h > 0,
@@ -107,7 +114,7 @@ enum RedactionEngine {
         }
         overlays.forEach { page.addAnnotation($0) }   // keep the on-screen doc intact
 
-        cg.setFillColor(NSColor.black.cgColor)
+        cg.setFillColor(fill.cgColor)
         for r in blackout { cg.fill(r) }
         cg.restoreGState()
 

@@ -17,6 +17,11 @@ final class SigningPDFView: PDFView {
     // Form authoring: while on, widgets drag instead of accepting input; an armed kind
     // places a new field on click/drag (same rubber-band pattern as redact marks).
     var formAuthoringOn = false
+    // Redact-mode bands commit as erase (whiteout) marks when this is set.
+    var eraseStyle = false
+    // One-shot region tool (snapshot/crop): armed from a menu, fires once, disarms itself.
+    var regionAction: ((CGRect, PDFPage) -> Void)?
+    var regionColor: NSColor = .systemTeal
     var armedFieldKind: FormFieldKind?
     var formFieldMenuItems: ((PDFAnnotation) -> [NSMenuItem])?
     var annotateMenuItems: ((PDFPage?, CGPoint) -> [NSMenuItem])?
@@ -56,11 +61,25 @@ final class SigningPDFView: PDFView {
     private var markOriginView: CGPoint = .zero
     private var markingPage: PDFPage?
     private var bandFieldKind: FormFieldKind?   // set when the rubber band places a form field
+    private var bandIsRegion = false            // set when the rubber band feeds regionAction
 
     override func mouseDown(with event: NSEvent) {
         let viewPoint = convert(event.locationInWindow, from: nil)
         guard let page = page(for: viewPoint, nearest: true) else { super.mouseDown(with: event); return }
         let p = convert(viewPoint, to: page)
+        if regionAction != nil {
+            bandIsRegion = true
+            markOriginView = viewPoint
+            markingPage = page
+            let band = NSView(frame: CGRect(origin: viewPoint, size: .zero))
+            band.wantsLayer = true
+            band.layer?.backgroundColor = regionColor.withAlphaComponent(0.15).cgColor
+            band.layer?.borderColor = regionColor.cgColor
+            band.layer?.borderWidth = 1.5
+            addSubview(band)
+            rubberBand = band
+            return
+        }
         if formAuthoringOn {
             // Drag an existing field; with a kind armed, click or drag places a new one.
             // A hit on a widget OR its label picks up the whole field (widgets + captions).
@@ -108,8 +127,13 @@ final class SigningPDFView: PDFView {
             markingPage = page
             let band = NSView(frame: CGRect(origin: viewPoint, size: .zero))
             band.wantsLayer = true
-            band.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.45).cgColor
-            band.layer?.borderColor = NSColor.systemRed.cgColor
+            if eraseStyle {
+                band.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.85).cgColor
+                band.layer?.borderColor = NSColor.systemOrange.cgColor
+            } else {
+                band.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.45).cgColor
+                band.layer?.borderColor = NSColor.systemRed.cgColor
+            }
             band.layer?.borderWidth = 1.5
             addSubview(band)
             rubberBand = band
@@ -179,7 +203,19 @@ final class SigningPDFView: PDFView {
             let viewRect = band.frame
             band.removeFromSuperview()
             rubberBand = nil
-            defer { markingPage = nil; bandFieldKind = nil }
+            defer { markingPage = nil; bandFieldKind = nil; bandIsRegion = false }
+            if bandIsRegion, let page = markingPage {
+                let action = regionAction
+                regionAction = nil                       // one-shot
+                if viewRect.width >= 6, viewRect.height >= 6 {
+                    let a = convert(viewRect.origin, to: page)
+                    let b = convert(CGPoint(x: viewRect.maxX, y: viewRect.maxY), to: page)
+                    let pageRect = CGRect(x: min(a.x, b.x), y: min(a.y, b.y),
+                                          width: abs(b.x - a.x), height: abs(b.y - a.y))
+                    if pageRect.width >= 4, pageRect.height >= 4 { action?(pageRect, page) }
+                }
+                return
+            }
             // Form placement: a bare click (tiny rect) means "drop at default size" —
             // the controller normalizes. Anchor a click at the mouse-up point.
             if let kind = bandFieldKind, let page = markingPage {
@@ -199,7 +235,7 @@ final class SigningPDFView: PDFView {
                 let pageRect = CGRect(x: min(a.x, b.x), y: min(a.y, b.y),
                                       width: abs(b.x - a.x), height: abs(b.y - a.y))
                 guard pageRect.width >= 2, pageRect.height >= 2 else { return }
-                let ann = RedactionAnnotation(bounds: pageRect)
+                let ann = RedactionAnnotation(bounds: pageRect, erase: eraseStyle)
                 page.addAnnotation(ann)
                 stampDelegate?.redactionAdded(ann)
             }

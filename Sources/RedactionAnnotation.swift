@@ -7,10 +7,19 @@ import AppKit
 import PDFKit
 
 final class RedactionAnnotation: PDFAnnotation {
-    init(bounds: CGRect) {
+    /// Erase marks share the machinery but read as whiteout, not blackout.
+    let isErase: Bool
+
+    init(bounds: CGRect, erase: Bool = false) {
+        isErase = erase
         super.init(bounds: bounds, forType: .square, withProperties: nil)
-        color = .systemRed                                        // border
-        interiorColor = NSColor.black.withAlphaComponent(0.55)    // fill
+        if erase {
+            color = .systemOrange                                     // border
+            interiorColor = NSColor.white.withAlphaComponent(0.85)    // fill
+        } else {
+            color = .systemRed                                        // border
+            interiorColor = NSColor.black.withAlphaComponent(0.55)    // fill
+        }
         let b = PDFBorder()
         b.lineWidth = 1.5
         border = b

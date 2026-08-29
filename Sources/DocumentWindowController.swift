@@ -90,6 +90,12 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     private let redactTermField = NSTextField()
     private var redactedTerms: Set<String> = []   // fed to the verify pass as forbidden terms
 
+    // Erase strip controls (whiteout that actually removes)
+    private var eraseOn = false
+    private var eraseAccessory: NSTitlebarAccessoryViewController?
+    private var eraseButton: NSButton?
+    private let eraseCountLabel = NSTextField(labelWithString: "")
+
     // Form strip controls (field authoring)
     private var formOn = false
     private var formAccessory: NSTitlebarAccessoryViewController?
@@ -239,6 +245,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         static let zoomIn = NSToolbarItem.Identifier("jack.zoomIn")
         static let markup = NSToolbarItem.Identifier("jack.markup")
         static let form = NSToolbarItem.Identifier("jack.form")
+        static let erase = NSToolbarItem.Identifier("jack.erase")
         static let redact = NSToolbarItem.Identifier("jack.redact")
         static let clean = NSToolbarItem.Identifier("jack.clean")
         static let tools = NSToolbarItem.Identifier("jack.tools")
@@ -254,7 +261,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         var ids: [NSToolbarItem.Identifier] =
         [ItemID.sidebar, .space, ItemID.undo, ItemID.redo, .flexibleSpace, ItemID.zoomOut, ItemID.zoomIn, .space,
-         ItemID.highlight, ItemID.markup, ItemID.form, ItemID.redact, ItemID.clean, ItemID.lock, ItemID.tools, ItemID.print, ItemID.share, .flexibleSpace, ItemID.search, ItemID.save]
+         ItemID.highlight, ItemID.markup, ItemID.form, ItemID.erase, ItemID.redact, ItemID.clean, ItemID.lock, ItemID.tools, ItemID.print, ItemID.share, .flexibleSpace, ItemID.search, ItemID.save]
         if AskEngine.isAvailable, let i = ids.firstIndex(of: ItemID.share) {
             ids.insert(ItemID.ask, at: i + 1)
         }
@@ -331,6 +338,12 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             menu.addItem({ let m = NSMenuItem(title: "Bates Numbering…", action: #selector(batesNumbering(_:)), keyEquivalent: ""); m.target = self; return m }())
             menu.addItem({ let m = NSMenuItem(title: "Watermark…", action: #selector(addWatermark(_:)), keyEquivalent: ""); m.target = self; return m }())
             menu.addItem({ let m = NSMenuItem(title: "Compress…", action: #selector(compressDocument(_:)), keyEquivalent: ""); m.target = self; return m }())
+            menu.addItem(.separator())
+            menu.addItem({ let m = NSMenuItem(title: "Copy Region as Image", action: #selector(copyRegionAsImage(_:)), keyEquivalent: ""); m.target = self; return m }())
+            menu.addItem({ let m = NSMenuItem(title: "Save Region as Image…", action: #selector(saveRegionAsImage(_:)), keyEquivalent: ""); m.target = self; return m }())
+            menu.addItem(.separator())
+            menu.addItem({ let m = NSMenuItem(title: "Crop Pages…", action: #selector(cropPages(_:)), keyEquivalent: ""); m.target = self; return m }())
+            menu.addItem({ let m = NSMenuItem(title: "Remove Crop", action: #selector(removeCrop(_:)), keyEquivalent: ""); m.target = self; return m }())
             item.menu = menu
             return item
         case ItemID.highlight:
@@ -364,6 +377,18 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             item.view = b
             item.label = "Redact"
             item.toolTip = "Redact — permanently remove content"
+            return item
+        case ItemID.erase:
+            let item = NSToolbarItem(itemIdentifier: id)
+            let img = NSImage(systemSymbolName: "eraser", accessibilityDescription: "Erase")
+                ?? NSImage(systemSymbolName: "rectangle.badge.minus", accessibilityDescription: "Erase")
+            let b = NSButton(image: img ?? NSImage(), target: self, action: #selector(toggleErase(_:)))
+            b.setButtonType(.pushOnPushOff)
+            b.bezelStyle = .texturedRounded
+            eraseButton = b
+            item.view = b
+            item.label = "Erase"
+            item.toolTip = "Erase — remove logos, addresses, anything (verified removal, reads as blank paper)"
             return item
         case ItemID.form:
             let item = NSToolbarItem(itemIdentifier: id)
@@ -779,7 +804,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
 
     private func setMarkup(on: Bool) {
         guard markupOn != on, let window = window else { return }
-        if on { setRedact(on: false); setForm(on: false) }   // one tool strip at a time
+        if on { setRedact(on: false); setForm(on: false); setErase(on: false) }   // one tool strip at a time
         markupOn = on
         markupButton?.state = on ? .on : .off
         if on {
@@ -849,7 +874,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
 
     private func setRedact(on: Bool) {
         guard redactOn != on, let window = window else { return }
-        if on { setMarkup(on: false); setForm(on: false) }   // one tool strip at a time
+        if on { setMarkup(on: false); setForm(on: false); setErase(on: false) }   // one tool strip at a time
         redactOn = on
         redactButton?.state = on ? .on : .off
         pdfView.redactMode = on
@@ -911,13 +936,138 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         return strip
     }
 
+    // MARK: - Erase mode (whiteout that actually removes — RedactionEngine, white paint)
+
+    @objc func toggleErase(_ sender: Any?) { setErase(on: !eraseOn) }
+
+    private func setErase(on: Bool) {
+        guard eraseOn != on, let window = window else { return }
+        if on { setMarkup(on: false); setRedact(on: false); setForm(on: false) }
+        eraseOn = on
+        eraseButton?.state = on ? .on : .off
+        pdfView.redactMode = on          // erase rides the redact band machinery
+        pdfView.eraseStyle = on
+        if on {
+            let acc = NSTitlebarAccessoryViewController()
+            acc.view = buildEraseStrip(width: window.frame.width)
+            acc.layoutAttribute = .bottom
+            window.addTitlebarAccessoryViewController(acc)
+            eraseAccessory = acc
+            updateEraseCount()
+        } else {
+            eraseAccessory?.removeFromParent()
+            eraseAccessory = nil
+        }
+    }
+
+    private func buildEraseStrip(width: CGFloat) -> NSView {
+        let strip = NSView(frame: NSRect(x: 0, y: 0, width: width, height: 40))
+
+        let hint = NSTextField(labelWithString: "Drag over anything to erase it — logos, addresses, images. Erased means removed, not covered.")
+        hint.textColor = .secondaryLabelColor
+        hint.font = .systemFont(ofSize: 11)
+        hint.frame = NSRect(x: 12, y: 12, width: 620, height: 16)
+        strip.addSubview(hint)
+
+        eraseCountLabel.textColor = .secondaryLabelColor
+        eraseCountLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        eraseCountLabel.frame = NSRect(x: 640, y: 12, width: 90, height: 16)
+        strip.addSubview(eraseCountLabel)
+
+        let clear = NSButton(title: "Clear Marks", target: self, action: #selector(clearEraseMarks))
+        clear.bezelStyle = .rounded
+        clear.controlSize = .small
+        clear.frame = NSRect(x: width - 254, y: 7, width: 100, height: 26)
+        clear.autoresizingMask = [.minXMargin]
+        strip.addSubview(clear)
+
+        let apply = NSButton(title: "Apply Erase…", target: self, action: #selector(applyErase))
+        apply.bezelStyle = .rounded
+        apply.controlSize = .small
+        apply.keyEquivalent = "\r"
+        apply.frame = NSRect(x: width - 146, y: 7, width: 134, height: 26)
+        apply.autoresizingMask = [.minXMargin]
+        strip.addSubview(apply)
+
+        return strip
+    }
+
+    private func allEraseMarks() -> [(Int, RedactionAnnotation)] {
+        guard let doc = pdfView.document else { return [] }
+        var out: [(Int, RedactionAnnotation)] = []
+        for i in 0..<doc.pageCount {
+            for a in doc.page(at: i)?.annotations.compactMap({ $0 as? RedactionAnnotation }) ?? []
+            where a.isErase {
+                out.append((i, a))
+            }
+        }
+        return out
+    }
+
+    private func updateEraseCount() {
+        let n = allEraseMarks().count
+        eraseCountLabel.stringValue = n == 0 ? "" : "\(n) mark\(n == 1 ? "" : "s")"
+    }
+
+    @objc private func clearEraseMarks() {
+        let marks = allEraseMarks()
+        guard !marks.isEmpty, let doc = pdfView.document else { return }
+        for (_, a) in marks { a.page?.removeAnnotation(a) }
+        docUndo.registerUndo(withTarget: self) { me in
+            for (i, a) in marks { (me.pdfView.document ?? doc).page(at: i)?.addAnnotation(a) }
+            me.docUndo.registerUndo(withTarget: me) { $0.clearEraseMarks() }
+            me.updateEraseCount()
+            me.pdfView.needsDisplay = true
+        }
+        docUndo.setActionName("Clear Erase Marks")
+        updateEraseCount()
+        forceRefresh()
+    }
+
+    @objc private func applyErase() {
+        guard let doc = pdfView.document, let window = window else { return }
+        let marks = allEraseMarks()
+        guard !marks.isEmpty else {
+            infoAlert("Nothing marked", "Drag over the content you want removed first.")
+            return
+        }
+        var regions: [Int: [CGRect]] = [:]
+        for (i, a) in marks { regions[i, default: []].append(a.bounds) }
+        let erasedPages = Array(regions.keys).sorted()
+
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = exportBaseName + "-erased.pdf"
+        panel.directoryURL = pdfURL.deletingLastPathComponent()
+        if #available(macOS 11.0, *) { panel.allowedContentTypes = [.pdf] }
+        panel.beginSheetModal(for: window) { [weak self] resp in
+            guard resp == .OK, let out = panel.url, let self = self else { return }
+            guard RedactionEngine.apply(doc, redactions: regions, style: .erase, to: out) else {
+                infoAlert("Erase failed", "Couldn't write the file. Nothing was saved.")
+                return
+            }
+            let issues = RedactionEngine.verify(outputURL: out, redactedPages: erasedPages, forbiddenTerms: [])
+            if issues.isEmpty {
+                self.clearEraseMarks()
+                NSWorkspace.shared.activateFileViewerSelecting([out])
+                NSSound(named: "Glass")?.play()
+                let n = erasedPages.count
+                infoAlert("Erase verified",
+                          "\(n) page\(n == 1 ? "" : "s") re-rendered with the marked content removed — verified unrecoverable, metadata dropped. Saved as \(out.lastPathComponent).\n\nErased pages become images; run Make Searchable (OCR) if you need their text layer back.")
+            } else {
+                try? FileManager.default.removeItem(at: out)
+                infoAlert("Erase NOT verified — file deleted",
+                          "The output failed verification and was deleted:\n\n• " + issues.joined(separator: "\n• "))
+            }
+        }
+    }
+
     // MARK: - Form mode (drag-and-drop fillable fields; Word-simple, AcroForm underneath)
 
     @objc func toggleForm(_ sender: Any?) { setForm(on: !formOn) }
 
     private func setForm(on: Bool) {
         guard formOn != on, let window = window else { return }
-        if on { setMarkup(on: false); setRedact(on: false) }   // one tool strip at a time
+        if on { setMarkup(on: false); setRedact(on: false); setErase(on: false) }   // one tool strip at a time
         formOn = on
         formButton?.state = on ? .on : .off
         pdfView.formAuthoringOn = on
@@ -1213,6 +1363,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         docUndo.registerUndo(withTarget: self) { $0.removeRedactionMark(ann) }
         docUndo.setActionName("Mark Redaction")
         updateRedactCount()
+        updateEraseCount()
         forceRefresh()
     }
 
@@ -1221,6 +1372,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         docUndo.registerUndo(withTarget: self) { $0.removeRedactionMark(ann) }
         docUndo.setActionName("Mark Redaction")
         updateRedactCount()
+        updateEraseCount()
         if refresh { forceRefresh() }
     }
 
@@ -1230,6 +1382,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         docUndo.registerUndo(withTarget: self) { $0.addRedactionMark(ann, to: page) }
         docUndo.setActionName("Mark Redaction")
         updateRedactCount()
+        updateEraseCount()
         forceRefresh()   // custom-annotation removal needs a forced repaint
     }
 
@@ -1237,7 +1390,8 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         guard let doc = pdfView.document else { return [] }
         var out: [(Int, RedactionAnnotation)] = []
         for i in 0..<doc.pageCount {
-            for a in doc.page(at: i)?.annotations.compactMap({ $0 as? RedactionAnnotation }) ?? [] {
+            for a in doc.page(at: i)?.annotations.compactMap({ $0 as? RedactionAnnotation }) ?? []
+            where !a.isErase {
                 out.append((i, a))
             }
         }
@@ -1949,6 +2103,161 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             items.forEach { $0.0.addAnnotation($0.1) }
             me.registerAnnotationRemovalUndo(items, name: name)
             me.markEdited(); me.forceRefresh()
+        }
+        docUndo.setActionName(name)
+    }
+
+    // MARK: - Snapshot & Crop
+
+    /// Transient status under the title, restored to the page indicator after a beat.
+    private func flashSubtitle(_ text: String) {
+        subtitleLabel.stringValue = text
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in self?.pageChanged() }
+    }
+
+    @objc func copyRegionAsImage(_ sender: Any?) {
+        flashSubtitle("Drag over the region to copy…")
+        pdfView.regionColor = .systemTeal
+        pdfView.regionAction = { [weak self] rect, page in
+            guard let img = CropEngine.snapshotImage(page: page, region: rect) else { return }
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.writeObjects([img])
+            NSSound(named: "Pop")?.play()
+            self?.flashSubtitle("Region copied — paste anywhere")
+        }
+    }
+
+    @objc func saveRegionAsImage(_ sender: Any?) {
+        flashSubtitle("Drag over the region to save…")
+        pdfView.regionColor = .systemTeal
+        pdfView.regionAction = { [weak self] rect, page in
+            guard let self, let window = self.window,
+                  let img = CropEngine.snapshotImage(page: page, region: rect),
+                  let tiff = img.tiffRepresentation,
+                  let rep = NSBitmapImageRep(data: tiff),
+                  let png = rep.representation(using: .png, properties: [:]) else { return }
+            let panel = NSSavePanel()
+            panel.nameFieldStringValue = self.exportBaseName + "-region.png"
+            panel.directoryURL = self.pdfURL.deletingLastPathComponent()
+            if #available(macOS 11.0, *) { panel.allowedContentTypes = [.png] }
+            panel.beginSheetModal(for: window) { resp in
+                guard resp == .OK, let out = panel.url else { return }
+                try? png.write(to: out)
+                NSWorkspace.shared.activateFileViewerSelecting([out])
+            }
+        }
+    }
+
+    @objc func cropPages(_ sender: Any?) {
+        flashSubtitle("Drag the area to keep…")
+        pdfView.regionColor = .systemBlue
+        pdfView.regionAction = { [weak self] rect, page in
+            self?.runCropDialog(rect: rect, page: page)
+        }
+    }
+
+    private func runCropDialog(rect: CGRect, page: PDFPage) {
+        guard let doc = pdfView.document else { return }
+        let alert = NSAlert()
+        alert.messageText = "Crop Pages"
+        alert.informativeText = "Standard crop hides everything outside the area — it's reversible, and the hidden content stays in the file. Permanent crop re-renders the page so what's outside is verifiably gone (the page becomes an image)."
+        let acc = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 58))
+        let scope = NSPopUpButton(frame: NSRect(x: 0, y: 32, width: 200, height: 25))
+        scope.addItems(withTitles: ["This page only", "All pages"])
+        acc.addSubview(scope)
+        let permanent = NSButton(checkboxWithTitle: "Permanent — remove content outside the crop", target: nil, action: nil)
+        permanent.frame = NSRect(x: 0, y: 4, width: 320, height: 20)
+        acc.addSubview(permanent)
+        alert.accessoryView = acc
+        alert.addButton(withTitle: "Crop")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { pageChanged(); return }
+
+        let pageIndexes: [Int]
+        if scope.indexOfSelectedItem == 1 {
+            pageIndexes = Array(0..<doc.pageCount)
+        } else {
+            pageIndexes = [doc.index(for: page)]
+        }
+        if permanent.state == .on {
+            applyPermanentCrop(rect: rect, pages: pageIndexes, in: doc)
+        } else {
+            applyStandardCrop(rect: rect, pages: pageIndexes, in: doc)
+        }
+        pageChanged()
+    }
+
+    private func applyStandardCrop(rect: CGRect, pages: [Int], in doc: PDFDocument) {
+        var items: [(PDFPage, CGRect)] = []
+        for i in pages {
+            guard let p = doc.page(at: i) else { continue }
+            let clipped = rect.intersection(p.bounds(for: .mediaBox))
+            guard !clipped.isEmpty else { continue }
+            items.append((p, p.bounds(for: .cropBox)))
+            p.setBounds(clipped, for: .cropBox)
+        }
+        guard !items.isEmpty else { return }
+        registerCropUndo(items, name: "Crop Pages")
+        sidebar.reload()
+        forceRefresh()
+    }
+
+    private func registerCropUndo(_ items: [(PDFPage, CGRect)], name: String) {
+        docUndo.registerUndo(withTarget: self) { me in
+            let current = items.map { ($0.0, $0.0.bounds(for: .cropBox)) }
+            items.forEach { $0.0.setBounds($0.1, for: .cropBox) }
+            me.registerCropUndo(current, name: name)
+            me.sidebar.reload()
+            me.forceRefresh()
+        }
+        docUndo.setActionName(name)
+    }
+
+    @objc func removeCrop(_ sender: Any?) {
+        guard let doc = pdfView.document else { return }
+        var items: [(PDFPage, CGRect)] = []
+        for i in 0..<doc.pageCount {
+            guard let p = doc.page(at: i) else { continue }
+            let media = p.bounds(for: .mediaBox)
+            if p.bounds(for: .cropBox) != media {
+                items.append((p, p.bounds(for: .cropBox)))
+                p.setBounds(media, for: .cropBox)
+            }
+        }
+        guard !items.isEmpty else { infoAlert("No crop to remove", "No page has a standard crop applied."); return }
+        registerCropUndo(items, name: "Remove Crop")
+        sidebar.reload()
+        forceRefresh()
+    }
+
+    private func applyPermanentCrop(rect: CGRect, pages: [Int], in doc: PDFDocument) {
+        var swaps: [(Int, PDFPage, PDFPage)] = []   // (index, old, new)
+        for i in pages {
+            guard let old = doc.page(at: i) else { continue }
+            let clipped = rect.intersection(old.bounds(for: .mediaBox))
+            guard !clipped.isEmpty, let new = CropEngine.permanentlyCropped(page: old, to: clipped) else { continue }
+            doc.removePage(at: i)
+            doc.insert(new, at: i)
+            swaps.append((i, old, new))
+        }
+        guard !swaps.isEmpty else { infoAlert("Crop failed", "Couldn't render the cropped page."); return }
+        registerPermanentCropUndo(swaps, restoreOld: true, name: "Permanent Crop")
+        sidebar.reload()
+        forceRefresh()
+    }
+
+    // Re-inserting the SAME removed PDFPage object works (identity preserved) — the
+    // delete-undo pattern the sidebar already relies on.
+    private func registerPermanentCropUndo(_ swaps: [(Int, PDFPage, PDFPage)], restoreOld: Bool, name: String) {
+        docUndo.registerUndo(withTarget: self) { me in
+            guard let doc = me.pdfView.document else { return }
+            for (i, old, new) in swaps {
+                doc.removePage(at: i)
+                doc.insert(restoreOld ? old : new, at: i)
+            }
+            me.registerPermanentCropUndo(swaps, restoreOld: !restoreOld, name: name)
+            me.sidebar.reload()
+            me.forceRefresh()
         }
         docUndo.setActionName(name)
     }
