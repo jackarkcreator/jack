@@ -970,6 +970,14 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
 
     private var notePopover: NSPopover?
 
+    // A text-anchored comment is a highlight + a note-icon badge; they act as one.
+    private var commentPartners: [ObjectIdentifier: PDFAnnotation] = [:]
+    private func link(_ a: PDFAnnotation, _ b: PDFAnnotation) {
+        commentPartners[ObjectIdentifier(a)] = b
+        commentPartners[ObjectIdentifier(b)] = a
+    }
+    private func partner(of a: PDFAnnotation) -> PDFAnnotation? { commentPartners[ObjectIdentifier(a)] }
+
     // A comment is a pin note, or a highlight that carries note text (Adobe's "note to text").
     static func isComment(_ ann: PDFAnnotation) -> Bool {
         ann.type == "Text" || (ann.type == "Highlight" && !((ann.contents ?? "").isEmpty))
@@ -1013,6 +1021,18 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             ann.contents = text
             page.addAnnotation(ann)
             added.append((page, ann))
+
+            // The visible tell: a note-icon badge at the highlight's top-right corner.
+            let box = page.bounds(for: .mediaBox)
+            let pin = PDFAnnotation(bounds: CGRect(x: min(b.maxX + 3, box.maxX - 24),
+                                                   y: min(b.maxY - 9, box.maxY - 24),
+                                                   width: 20, height: 20),
+                                    forType: .text, withProperties: nil)
+            pin.contents = text
+            pin.color = .systemYellow
+            page.addAnnotation(pin)
+            link(ann, pin)
+            added.append((page, pin))
         }
         guard !added.isEmpty else { return }
         pdfView.setCurrentSelection(nil, animate: false)
@@ -1098,21 +1118,26 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         guard let ann = activeNote else { return }
         notePopover?.close()
         guard let text = promptForCommentText(initial: ann.contents ?? "") else { return }
+        let pair = [ann, partner(of: ann)].compactMap { $0 }
         let old = ann.contents ?? ""
-        ann.contents = text
+        pair.forEach { $0.contents = text }
         docUndo.registerUndo(withTarget: self) { me in
-            ann.contents = old
-            me.docUndo.registerUndo(withTarget: me) { _ in ann.contents = text }
+            pair.forEach { $0.contents = old }
+            me.docUndo.registerUndo(withTarget: me) { _ in pair.forEach { $0.contents = text } }
         }
         docUndo.setActionName("Edit Comment")
         markEdited()
     }
 
     @objc private func removeNote(_ sender: Any?) {
-        guard let ann = activeNote, let page = ann.page else { return }
+        guard let ann = activeNote else { return }
         notePopover?.close()
-        page.removeAnnotation(ann)
-        registerAnnotationAddUndo([(page, ann)], name: "Remove Comment")
+        var items: [(PDFPage, PDFAnnotation)] = []
+        for a in [ann, partner(of: ann)].compactMap({ $0 }) {
+            if let page = a.page { page.removeAnnotation(a); items.append((page, a)) }
+        }
+        guard !items.isEmpty else { return }
+        registerAnnotationAddUndo(items, name: "Remove Comment")
         markEdited()
         forceRefresh()
     }
