@@ -9,7 +9,10 @@ UPDATES="$DIR/build/updates"
 
 [ -d "$UPDATES" ] || { echo "No $UPDATES — put the release zip(s) there first (Jack-mac-universal-vX.Y.Z.zip)"; exit 1; }
 
+# --maximum-deltas 0: full zips are ~2.3MB — deltas add hosting complexity for no real gain.
+rm -f "$UPDATES"/*.delta
 "$DIR/tools/sparkle/generate_appcast" --account net.thinkopen.jack \
+  --maximum-deltas 0 \
   --link "https://github.com/jackarkcreator/jack" \
   -o "$DIR/appcast.xml" "$UPDATES"
 
