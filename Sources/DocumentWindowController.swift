@@ -19,6 +19,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
 
     private var matches: [PDFSelection] = []
     private var matchIndex = 0
+    // Clicking toolbar/menu chrome can clear the live selection before the action runs
+    // (Tahoe focus behavior) — annotate actions fall back to the last real selection.
+    private var lastSelection: PDFSelection?
     private var sidebarVisible = true
     private var markupOn = false
     private let sidebarWidth: CGFloat = 172
@@ -92,6 +95,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
 
         NotificationCenter.default.addObserver(self, selector: #selector(pageChanged),
                                                name: .PDFViewPageChanged, object: pdfView)
+        NotificationCenter.default.addObserver(self, selector: #selector(selectionChanged),
+                                               name: .PDFViewSelectionChanged, object: pdfView)
+        pdfView.annotateMenuItems = { [weak self] in self?.buildAnnotateMenuItems() ?? [] }
         // A locked doc builds blank thumbnails; re-render everything once the password lands.
         NotificationCenter.default.addObserver(self, selector: #selector(documentUnlocked),
                                                name: .PDFDocumentDidUnlock, object: doc)
@@ -107,6 +113,13 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         sidebar.scrollView.autoresizingMask = [.height]
         pdfView.frame = NSRect(x: sw, y: 0, width: content.bounds.width - sw, height: content.bounds.height)
         pdfView.autoresizingMask = [.width, .height]
+    }
+
+    @objc private func selectionChanged() {
+        if let s = pdfView.currentSelection,
+           !(s.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            lastSelection = s
+        }
     }
 
     @objc private func documentUnlocked() {
@@ -858,8 +871,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     @objc func strikethroughSelection(_ sender: Any?) { annotateSelection(.strikeOut, color: .systemRed, name: "Strikethrough") }
 
     private func annotateSelection(_ type: PDFAnnotationSubtype, color: NSColor, name: String) {
-        guard let sel = pdfView.currentSelection,
-              !(sel.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        let live = pdfView.currentSelection
+        let liveOK = !((live?.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        guard let sel = liveOK ? live : lastSelection else {
             infoAlert("Nothing selected", "Select some text first, then \(name.lowercased()) it.")
             return
         }
@@ -880,9 +894,31 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         }
         guard !added.isEmpty else { return }
         pdfView.setCurrentSelection(nil, animate: false)
+        lastSelection = nil
         registerAnnotationRemovalUndo(added, name: name)
         markEdited()
         forceRefresh()
+    }
+
+    // Context-menu items for a right-click on selected text (built fresh each time).
+    private func buildAnnotateMenuItems() -> [NSMenuItem] {
+        let live = pdfView.currentSelection
+        let hasSel = !((live?.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            || lastSelection != nil
+        guard hasSel else { return [] }
+        var items: [NSMenuItem] = []
+        for (i, entry) in Self.highlightColors.enumerated() {
+            let m = NSMenuItem(title: "Highlight \(entry.name)", action: #selector(highlightColorPicked(_:)), keyEquivalent: "")
+            m.target = self; m.tag = i; m.image = Self.swatch(entry.color)
+            items.append(m)
+        }
+        let u = NSMenuItem(title: "Underline", action: #selector(underlineSelection(_:)), keyEquivalent: "")
+        u.target = self; u.image = Self.swatch(.systemBlue)
+        items.append(u)
+        let s = NSMenuItem(title: "Strikethrough", action: #selector(strikethroughSelection(_:)), keyEquivalent: "")
+        s.target = self; s.image = Self.swatch(.systemRed)
+        items.append(s)
+        return items
     }
 
     // Mutually recursive add/remove so redo comes free.

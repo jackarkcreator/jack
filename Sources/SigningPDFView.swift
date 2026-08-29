@@ -11,6 +11,17 @@ protocol StampSelectionDelegate: AnyObject {
 final class SigningPDFView: PDFView {
     weak var stampDelegate: StampSelectionDelegate?
     var redactMode = false
+    var annotateMenuItems: (() -> [NSMenuItem])?
+
+    // Right-click on selected text → annotate directly from the context menu.
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let base = super.menu(for: event)
+        guard let extra = annotateMenuItems?(), !extra.isEmpty else { return base }
+        let menu = base ?? NSMenu()
+        if menu.items.isEmpty == false { menu.insertItem(.separator(), at: 0) }
+        for item in extra.reversed() { menu.insertItem(item, at: 0) }
+        return menu
+    }
     private var dragging: ImageStampAnnotation?
     private var dragPage: PDFPage?
     private var last: CGPoint = .zero
