@@ -92,6 +92,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
 
         NotificationCenter.default.addObserver(self, selector: #selector(pageChanged),
                                                name: .PDFViewPageChanged, object: pdfView)
+        // A locked doc builds blank thumbnails; re-render everything once the password lands.
+        NotificationCenter.default.addObserver(self, selector: #selector(documentUnlocked),
+                                               name: .PDFDocumentDidUnlock, object: doc)
         sidebar.reload()
         pageChanged()
     }
@@ -104,6 +107,11 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         sidebar.scrollView.autoresizingMask = [.height]
         pdfView.frame = NSRect(x: sw, y: 0, width: content.bounds.width - sw, height: content.bounds.height)
         pdfView.autoresizingMask = [.width, .height]
+    }
+
+    @objc private func documentUnlocked() {
+        sidebar.reload()
+        forceRefresh()
     }
 
     @objc private func pageChanged() {
