@@ -24,6 +24,11 @@ final class JackDocument: NSDocument {
                           userInfo: [NSLocalizedDescriptionKey: "“\(url.lastPathComponent)” couldn’t be read as a PDF."])
         }
         pdf = doc
+        // Restoration can build window controllers before this read lands — attach late.
+        DispatchQueue.main.async { [weak self] in
+            self?.windowControllers.compactMap { $0 as? DocumentWindowController }
+                .forEach { $0.attachDocumentIfNeeded() }
+        }
     }
 
     override func data(ofType typeName: String) throws -> Data {

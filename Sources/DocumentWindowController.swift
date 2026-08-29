@@ -15,6 +15,15 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             ?? FileManager.default.homeDirectoryForCurrentUser
     }
     private let pdfView = SigningPDFView()
+    private var uiBuilt = false
+
+    // Restoration builds this controller before the document's read completes.
+    func attachDocumentIfNeeded() {
+        guard !uiBuilt, let doc = (document as? JackDocument)?.pdf else { return }
+        uiBuilt = true
+        buildUI(doc: doc)
+    }
+
     private let sidebar = PageSidebarController()
     private var searchField: NSSearchField?
     private weak var selected: ImageStampAnnotation?
@@ -58,7 +67,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         self.document = document
         shouldCloseDocument = true
         win.delegate = self
-        if let doc = document.pdf { buildUI(doc: doc) }
+        if let doc = document.pdf { buildUI(doc: doc); uiBuilt = true }
         AppDelegate.documents.append(self)
         AppDelegate.updateActivationPolicy()
     }
