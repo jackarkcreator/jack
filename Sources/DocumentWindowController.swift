@@ -105,6 +105,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     private weak var fieldNameField: NSTextField?
     private weak var fieldOptionsView: NSTextView?
     private var editingFieldName: String?
+    private var lastImageHit: (image: PDFPageImage, page: PDFPage)?
 
     init(document: JackDocument) {
         let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1180, height: 800),
@@ -173,7 +174,20 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         NotificationCenter.default.addObserver(self, selector: #selector(selectionChanged),
                                                name: .PDFViewSelectionChanged, object: pdfView)
         pdfView.annotateMenuItems = { [weak self] page, point in
-            self?.buildAnnotateMenuItems(page: page, point: point) ?? []
+            guard let self else { return [] }
+            var items = self.buildAnnotateMenuItems(page: page, point: point)
+            // Right-clicked on a picture? Offer it like a browser would.
+            if let page, let hit = ImageHitEngine.image(at: point, on: page) {
+                self.lastImageHit = (hit, page)
+                let copy = NSMenuItem(title: "Copy Image", action: #selector(self.copyHitImage(_:)), keyEquivalent: "")
+                copy.target = self
+                let save = NSMenuItem(title: "Save Image As…", action: #selector(self.saveHitImage(_:)), keyEquivalent: "")
+                save.target = self
+                items.insert(.separator(), at: 0)
+                items.insert(save, at: 0)
+                items.insert(copy, at: 0)
+            }
+            return items
         }
         // A locked doc builds blank thumbnails; re-render everything once the password lands.
         NotificationCenter.default.addObserver(self, selector: #selector(documentUnlocked),
@@ -2130,6 +2144,29 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     private func flashSubtitle(_ text: String) {
         subtitleLabel.stringValue = text
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in self?.pageChanged() }
+    }
+
+    @objc private func copyHitImage(_ sender: Any?) {
+        guard let (hit, page) = lastImageHit,
+              let img = ImageHitEngine.extract(hit, from: page) else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.writeObjects([img])
+        NSSound(named: "Pop")?.play()
+        flashSubtitle("Image copied — paste anywhere")
+    }
+
+    @objc private func saveHitImage(_ sender: Any?) {
+        guard let (hit, page) = lastImageHit, let window,
+              let (data, ext) = ImageHitEngine.fileData(hit, from: page) else { return }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = exportBaseName + "-image.\(ext)"
+        panel.directoryURL = pdfURL.deletingLastPathComponent()
+        if #available(macOS 11.0, *) { panel.allowedContentTypes = ext == "jpg" ? [.jpeg] : [.png] }
+        panel.beginSheetModal(for: window) { resp in
+            guard resp == .OK, let out = panel.url else { return }
+            try? data.write(to: out)
+            NSWorkspace.shared.activateFileViewerSelecting([out])
+        }
     }
 
     @objc func copyRegionAsImage(_ sender: Any?) {
