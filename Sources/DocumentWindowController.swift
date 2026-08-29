@@ -22,6 +22,14 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         guard !uiBuilt, let doc = (document as? JackDocument)?.pdf else { return }
         uiBuilt = true
         buildUI(doc: doc)
+        presentWindow()
+    }
+
+    // NSDocument's display:true does not reliably order our hand-built window onscreen
+    // (window-server showed it existing with onscreen=false) — show it ourselves, always.
+    func presentWindow() {
+        window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     private let sidebar = PageSidebarController()
@@ -70,6 +78,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         if let doc = document.pdf { buildUI(doc: doc); uiBuilt = true }
         AppDelegate.documents.append(self)
         AppDelegate.updateActivationPolicy()
+        if uiBuilt { DispatchQueue.main.async { [weak self] in self?.presentWindow() } }
     }
 
     required init?(coder: NSCoder) { fatalError() }
