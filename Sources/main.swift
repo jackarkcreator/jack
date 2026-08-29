@@ -4,6 +4,7 @@ import Cocoa
 import ImageIO
 import PDFKit
 import ServiceManagement
+import Sparkle
 import UniformTypeIdentifiers
 
 let MAX_EDGE: CGFloat = 1600
@@ -81,6 +82,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private let popover = NSPopover()
     private let popoverVC = HomePopoverViewController()
+    // Sparkle: auto-checks daily per SUScheduledCheckInterval; downloads, installs, relaunches.
+    private let updater = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
 
     // Drop files on the menu bar icon / "Open With… Jack". Coalesce split open calls.
     func application(_ application: NSApplication, open urls: [URL]) {
@@ -151,6 +154,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popoverVC.onSign = { [weak self] in self?.popover.performClose(nil); self?.pickSign() }
         popoverVC.onOrganize = { [weak self] in self?.popover.performClose(nil); self?.pickOrganize() }
         popoverVC.onQuit = { NSApp.terminate(nil) }
+        popoverVC.onUpdate = { [weak self] in self?.popover.performClose(nil); self?.updater.checkForUpdates(nil) }
         popoverVC.onToggleLogin = { [weak self] on in self?.setLogin(on) }
         popover.contentViewController = popoverVC
         popover.behavior = .transient
@@ -264,18 +268,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func checkUpdatesAction() {
-        UpdateChecker.check { info in
-            if let info = info {
-                let a = NSAlert()
-                a.messageText = "Update available"
-                a.informativeText = "Jack \(info.version) is available (you have \(UpdateChecker.currentVersion()))."
-                a.addButton(withTitle: "Download")
-                a.addButton(withTitle: "Later")
-                if a.runModal() == .alertFirstButtonReturn { NSWorkspace.shared.open(info.url) }
-            } else {
-                infoAlert("You’re up to date", "Jack \(UpdateChecker.currentVersion()) is the latest version.")
-            }
-        }
+        updater.checkForUpdates(nil)
     }
 
     // MARK: - Open flows

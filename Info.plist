@@ -28,6 +28,14 @@
 	<true/>
 	<key>NSHumanReadableCopyright</key>
 	<string>© 2026 ThinkOpen Inc.</string>
+	<key>SUFeedURL</key>
+	<string>https://raw.githubusercontent.com/jackarkcreator/jack/main/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>CqUay909OACicl8NHhtmROrh2hE1RTOWDevvPYXxPb8=</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUScheduledCheckInterval</key>
+	<integer>86400</integer>
 	<key>CFBundleDocumentTypes</key>
 	<array>
 		<dict>

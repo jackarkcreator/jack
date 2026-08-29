@@ -8,6 +8,7 @@ final class HomePopoverViewController: NSViewController {
     var onOrganize: (() -> Void)?
     var onMakeDefault: (() -> Void)?
     var onQuit: (() -> Void)?
+    var onUpdate: (() -> Void)?
     var onToggleLogin: ((Bool) -> Void)?
     var loginEnabled = false { didSet { loginCheck?.state = loginEnabled ? .on : .off } }
 
@@ -107,5 +108,8 @@ final class HomePopoverViewController: NSViewController {
     @objc private func organize() { onOrganize?() }
     @objc private func toggleLogin() { onToggleLogin?(loginCheck?.state == .on) }
     @objc private func quit() { onQuit?() }
-    @objc private func openUpdate() { if let u = updateURL { NSWorkspace.shared.open(u) } }
+    @objc private func openUpdate() {
+        if let onUpdate = onUpdate { onUpdate() }                 // Sparkle flow (installs in place)
+        else if let u = updateURL { NSWorkspace.shared.open(u) }  // fallback: releases page
+    }
 }
