@@ -1,0 +1,15 @@
+<?xml version="1.0" standalone="yes"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+    <channel>
+        <title>Jack</title>
+        <item>
+            <title>1.4.0</title>
+            <pubDate>Fri, 28 Aug 2026 18:55:55 -0700</pubDate>
+            <link>https://github.com/jackarkcreator/jack</link>
+            <sparkle:version>7</sparkle:version>
+            <sparkle:shortVersionString>1.4.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>11.0</sparkle:minimumSystemVersion>
+            <enclosure url="https://github.com/jackarkcreator/jack/releases/download/v1.4.0/Jack-mac-universal-v1.4.0.zip" length="2261107" type="application/octet-stream" sparkle:edSignature="VUhWO3TIdzt6dtU+M8LsgnriWq/0ZK9glpbUKDV1WIGtIujj1DFhwAd2QBxK3p2QGvX4ZI5CTweuUoIKmxkJAg=="/>
+        </item>
+    </channel>
+</rss>
