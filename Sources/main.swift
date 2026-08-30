@@ -180,6 +180,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popoverVC.onSign = { [weak self] in self?.popover.performClose(nil); self?.pickSign() }
         popoverVC.onOrganize = { [weak self] in self?.popover.performClose(nil); self?.pickOrganize() }
         popoverVC.onBatch = { [weak self] in self?.popover.performClose(nil); self?.pickBatchFolder() }
+        popoverVC.onOpenRecent = { [weak self] url in self?.popover.performClose(nil); self?.route([url]) }
         popoverVC.onQuit = { NSApp.terminate(nil) }
         popoverVC.onUpdate = { [weak self] in self?.popover.performClose(nil); self?.updater.checkForUpdates(nil) }
         popoverVC.onToggleLogin = { [weak self] on in self?.setLogin(on) }
@@ -195,6 +196,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let button = statusItem.button else { return }
         popoverVC.loginEnabled = isLoginEnabled()
         popoverVC.defaultEnabled = AppDelegate.isDefaultPDFApp()
+        popoverVC.refreshRecents()
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         NSApp.activate(ignoringOtherApps: true)
         checkForUpdate()

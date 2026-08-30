@@ -1,4 +1,5 @@
-// The menu bar popover: Jack's compact launcher — three actions, login toggle, quit.
+// The menu bar popover: Jack's compact launcher — a 2×3 action grid, recents, and status.
+// v2.8 ratified mock: half the old height, drop-target hint up top, same six actions.
 import AppKit
 
 final class HomePopoverViewController: NSViewController {
@@ -8,6 +9,7 @@ final class HomePopoverViewController: NSViewController {
     var onSign: (() -> Void)?
     var onOrganize: (() -> Void)?
     var onBatch: (() -> Void)?
+    var onOpenRecent: ((URL) -> Void)?
     var onMakeDefault: (() -> Void)?
     var onQuit: (() -> Void)?
     var onUpdate: (() -> Void)?
@@ -20,8 +22,9 @@ final class HomePopoverViewController: NSViewController {
         }
     }
     private var defaultCheck: NSButton?
-
     private var loginCheck: NSButton?
+    private var recentButtons: [NSButton] = []
+    private let recentsRow = NSView()
     private let updateButton = NSButton(title: "↓ Update", target: nil, action: nil)
     private var updateURL: URL?
 
@@ -31,63 +34,78 @@ final class HomePopoverViewController: NSViewController {
         updateButton.isHidden = false
     }
 
+    private static let width: CGFloat = 312
+    private static let height: CGFloat = 352
+
     override func loadView() {
-        let v = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 600))
+        let v = NSView(frame: NSRect(x: 0, y: 0, width: Self.width, height: Self.height))
 
-        let title = NSTextField(labelWithString: "Jack")
-        title.font = .systemFont(ofSize: 20, weight: .semibold)
-        title.frame = NSRect(x: 20, y: 560, width: 260, height: 26)
-        v.addSubview(title)
+        let header = NSTextField(labelWithString: "Drop files anywhere to start")
+        header.font = .systemFont(ofSize: 13, weight: .semibold)
+        header.frame = NSRect(x: 18, y: Self.height - 30, width: Self.width - 36, height: 18)
+        v.addSubview(header)
 
-        let sub = NSTextField(labelWithString: "Lightweight PDF tools")
-        sub.textColor = .secondaryLabelColor
-        sub.font = .systemFont(ofSize: 12)
-        sub.frame = NSRect(x: 20, y: 540, width: 260, height: 16)
-        v.addSubview(sub)
-
+        // 2×3 grid — same six actions as always, mock's short labels.
         let cards: [(String, String, Selector)] = [
             ("doc.badge.plus", "New PDF", #selector(newPDF)),
-            ("doc.text.magnifyingglass", "Open a PDF", #selector(openPDF)),
-            ("photo.on.rectangle", "Combine Photos → PDF", #selector(photos)),
-            ("signature", "Fill & Sign a PDF", #selector(sign)),
-            ("doc.on.doc", "Organize / Merge Pages", #selector(organize)),
-            ("folder", "Batch Process a Folder", #selector(batch))
+            ("folder", "Open", #selector(openPDF)),
+            ("photo.on.rectangle", "Combine", #selector(photos)),
+            ("signature", "Sign", #selector(sign)),
+            ("doc.on.doc", "Organize", #selector(organize)),
+            ("gearshape.2", "Batch", #selector(batch))
         ]
-        var y = 470
-        for (symbol, label, action) in cards { v.addSubview(card(symbol, label, action, y)); y -= 60 }
+        let cardW: CGFloat = 134, cardH: CGFloat = 58
+        for (i, entry) in cards.enumerated() {
+            let col = i % 2, row = i / 2
+            let b = NSButton(title: entry.1, target: self, action: entry.2)
+            b.bezelStyle = .regularSquare
+            b.imagePosition = .imageAbove
+            b.font = .systemFont(ofSize: 12, weight: .semibold)
+            if let img = NSImage(systemSymbolName: entry.0, accessibilityDescription: entry.1) {
+                img.isTemplate = true
+                b.image = img.withSymbolConfiguration(.init(pointSize: 16, weight: .medium))
+            }
+            b.frame = NSRect(x: 16 + CGFloat(col) * (cardW + 12),
+                             y: Self.height - 100 - CGFloat(row) * (cardH + 8),
+                             width: cardW, height: cardH)
+            v.addSubview(b)
+        }
 
-        let sep = NSBox(frame: NSRect(x: 16, y: 154, width: 268, height: 1))
+        // Recents — the two most recent documents, clickable; refreshed on every show.
+        recentsRow.frame = NSRect(x: 18, y: Self.height - 325, width: Self.width - 36, height: 20)
+        v.addSubview(recentsRow)
+        refreshRecents()
+
+        let sep = NSBox(frame: NSRect(x: 16, y: 96, width: Self.width - 32, height: 1))
         sep.boxType = .separator
         v.addSubview(sep)
 
-        let chk = NSButton(checkboxWithTitle: "Open Jack at login", target: self, action: #selector(toggleLogin))
-        chk.frame = NSRect(x: 20, y: 126, width: 260, height: 20)
-        chk.state = loginEnabled ? .on : .off
-        v.addSubview(chk)
-        loginCheck = chk
-
         let def = NSButton(checkboxWithTitle: "★ Make Jack my default PDF app", target: self, action: #selector(makeDefault))
-        def.frame = NSRect(x: 17, y: 96, width: 264, height: 22)
+        def.font = .systemFont(ofSize: 11)
+        def.frame = NSRect(x: 16, y: 68, width: Self.width - 32, height: 20)
         def.state = defaultEnabled ? .on : .off
         if defaultEnabled { def.title = "Jack is your default PDF app" }
         v.addSubview(def)
         defaultCheck = def
 
-        let tip = NSTextField(wrappingLabelWithString: "Tip: drop photos, PDFs, or a whole folder onto the menu bar icon — a folder opens batch processing.")
-        tip.textColor = .tertiaryLabelColor
-        tip.font = .systemFont(ofSize: 10)
-        tip.frame = NSRect(x: 20, y: 44, width: 260, height: 40)
-        v.addSubview(tip)
+        let chk = NSButton(checkboxWithTitle: "Open Jack at login", target: self, action: #selector(toggleLogin))
+        chk.font = .systemFont(ofSize: 11)
+        chk.frame = NSRect(x: 16, y: 44, width: Self.width - 32, height: 20)
+        chk.state = loginEnabled ? .on : .off
+        v.addSubview(chk)
+        loginCheck = chk
 
         let quit = NSButton(title: "Quit Jack", target: self, action: #selector(quit))
         quit.bezelStyle = .rounded
-        quit.frame = NSRect(x: 20, y: 6, width: 100, height: 26)
+        quit.controlSize = .small
+        quit.frame = NSRect(x: 16, y: 8, width: 92, height: 26)
         v.addSubview(quit)
 
         updateButton.bezelStyle = .rounded
+        updateButton.controlSize = .small
         updateButton.target = self
         updateButton.action = #selector(openUpdate)
-        updateButton.frame = NSRect(x: 130, y: 6, width: 150, height: 26)
+        updateButton.frame = NSRect(x: Self.width - 166, y: 8, width: 150, height: 26)
         updateButton.isHidden = true
         updateButton.contentTintColor = .controlAccentColor
         v.addSubview(updateButton)
@@ -95,19 +113,37 @@ final class HomePopoverViewController: NSViewController {
         self.view = v
     }
 
-    private func card(_ symbol: String, _ label: String, _ action: Selector, _ y: Int) -> NSButton {
-        let b = NSButton(title: "  " + label, target: self, action: action)
-        b.bezelStyle = .regularSquare
-        b.frame = NSRect(x: 20, y: CGFloat(y), width: 260, height: 50)
-        b.imagePosition = .imageLeading
-        b.alignment = .left
-        b.font = .systemFont(ofSize: 14, weight: .medium)
-        if let img = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) {
-            img.isTemplate = true
-            b.image = img.withSymbolConfiguration(.init(pointSize: 18, weight: .regular))
-            b.imageScaling = .scaleProportionallyDown
+    func refreshRecents() {
+        guard isViewLoaded else { return }
+        recentsRow.subviews.forEach { $0.removeFromSuperview() }
+        recentButtons = []
+        let recents = RecentDocuments.list().prefix(2)
+        var rx: CGFloat = 0
+        let rLabel = NSTextField(labelWithString: "Recent:")
+        rLabel.font = .systemFont(ofSize: 11)
+        rLabel.textColor = .secondaryLabelColor
+        rLabel.frame = NSRect(x: rx, y: 3, width: 46, height: 15)
+        recentsRow.addSubview(rLabel)
+        rx += 48
+        if recents.isEmpty {
+            let none = NSTextField(labelWithString: "nothing yet")
+            none.font = .systemFont(ofSize: 11)
+            none.textColor = .tertiaryLabelColor
+            none.frame = NSRect(x: rx, y: 3, width: 120, height: 15)
+            recentsRow.addSubview(none)
         }
-        return b
+        for url in recents {
+            let b = NSButton(title: url.deletingPathExtension().lastPathComponent, target: self, action: #selector(openRecent(_:)))
+            b.isBordered = false
+            b.font = .systemFont(ofSize: 11)
+            b.contentTintColor = .controlAccentColor
+            let w = min(110, b.intrinsicContentSize.width)
+            b.frame = NSRect(x: rx, y: 0, width: w, height: 20)
+            b.toolTip = url.path
+            recentButtons.append(b)
+            recentsRow.addSubview(b)
+            rx += w + 8
+        }
     }
 
     @objc private func newPDF() { onNew?() }
@@ -121,6 +157,9 @@ final class HomePopoverViewController: NSViewController {
     @objc private func sign() { onSign?() }
     @objc private func organize() { onOrganize?() }
     @objc private func batch() { onBatch?() }
+    @objc private func openRecent(_ sender: NSButton) {
+        if let path = sender.toolTip { onOpenRecent?(URL(fileURLWithPath: path)) }
+    }
     @objc private func toggleLogin() { onToggleLogin?(loginCheck?.state == .on) }
     @objc private func quit() { onQuit?() }
     @objc private func openUpdate() {

@@ -71,8 +71,24 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     // (Tahoe focus behavior) — annotate actions fall back to the last real selection.
     private var lastSelection: PDFSelection?
     private var sidebarVisible = true
-    private var markupOn = false
     private let sidebarWidth: CGFloat = 172
+
+    // Mode system (v2.8 ratified mock): one segmented mode — Read · Markup · Redact · Forms —
+    // and ONE permanent fixed-height tool row whose CONTENT swaps with the mode. The row never
+    // appears or disappears, so switching tools can never shift the page again.
+    enum Mode: Int { case read = 0, markup, redact, forms }
+    private(set) var mode: Mode = .read
+    private var modeSegment: NSSegmentedControl?
+    private let modeRow = ToolStripView(frame: NSRect(x: 0, y: 0, width: 1180, height: 42))
+    private var redactUsesErase = false      // Erase is a submode of Redact (white vs black paint)
+    private var blackoutChip: NSButton?
+    private var eraseChip: NSButton?
+    private var pagePopup: NSPopUpButton?
+
+    // Floating status HUD (Direction C's contribution to the ratified hybrid): page + zoom,
+    // STATUS ONLY — Save keeps its single home in the toolbar. Clicks pass through.
+    private let hud = HUDPill()
+    private let hudLabel = NSTextField(labelWithString: "")
 
     // Ask panel (on-device model; only exists when Apple Intelligence is available)
     private var askVisible = false
@@ -84,17 +100,14 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     private var askButton: NSButton?
     private var askRunning = false
 
-    // Markup strip controls
-    private var markupAccessory: NSTitlebarAccessoryViewController?
+    // Markup row controls (Size/Remove appear only while a stamp is selected)
     private let sizeSlider = NSSlider()
     private let removeButton = NSButton()
-    private var markupButton: NSButton?
+    private let stampSizeLabel = NSTextField(labelWithString: "Size")
+    private var markupHint: NSTextField?
     private var shareButton: NSButton?
 
-    // Redact strip controls
-    private var redactOn = false
-    private var redactAccessory: NSTitlebarAccessoryViewController?
-    private var redactButton: NSButton?
+    // Redact row controls
     private let redactTermField = NSTextField()
     private var redactedTerms: Set<String> = []   // fed to the verify pass as forbidden terms
 
@@ -107,15 +120,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     }
     func noteCertificate(_ message: String) { flashSubtitle(message) }
 
-    // Erase strip controls (whiteout that actually removes)
-    private var eraseOn = false
-    private var eraseAccessory: NSTitlebarAccessoryViewController?
-    private var eraseButton: NSButton?
-
-    // Form strip controls (field authoring)
-    private var formOn = false
-    private var formAccessory: NSTitlebarAccessoryViewController?
-    private var formButton: NSButton?
+    // Form row controls (field authoring)
     private var formPaletteButtons: [NSButton] = []
     private var fieldPopover: NSPopover?
     private weak var fieldNameField: NSTextField?
@@ -142,7 +147,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     required init?(coder: NSCoder) { fatalError() }
 
     func openInMarkup() {
-        DispatchQueue.main.async { [weak self] in self?.setMarkup(on: true) }
+        DispatchQueue.main.async { [weak self] in self?.setMode(.markup) }
     }
 
     // ⌘Z / Edit menu / toolbar Undo all resolve here through the window.
@@ -168,7 +173,20 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         toolbar.allowsUserCustomization = false
         window.toolbar = toolbar
         if #available(macOS 11.0, *) { window.toolbarStyle = .unified }
+        if #available(macOS 13.0, *) { toolbar.centeredItemIdentifiers = [ItemID.modeSegment] }
         installTitleChevron(on: window)
+
+        // The permanent mode row: added once, never removed — only its content swaps.
+        // Tahoe hands bottom titlebar accessories their native height (36pt — frame and
+        // constraints are both overridden, probed 2026-08-30). The row stays permanent and
+        // fixed-height either way; ToolStripView re-centers its controls for whatever
+        // height the titlebar grants.
+        modeRow.frame = NSRect(x: 0, y: 0, width: window.frame.width, height: 42)
+        let rowAcc = NSTitlebarAccessoryViewController()
+        rowAcc.view = modeRow
+        rowAcc.layoutAttribute = .bottom
+        window.addTitlebarAccessoryViewController(rowAcc)
+        populateModeRow()
 
         sidebar.document = doc
         sidebar.delegate = self
@@ -183,10 +201,14 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         content.addSubview(pdfView)
         if AskEngine.isAvailable { buildAskPanel() }
         content.addSubview(askPanel)
+        buildHUD()
+        content.addSubview(hud)
         layoutViews()
 
         NotificationCenter.default.addObserver(self, selector: #selector(pageChanged),
                                                name: .PDFViewPageChanged, object: pdfView)
+        NotificationCenter.default.addObserver(self, selector: #selector(scaleChanged),
+                                               name: .PDFViewScaleChanged, object: pdfView)
         NotificationCenter.default.addObserver(self, selector: #selector(selectionChanged),
                                                name: .PDFViewSelectionChanged, object: pdfView)
         pdfView.annotateMenuItems = { [weak self] page, point in
@@ -251,7 +273,51 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         askPanel.frame = NSRect(x: content.bounds.width - aw, y: 0, width: askWidth, height: content.bounds.height)
         askPanel.isHidden = !askVisible
         askPanel.autoresizingMask = [.height, .minXMargin]
+        layoutHUD()
     }
+
+    // MARK: - Floating status HUD (page + zoom, click-through)
+
+    private final class HUDPill: NSVisualEffectView {
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }   // status only, never a target
+    }
+
+    private func buildHUD() {
+        hud.material = .menu
+        hud.blendingMode = .withinWindow
+        hud.state = .active
+        hud.wantsLayer = true
+        hud.layer?.cornerRadius = 14
+        hud.layer?.masksToBounds = true
+        hud.layer?.borderWidth = 0.5
+        hud.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.4).cgColor
+        hudLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+        hudLabel.textColor = .secondaryLabelColor
+        hudLabel.alignment = .center
+        hud.addSubview(hudLabel)
+        updateHUD()
+    }
+
+    private func layoutHUD() {
+        guard let content = window?.contentView else { return }
+        let sw = sidebarVisible ? sidebarWidth : 0
+        let aw = askVisible ? askWidth : 0
+        let w = hudLabel.intrinsicContentSize.width + 32
+        // Bottom-centered over the page area (between sidebar and Ask panel), 14pt up — per mock.
+        hud.frame = NSRect(x: sw + (content.bounds.width - sw - aw - w) / 2, y: 14, width: w, height: 28)
+        hudLabel.frame = NSRect(x: 0, y: (28 - hudLabel.intrinsicContentSize.height) / 2,
+                                width: w, height: hudLabel.intrinsicContentSize.height)
+    }
+
+    private func updateHUD() {
+        guard let doc = pdfView.document, let page = pdfView.currentPage else { return }
+        let index = doc.index(for: page)
+        let pct = Int((pdfView.scaleFactor * 100).rounded())
+        hudLabel.stringValue = "Page \(index + 1) of \(doc.pageCount) · \(pct)%"
+        layoutHUD()
+    }
+
+    @objc private func scaleChanged() { updateHUD() }
 
     @objc private func selectionChanged() {
         if let s = pdfView.currentSelection,
@@ -281,22 +347,23 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         guard let doc = pdfView.document, let page = pdfView.currentPage else { return }
         let index = doc.index(for: page)
         if index != NSNotFound { lastKnownPageIndex = index }
-        setSubtitle("Page \(index + 1) of \(doc.pageCount)")
+        updateHUD()
+        syncPagePopup(index: index, count: doc.pageCount)
         sidebar.highlight(pageIndex: index)
     }
 
+    // v2.8: the page indicator lives in the HUD; the subtitle carries only the edit state.
     private func setSubtitle(_ s: String) {
         subtitleBase = s
         let doc = document as? JackDocument
         let dirty = doc?.isDocumentEdited == true
         // While edits are pending on someone else's PDF, say plainly that their file is safe.
-        let suffix: String
-        if dirty {
-            suffix = doc?.protectsOriginal == true ? " — Edited · original unchanged" : " — Edited"
+        let edited = dirty ? (doc?.protectsOriginal == true ? "Edited · original unchanged" : "Edited") : ""
+        if s.isEmpty {
+            subtitleLabel.stringValue = edited
         } else {
-            suffix = ""
+            subtitleLabel.stringValue = edited.isEmpty ? s : s + " — " + edited
         }
-        subtitleLabel.stringValue = s + suffix
     }
 
     @objc private func dirtyChanged() {
@@ -312,34 +379,24 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
 
     // MARK: - Toolbar
 
+    // v2.8 (ratified mock): eight persistent items — everything else lives in its mode, the
+    // File/Edit/Tools menus, or the mode row. Undo/redo, Print and Export left the toolbar
+    // per the approved diff (⌘Z/⇧⌘Z, ⌘P, ⌘E remain).
     private enum ItemID {
-        static let undo = NSToolbarItem.Identifier("jack.undo")
-        static let redo = NSToolbarItem.Identifier("jack.redo")
         static let sidebar = NSToolbarItem.Identifier("jack.sidebar")
-        static let zoomOut = NSToolbarItem.Identifier("jack.zoomOut")
-        static let zoomIn = NSToolbarItem.Identifier("jack.zoomIn")
-        static let markup = NSToolbarItem.Identifier("jack.markup")
-        static let form = NSToolbarItem.Identifier("jack.form")
-        static let erase = NSToolbarItem.Identifier("jack.erase")
-        static let redact = NSToolbarItem.Identifier("jack.redact")
-        static let clean = NSToolbarItem.Identifier("jack.clean")
-        static let tools = NSToolbarItem.Identifier("jack.tools")
+        static let modeSegment = NSToolbarItem.Identifier("jack.mode")
         static let share = NSToolbarItem.Identifier("jack.share")
         static let ask = NSToolbarItem.Identifier("jack.ask")
-        static let highlight = NSToolbarItem.Identifier("jack.highlight")
-        static let lock = NSToolbarItem.Identifier("jack.lock")
-        static let print = NSToolbarItem.Identifier("jack.print")
-        static let save = NSToolbarItem.Identifier("jack.save")       // Export a flattened copy
         static let saveDoc = NSToolbarItem.Identifier("jack.saveDoc") // Save the document itself
         static let search = NSToolbarItem.Identifier("jack.search")
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         var ids: [NSToolbarItem.Identifier] =
-        [ItemID.sidebar, .space, ItemID.undo, ItemID.redo, .flexibleSpace, ItemID.zoomOut, ItemID.zoomIn, .space,
-         ItemID.highlight, ItemID.markup, ItemID.form, ItemID.erase, ItemID.redact, ItemID.clean, ItemID.lock, ItemID.tools, ItemID.print, ItemID.share, .flexibleSpace, ItemID.search, ItemID.saveDoc, ItemID.save]
+        [ItemID.sidebar, .flexibleSpace, ItemID.modeSegment, .flexibleSpace,
+         ItemID.share, ItemID.search, ItemID.saveDoc]
         if AskEngine.isAvailable, let i = ids.firstIndex(of: ItemID.share) {
-            ids.insert(ItemID.ask, at: i + 1)
+            ids.insert(ItemID.ask, at: i)   // wand sits before Share — mock order
         }
         return ids
     }
@@ -409,96 +466,17 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             item.label = "Share"
             item.toolTip = "Share — AirDrop, Mail, Messages…"
             return item
-        case ItemID.undo:    return simple(id, "arrow.uturn.backward", "Undo", #selector(undoEdit(_:)))
-        case ItemID.redo:    return simple(id, "arrow.uturn.forward", "Redo", #selector(redoEdit(_:)))
-        case ItemID.zoomOut: return simple(id, "minus.magnifyingglass", "Zoom Out", #selector(zoomOut(_:)))
-        case ItemID.zoomIn:  return simple(id, "plus.magnifyingglass", "Zoom In", #selector(zoomIn(_:)))
-        case ItemID.lock:    return simple(id, "lock", "Lock for Sharing", #selector(lockForSharing(_:)))
-        case ItemID.clean:   return simple(id, "sparkles", "Clean for Sharing", #selector(cleanForSharing(_:)))
-        case ItemID.tools:
-            let item = NSMenuToolbarItem(itemIdentifier: id)
-            item.image = Self.toolbarSymbol(["wrench.and.screwdriver"], "Tools")
-            item.label = "Tools"
-            item.toolTip = "Document tools"
-            let menu = NSMenu()
-            menu.addItem({ let m = NSMenuItem(title: "Make Searchable (OCR)…", action: #selector(makeSearchable(_:)), keyEquivalent: ""); m.target = self; return m }())
-            menu.addItem({ let m = NSMenuItem(title: "Bates Numbering…", action: #selector(batesNumbering(_:)), keyEquivalent: ""); m.target = self; return m }())
-            menu.addItem({ let m = NSMenuItem(title: "Watermark…", action: #selector(addWatermark(_:)), keyEquivalent: ""); m.target = self; return m }())
-            menu.addItem({ let m = NSMenuItem(title: "Remove Watermark", action: #selector(removeWatermark(_:)), keyEquivalent: ""); m.target = self; return m }())
-            menu.addItem({ let m = NSMenuItem(title: "Remove Bates Numbering", action: #selector(removeBates(_:)), keyEquivalent: ""); m.target = self; return m }())
-            menu.addItem({ let m = NSMenuItem(title: "Compress…", action: #selector(compressDocument(_:)), keyEquivalent: ""); m.target = self; return m }())
-            menu.addItem(.separator())
-            menu.addItem({ let m = NSMenuItem(title: "Copy Region as Image", action: #selector(copyRegionAsImage(_:)), keyEquivalent: ""); m.target = self; return m }())
-            menu.addItem({ let m = NSMenuItem(title: "Save Region as Image…", action: #selector(saveRegionAsImage(_:)), keyEquivalent: ""); m.target = self; return m }())
-            menu.addItem(.separator())
-            menu.addItem({ let m = NSMenuItem(title: "Crop Pages…", action: #selector(cropPages(_:)), keyEquivalent: ""); m.target = self; return m }())
-            menu.addItem({ let m = NSMenuItem(title: "Remove Crop", action: #selector(removeCrop(_:)), keyEquivalent: ""); m.target = self; return m }())
-            item.menu = menu
-            return item
-        case ItemID.highlight:
-            let item = NSMenuToolbarItem(itemIdentifier: id)
-            item.image = Self.toolbarSymbol(["highlighter"], "Annotate")
-            item.label = "Annotate"
-            item.toolTip = "Highlight, underline, strikethrough"
-            let menu = NSMenu()
-            for (i, entry) in Self.highlightColors.enumerated() {
-                let m = NSMenuItem(title: "Highlight \(entry.name)", action: #selector(highlightColorPicked(_:)), keyEquivalent: "")
-                m.target = self
-                m.tag = i
-                m.image = Self.swatch(entry.color)
-                menu.addItem(m)
-            }
-            menu.addItem(.separator())
-            menu.addItem({ let m = NSMenuItem(title: "Underline", action: #selector(underlineSelection(_:)), keyEquivalent: ""); m.target = self; m.image = Self.swatch(.systemBlue); return m }())
-            menu.addItem({ let m = NSMenuItem(title: "Strikethrough", action: #selector(strikethroughSelection(_:)), keyEquivalent: ""); m.target = self; m.image = Self.swatch(.systemRed); return m }())
-            menu.addItem(.separator())
-            menu.addItem({ let m = NSMenuItem(title: "Add Comment…", action: #selector(addComment(_:)), keyEquivalent: ""); m.target = self; m.image = NSImage(systemSymbolName: "text.bubble", accessibilityDescription: nil); return m }())
-            item.menu = menu
-            return item
-        case ItemID.redact:
+        case ItemID.modeSegment:
             let item = NSToolbarItem(itemIdentifier: id)
-            let b = NSButton(image: Self.toolbarSymbol(["rectangle.slash"], "Redact") ?? NSImage(),
-                             target: self, action: #selector(toggleRedact(_:)))
-            b.setButtonType(.pushOnPushOff)
-            b.bezelStyle = .texturedRounded
-            redactButton = b
-            item.view = b
-            item.label = "Redact"
-            item.toolTip = "Redact — permanently remove content"
-            return item
-        case ItemID.erase:
-            let item = NSToolbarItem(itemIdentifier: id)
-            let img = Self.toolbarSymbol(["eraser", "rectangle.badge.minus"], "Erase")
-            let b = NSButton(image: img ?? NSImage(), target: self, action: #selector(toggleErase(_:)))
-            b.setButtonType(.pushOnPushOff)
-            b.bezelStyle = .texturedRounded
-            eraseButton = b
-            item.view = b
-            item.label = "Erase"
-            item.toolTip = "Erase — remove logos, addresses, anything (verified removal, reads as blank paper)"
-            return item
-        case ItemID.form:
-            let item = NSToolbarItem(itemIdentifier: id)
-            let b = NSButton(image: Self.toolbarSymbol(["character.textbox"], "Form") ?? NSImage(),
-                             target: self, action: #selector(toggleForm(_:)))
-            b.setButtonType(.pushOnPushOff)
-            b.bezelStyle = .texturedRounded
-            formButton = b
-            item.view = b
-            item.label = "Form"
-            item.toolTip = "Prepare Form — add fillable fields"
-            return item
-        case ItemID.print:   return simple(id, "printer", "Print", #selector(printDocument(_:)))
-        case ItemID.markup:
-            let item = NSToolbarItem(itemIdentifier: id)
-            let b = NSButton(image: Self.toolbarSymbol(["pencil.and.scribble", "pencil.tip.crop.circle"], "Markup") ?? NSImage(),
-                             target: self, action: #selector(toggleMarkup(_:)))
-            b.setButtonType(.pushOnPushOff)
-            b.bezelStyle = .texturedRounded
-            markupButton = b
-            item.view = b
-            item.label = "Markup"
-            item.toolTip = "Fill & Sign"
+            let seg = NSSegmentedControl(labels: ["Read", "Markup", "Redact", "Forms"],
+                                         trackingMode: .selectOne,
+                                         target: self, action: #selector(modeSegmentChanged(_:)))
+            seg.selectedSegment = mode.rawValue
+            seg.segmentStyle = .automatic
+            modeSegment = seg
+            item.view = seg
+            item.label = "Mode"
+            item.toolTip = "Read · Markup (⇧⌘A) · Redact (⇧⌘R) · Forms (⇧⌘F)"
             return item
         case ItemID.saveDoc:
             // v2.5: the document is only written when this is used. It lights up when there
@@ -512,14 +490,6 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             item.view = b
             item.label = "Save"
             item.toolTip = "Save your changes (⌘S) — the first save of someone else's PDF makes a copy"
-            return item
-        case ItemID.save:
-            let item = NSToolbarItem(itemIdentifier: id)
-            let b = NSButton(title: "Export…", target: self, action: #selector(exportFlattened(_:)))
-            b.bezelStyle = .texturedRounded
-            item.view = b
-            item.label = "Export"
-            item.toolTip = "Export a flattened copy — annotations and signatures burned in"
             return item
         case ItemID.search:
             if #available(macOS 11.0, *) {
@@ -900,29 +870,97 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         }
     }
 
-    // MARK: - Markup mode (the old signing window, as an in-window tool strip)
+    // MARK: - Mode system (v2.8): Read · Markup · Redact · Forms
 
-    @objc func toggleMarkup(_ sender: Any?) { setMarkup(on: !markupOn) }
+    @objc private func modeSegmentChanged(_ sender: NSSegmentedControl) {
+        setMode(Mode(rawValue: sender.selectedSegment) ?? .read)
+    }
 
-    private func setMarkup(on: Bool) {
-        guard markupOn != on, let window = window else { return }
-        if on { setRedact(on: false); setForm(on: false); setErase(on: false) }   // one tool strip at a time
-        markupOn = on
-        markupButton?.state = on ? .on : .off
-        if on {
-            let acc = NSTitlebarAccessoryViewController()
-            acc.view = buildMarkupStrip(width: window.frame.width)
-            acc.layoutAttribute = .bottom
-            window.addTitlebarAccessoryViewController(acc)
-            markupAccessory = acc
-        } else {
-            commitTypewriterEditor()          // leaving the strip places pending text
+    // The legacy toggles remain the shortcut/menu entry points (⇧⌘A, ⇧⌘R, ⇧⌘F, View menu).
+    @objc func toggleMarkup(_ sender: Any?) { setMode(mode == .markup ? .read : .markup) }
+    @objc func toggleForm(_ sender: Any?)   { setMode(mode == .forms ? .read : .forms) }
+    @objc func toggleRedact(_ sender: Any?) {
+        if mode == .redact && !redactUsesErase { setMode(.read) }
+        else { redactUsesErase = false; setMode(.redact); applyRedactStyle() }
+    }
+    @objc func toggleErase(_ sender: Any?) {
+        if mode == .redact && redactUsesErase { setMode(.read) }
+        else { redactUsesErase = true; setMode(.redact); applyRedactStyle() }
+    }
+
+    func setMode(_ new: Mode) {
+        guard mode != new else { return }
+        switch mode {                        // leave the old mode
+        case .markup:
+            commitTypewriterEditor()         // leaving markup places pending text
             pdfView.typewriterMode = false
-            typewriterButton?.state = .off
-            markupAccessory?.removeFromParent()
-            markupAccessory = nil
             didSelect(nil)
+        case .redact:
+            pdfView.redactMode = false
+            pdfView.eraseStyle = false
+        case .forms:
+            pdfView.armedFieldKind = nil
+            pdfView.formAuthoringOn = false
+            fieldPopover?.close()
+        case .read: break
         }
+        mode = new
+        switch new {                         // enter the new one
+        case .read, .markup: break
+        case .redact:
+            pdfView.redactMode = true
+            pdfView.eraseStyle = redactUsesErase
+        case .forms:
+            pdfView.formAuthoringOn = true
+            pdfView.formFieldMenuItems = { [weak self] widget in self?.fieldMenuItems(for: widget) ?? [] }
+        }
+        modeSegment?.selectedSegment = new.rawValue
+        populateModeRow()
+    }
+
+    private func applyRedactStyle() {
+        pdfView.eraseStyle = redactUsesErase && mode == .redact
+        blackoutChip?.state = redactUsesErase ? .off : .on
+        blackoutChip?.bezelColor = redactUsesErase ? nil : .black
+        eraseChip?.state = redactUsesErase ? .on : .off
+    }
+
+    @objc private func pickBlackout() { redactUsesErase = false; applyRedactStyle() }
+    @objc private func pickErase()    { redactUsesErase = true;  applyRedactStyle() }
+
+    /// One row, fixed height, always present — only its content changes (the mock's law).
+    private func populateModeRow() {
+        modeRow.subviews.forEach { $0.removeFromSuperview() }
+        modeRow.rightAligned = []
+        pagePopup = nil
+        blackoutChip = nil; eraseChip = nil
+        markupHint = nil
+        switch mode {
+        case .read:   buildReadRow()
+        case .markup: buildMarkupRow()
+        case .redact: buildRedactRow()
+        case .forms:  buildFormRow()
+        }
+    }
+
+    private func rowLabel(_ text: String) {
+        let l = NSTextField(labelWithString: text.uppercased())
+        l.font = .systemFont(ofSize: 10, weight: .semibold)
+        l.textColor = .tertiaryLabelColor
+        l.frame = NSRect(x: 14, y: 15, width: 56, height: 14)
+        modeRow.addSubview(l)
+    }
+
+    @discardableResult
+    private func rowHint(_ text: String) -> NSTextField {
+        let hint = NSTextField(labelWithString: text)
+        hint.textColor = .secondaryLabelColor
+        hint.font = .systemFont(ofSize: 11)
+        hint.alignment = .right
+        hint.frame = NSRect(x: 0, y: 13, width: min(640, hint.intrinsicContentSize.width + 8), height: 16)
+        modeRow.addSubview(hint)
+        modeRow.anchorRight(hint, gap: 16)
+        return hint
     }
 
     /// Tool-strip container whose right-aligned controls are re-laid on EVERY resize.
@@ -941,6 +979,10 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             realign()
         }
         private func realign() {
+            // Vertically center every control for whatever height the titlebar granted.
+            for v in subviews where v.frame.height < bounds.height {
+                v.frame.origin.y = ((bounds.height - v.frame.height) / 2).rounded()
+            }
             for (v, gap) in rightAligned {
                 v.frame.origin.x = bounds.maxX - gap - v.frame.width
             }
@@ -955,151 +997,219 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         }
     }
 
-    private func buildMarkupStrip(width: CGFloat) -> NSView {
-        let strip = ToolStripView(frame: NSRect(x: 0, y: 0, width: width, height: 40))
-        func b(_ title: String, _ action: Selector, _ x: CGFloat, _ w: CGFloat) -> NSButton {
-            let btn = NSButton(title: title, target: self, action: action)
-            btn.bezelStyle = .rounded
-            btn.controlSize = .small
-            btn.frame = NSRect(x: x, y: 7, width: w, height: 26)
-            strip.addSubview(btn)
-            return btn
+    private func buildReadRow() {
+        rowLabel("Read")
+        let zoom = NSSegmentedControl(images: [
+            Self.toolbarSymbol(["minus.magnifyingglass"], "Zoom Out") ?? NSImage(),
+            Self.toolbarSymbol(["plus.magnifyingglass"], "Zoom In") ?? NSImage()],
+            trackingMode: .momentary, target: self, action: #selector(zoomSegment(_:)))
+        zoom.controlSize = .small
+        zoom.frame = NSRect(x: 74, y: 8, width: 84, height: 26)
+        modeRow.addSubview(zoom)
+
+        let pp = NSPopUpButton(frame: NSRect(x: 166, y: 8, width: 108, height: 26), pullsDown: false)
+        pp.controlSize = .small
+        pp.font = .systemFont(ofSize: 11)
+        pp.target = self; pp.action = #selector(pagePicked(_:))
+        pagePopup = pp
+        modeRow.addSubview(pp)
+        if let doc = pdfView.document, let page = pdfView.currentPage {
+            syncPagePopup(index: doc.index(for: page), count: doc.pageCount)
         }
-        _ = b("Add Signature", #selector(addSignature), 12, 116)
-        let tw = b("Typewriter", #selector(toggleTypewriter), 134, 96)
+
+        let tools = NSPopUpButton(frame: NSRect(x: 282, y: 8, width: 92, height: 26), pullsDown: true)
+        tools.controlSize = .small
+        tools.font = .systemFont(ofSize: 11)
+        let menu = NSMenu()
+        let titleItem = NSMenuItem(title: "Tools", action: nil, keyEquivalent: "")
+        titleItem.image = Self.toolbarSymbol(["wrench.and.screwdriver"], "Tools")
+        menu.addItem(titleItem)
+        func t(_ title: String, _ action: Selector) {
+            let m = NSMenuItem(title: title, action: action, keyEquivalent: ""); m.target = self; menu.addItem(m)
+        }
+        t("Make Searchable (OCR)…", #selector(makeSearchable(_:)))
+        t("Bates Numbering…", #selector(batesNumbering(_:)))
+        t("Watermark…", #selector(addWatermark(_:)))
+        t("Remove Watermark", #selector(removeWatermark(_:)))
+        t("Remove Bates Numbering", #selector(removeBates(_:)))
+        t("Compress…", #selector(compressDocument(_:)))
+        menu.addItem(.separator())
+        t("Copy Region as Image", #selector(copyRegionAsImage(_:)))
+        t("Save Region as Image…", #selector(saveRegionAsImage(_:)))
+        menu.addItem(.separator())
+        t("Crop Pages…", #selector(cropPages(_:)))
+        t("Remove Crop", #selector(removeCrop(_:)))
+        menu.addItem(.separator())
+        t("Clean for Sharing…", #selector(cleanForSharing(_:)))
+        t("Lock for Sharing…", #selector(lockForSharing(_:)))
+        tools.menu = menu
+        modeRow.addSubview(tools)
+
+        rowHint("Tools holds: Make Searchable · Bates · Watermark · Compress · Crop · Clean · Lock")
+    }
+
+    @objc private func zoomSegment(_ sender: NSSegmentedControl) {
+        if sender.selectedSegment == 0 { pdfView.zoomOut(sender) } else { pdfView.zoomIn(sender) }
+    }
+
+    private func syncPagePopup(index: Int, count: Int) {
+        guard let pp = pagePopup else { return }
+        if pp.numberOfItems != count {
+            pp.removeAllItems()
+            pp.addItems(withTitles: (1...max(1, count)).map { "Page \($0)" })
+        }
+        if index >= 0 && index < pp.numberOfItems { pp.selectItem(at: index) }
+    }
+
+    @objc private func pagePicked(_ sender: NSPopUpButton) {
+        guard let doc = pdfView.document, let page = doc.page(at: sender.indexOfSelectedItem) else { return }
+        pdfView.go(to: page)
+    }
+
+    private func chip(_ title: String, _ action: Selector, x: CGFloat, w: CGFloat, toggle: Bool = false) -> NSButton {
+        let btn = NSButton(title: title, target: self, action: action)
+        if toggle { btn.setButtonType(.pushOnPushOff) }
+        btn.bezelStyle = .rounded
+        btn.controlSize = .small
+        btn.frame = NSRect(x: x, y: 8, width: w, height: 26)
+        modeRow.addSubview(btn)
+        return btn
+    }
+
+    private func buildMarkupRow() {
+        rowLabel("Markup")
+        let sign = NSPopUpButton(frame: NSRect(x: 74, y: 8, width: 100, height: 26), pullsDown: true)
+        sign.controlSize = .small
+        sign.font = .systemFont(ofSize: 11)
+        let sm = NSMenu()
+        let st = NSMenuItem(title: "Sign", action: nil, keyEquivalent: "")
+        st.image = Self.toolbarSymbol(["signature"], "Sign")
+        sm.addItem(st)
+        func si(_ title: String, _ action: Selector) {
+            let m = NSMenuItem(title: title, action: action, keyEquivalent: ""); m.target = self; sm.addItem(m)
+        }
+        si("Add Signature…", #selector(addSignature))
+        si("Place Check ✓", #selector(addCheck))
+        si("Place Cross ✘", #selector(addCross))
+        sign.menu = sm
+        modeRow.addSubview(sign)
+
+        let tw = NSButton(title: "Aa Typewriter", target: self, action: #selector(toggleTypewriter))
         tw.setButtonType(.pushOnPushOff)
+        tw.bezelStyle = .rounded
+        tw.controlSize = .small
+        tw.state = pdfView.typewriterMode ? .on : .off
+        tw.frame = NSRect(x: 182, y: 8, width: 106, height: 26)
+        modeRow.addSubview(tw)
         typewriterButton = tw
-        typewriterSizePopup.frame = NSRect(x: 236, y: 7, width: 64, height: 26)
+
+        typewriterSizePopup.frame = NSRect(x: 294, y: 8, width: 60, height: 26)
         typewriterSizePopup.controlSize = .small
         if typewriterSizePopup.numberOfItems == 0 {
             typewriterSizePopup.addItems(withTitles: ["10", "12", "14", "18", "24"])
             typewriterSizePopup.selectItem(at: 2)
         }
-        strip.addSubview(typewriterSizePopup)
-        _ = b("✓", #selector(addCheck), 308, 36)
-        _ = b("✗", #selector(addCross), 348, 36)
+        typewriterSizePopup.isHidden = !pdfView.typewriterMode   // surfaces while typing (mock rest state)
+        modeRow.addSubview(typewriterSizePopup)
 
-        let sizeLabel = NSTextField(labelWithString: "Size")
-        sizeLabel.textColor = .secondaryLabelColor
-        sizeLabel.font = .systemFont(ofSize: 11)
-        sizeLabel.frame = NSRect(x: 398, y: 12, width: 30, height: 16)
-        strip.addSubview(sizeLabel)
+        var x: CGFloat = pdfView.typewriterMode ? 364 : 304
+        for (i, entry) in Self.highlightColors.enumerated() {
+            let dot = NSButton(image: Self.swatch(entry.color), target: self, action: #selector(highlightDotPicked(_:)))
+            dot.isBordered = false
+            dot.tag = i
+            dot.toolTip = "Highlight \(entry.name)"
+            dot.frame = NSRect(x: x, y: 12, width: 18, height: 18)
+            modeRow.addSubview(dot)
+            x += 22
+        }
+        x += 8
+        let u = chip("U", #selector(underlineSelection(_:)), x: x, w: 32)
+        u.attributedTitle = NSAttributedString(string: "U", attributes: [
+            .underlineStyle: NSUnderlineStyle.single.rawValue,
+            .font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.labelColor])
+        x += 38
+        let s = chip("S", #selector(strikethroughSelection(_:)), x: x, w: 32)
+        s.attributedTitle = NSAttributedString(string: "S", attributes: [
+            .strikethroughStyle: NSUnderlineStyle.single.rawValue,
+            .font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.labelColor])
+        x += 38
+        let c = chip("Comment", #selector(addComment(_:)), x: x, w: 96)
+        c.image = NSImage(systemSymbolName: "text.bubble", accessibilityDescription: "Comment")
+        c.imagePosition = .imageLeading
 
-        sizeSlider.frame = NSRect(x: 430, y: 9, width: 120, height: 22)
+        // Size/Remove for the selected stamp live at the right edge; the hint yields to them.
+        stampSizeLabel.font = .systemFont(ofSize: 11)
+        stampSizeLabel.textColor = .secondaryLabelColor
+        stampSizeLabel.frame = NSRect(x: 0, y: 13, width: 30, height: 16)
+        modeRow.addSubview(stampSizeLabel)
         sizeSlider.controlSize = .small
         sizeSlider.minValue = 14; sizeSlider.maxValue = 600
         sizeSlider.target = self; sizeSlider.action = #selector(resizeSelected)
-        sizeSlider.isEnabled = false
-        strip.addSubview(sizeSlider)
-
+        sizeSlider.frame = NSRect(x: 0, y: 10, width: 120, height: 22)
+        modeRow.addSubview(sizeSlider)
         removeButton.title = "Remove"
         removeButton.bezelStyle = .rounded
         removeButton.controlSize = .small
         removeButton.target = self; removeButton.action = #selector(removeSelected)
-        removeButton.frame = NSRect(x: 562, y: 7, width: 76, height: 26)
-        removeButton.isEnabled = false
-        strip.addSubview(removeButton)
-
-        if let doc = pdfView.document, hasFormFields(doc) {
-            let hint = NSTextField(labelWithString: "Fillable form — click a field to type")
-            hint.textColor = .secondaryLabelColor
-            hint.font = .systemFont(ofSize: 11)
-            hint.alignment = .right
-            hint.frame = NSRect(x: 0, y: 12, width: 244, height: 16)
-            strip.addSubview(hint)
-            strip.anchorRight(hint, gap: 16)
-        }
-        return strip
+        removeButton.frame = NSRect(x: 0, y: 8, width: 76, height: 26)
+        modeRow.addSubview(removeButton)
+        modeRow.anchorRight(removeButton, gap: 16)
+        modeRow.anchorRight(sizeSlider, gap: 100)
+        modeRow.anchorRight(stampSizeLabel, gap: 226)
+        markupHint = rowHint("drop an image to place it")
+        syncStampControls()
     }
 
-    // MARK: - Redact mode (mark → apply destroys, then the output is adversarially verified)
-
-    @objc func toggleRedact(_ sender: Any?) { setRedact(on: !redactOn) }
-
-    private func setRedact(on: Bool) {
-        guard redactOn != on, let window = window else { return }
-        if on { setMarkup(on: false); setForm(on: false); setErase(on: false) }   // one tool strip at a time
-        redactOn = on
-        redactButton?.state = on ? .on : .off
-        pdfView.redactMode = on
-        if on {
-            let acc = NSTitlebarAccessoryViewController()
-            acc.view = buildRedactStrip(width: window.frame.width)
-            acc.layoutAttribute = .bottom
-            window.addTitlebarAccessoryViewController(acc)
-            redactAccessory = acc
-        } else {
-            redactAccessory?.removeFromParent()
-            redactAccessory = nil
-        }
+    @objc private func highlightDotPicked(_ sender: NSButton) {
+        let i = (0..<Self.highlightColors.count).contains(sender.tag) ? sender.tag : 0
+        UserDefaults.standard.set(i, forKey: "jack.highlightColor")
+        annotateSelection(.highlight, color: Self.highlightColors[i].color, name: "Highlight")
     }
 
-    private func buildRedactStrip(width: CGFloat) -> NSView {
-        let strip = ToolStripView(frame: NSRect(x: 0, y: 0, width: width, height: 40))
+    private func syncStampControls() {
+        let has = selected != nil
+        sizeSlider.isHidden = !has;   sizeSlider.isEnabled = has
+        removeButton.isHidden = !has; removeButton.isEnabled = has
+        stampSizeLabel.isHidden = !has
+        markupHint?.isHidden = has
+    }
 
-        let hint = NSTextField(labelWithString: "Drag over anything — the black bar lands when you let go. \u{2318}Z undoes.")
-        hint.textColor = .secondaryLabelColor
-        hint.font = .systemFont(ofSize: 11)
-        hint.frame = NSRect(x: 12, y: 12, width: 250, height: 16)
-        strip.addSubview(hint)
-
+    private func buildRedactRow() {
+        rowLabel("Redact")
+        let black = chip("Blackout", #selector(pickBlackout), x: 74, w: 80, toggle: true)
+        let er = chip("Erase", #selector(pickErase), x: 160, w: 64, toggle: true)
+        blackoutChip = black
+        eraseChip = er
         redactTermField.placeholderString = "Redact every occurrence of…"
         redactTermField.font = .systemFont(ofSize: 12)
-        redactTermField.frame = NSRect(x: 268, y: 8, width: 200, height: 24)
+        redactTermField.frame = NSRect(x: 234, y: 9, width: 220, height: 24)
         redactTermField.target = self
         redactTermField.action = #selector(redactAllMatches)
-        strip.addSubview(redactTermField)
-
-        let all = NSButton(title: "Redact All", target: self, action: #selector(redactAllMatches))
-        all.bezelStyle = .rounded
-        all.controlSize = .small
-        all.frame = NSRect(x: 474, y: 7, width: 78, height: 26)
-        strip.addSubview(all)
-
-
-        // No Apply, no Clear: the bar lands on mouse-up; ⌘Z is the way back.
-        return strip
+        modeRow.addSubview(redactTermField)
+        applyRedactStyle()
+        rowHint("swipe applies instantly · certificate at save · ⌘Z undoes")
     }
 
-    // MARK: - Erase mode (whiteout that actually removes — RedactionEngine, white paint)
-
-    @objc func toggleErase(_ sender: Any?) { setErase(on: !eraseOn) }
-
-    private func setErase(on: Bool) {
-        guard eraseOn != on, let window = window else { return }
-        if on { setMarkup(on: false); setRedact(on: false); setForm(on: false) }
-        eraseOn = on
-        eraseButton?.state = on ? .on : .off
-        pdfView.redactMode = on          // erase rides the redact band machinery
-        pdfView.eraseStyle = on
-        if on {
-            let acc = NSTitlebarAccessoryViewController()
-            acc.view = buildEraseStrip(width: window.frame.width)
-            acc.layoutAttribute = .bottom
-            window.addTitlebarAccessoryViewController(acc)
-            eraseAccessory = acc
-        } else {
-            eraseAccessory?.removeFromParent()
-            eraseAccessory = nil
+    private func buildFormRow() {
+        rowLabel("Forms")
+        formPaletteButtons = []
+        var x: CGFloat = 74
+        for (i, entry) in Self.formPalette.enumerated() {
+            let btn = NSButton(title: entry.0, target: self, action: #selector(fieldToolPicked(_:)))
+            btn.image = NSImage(systemSymbolName: entry.1, accessibilityDescription: entry.0)
+            btn.imagePosition = .imageLeading
+            btn.setButtonType(.pushOnPushOff)
+            btn.bezelStyle = .rounded
+            btn.controlSize = .small
+            btn.tag = i
+            let w = btn.intrinsicContentSize.width + 14
+            btn.frame = NSRect(x: x, y: 8, width: w, height: 26)
+            modeRow.addSubview(btn)
+            formPaletteButtons.append(btn)
+            x += w + 6
         }
+        rowHint("click to place · drag to size · right-click a field to edit")
     }
-
-    private func buildEraseStrip(width: CGFloat) -> NSView {
-        let strip = ToolStripView(frame: NSRect(x: 0, y: 0, width: width, height: 40))
-
-        let hint = NSTextField(labelWithString: "Drag over anything and it\u{2019}s gone — logos, addresses, images. Removed, not covered. \u{2318}Z brings it back.")
-        hint.textColor = .secondaryLabelColor
-        hint.font = .systemFont(ofSize: 11)
-        hint.frame = NSRect(x: 12, y: 12, width: 620, height: 16)
-        strip.addSubview(hint)
-
-        // No Apply, no Clear: erase is one gesture now. ⌘Z is the way back.
-
-        return strip
-    }
-
-
-
 
     // Erase is an EDIT, not an export: affected pages are swapped in place (undoable via
     // page identity), autosave persists into the file, Versions is the deep recovery.
@@ -1166,64 +1276,12 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     }
 
 
-    // MARK: - Form mode (drag-and-drop fillable fields; Word-simple, AcroForm underneath)
-
-    @objc func toggleForm(_ sender: Any?) { setForm(on: !formOn) }
-
-    private func setForm(on: Bool) {
-        guard formOn != on, let window = window else { return }
-        if on { setMarkup(on: false); setRedact(on: false); setErase(on: false) }   // one tool strip at a time
-        formOn = on
-        formButton?.state = on ? .on : .off
-        pdfView.formAuthoringOn = on
-        if on {
-            let acc = NSTitlebarAccessoryViewController()
-            acc.view = buildFormStrip(width: window.frame.width)
-            acc.layoutAttribute = .bottom
-            window.addTitlebarAccessoryViewController(acc)
-            formAccessory = acc
-            pdfView.formFieldMenuItems = { [weak self] widget in self?.fieldMenuItems(for: widget) ?? [] }
-        } else {
-            pdfView.armedFieldKind = nil
-            formPaletteButtons.forEach { $0.state = .off }
-            fieldPopover?.close()
-            formAccessory?.removeFromParent()
-            formAccessory = nil
-        }
-    }
+    // MARK: - Form field palette (rendered into the Forms mode row)
 
     private static let formPalette: [(String, String)] = [
         ("Text Field", "character.cursor.ibeam"), ("Text Box", "text.justify.left"),
         ("Checkbox", "checkmark.square"), ("Multiple Choice", "circle.circle"),
         ("Dropdown", "chevron.down.square"), ("Date", "calendar")]
-
-    private func buildFormStrip(width: CGFloat) -> NSView {
-        let strip = ToolStripView(frame: NSRect(x: 0, y: 0, width: width, height: 40))
-        formPaletteButtons = []
-        var x: CGFloat = 12
-        for (i, entry) in Self.formPalette.enumerated() {
-            let btn = NSButton(title: entry.0, target: self, action: #selector(fieldToolPicked(_:)))
-            btn.image = NSImage(systemSymbolName: entry.1, accessibilityDescription: entry.0)
-            btn.imagePosition = .imageLeading
-            btn.setButtonType(.pushOnPushOff)
-            btn.bezelStyle = .rounded
-            btn.controlSize = .small
-            btn.tag = i
-            let w = btn.intrinsicContentSize.width + 14
-            btn.frame = NSRect(x: x, y: 7, width: w, height: 26)
-            strip.addSubview(btn)
-            formPaletteButtons.append(btn)
-            x += w + 6
-        }
-        let hint = NSTextField(labelWithString: "Pick a field, then click the page to place it — drag fields to move, right-click to edit")
-        hint.textColor = .secondaryLabelColor
-        hint.font = .systemFont(ofSize: 11)
-        hint.alignment = .right
-        hint.frame = NSRect(x: 0, y: 12, width: 456, height: 16)
-        strip.addSubview(hint)
-        strip.anchorRight(hint, gap: 16)
-        return strip
-    }
 
     private func fieldKind(forTag tag: Int) -> FormFieldKind {
         switch tag {
@@ -1621,6 +1679,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         let on = !(pdfView.typewriterMode)
         pdfView.typewriterMode = on
         typewriterButton?.state = on ? .on : .off
+        typewriterSizePopup.isHidden = !on
         if on {
             flashSubtitle("Typewriter — click the page and type. Return places the text, Esc cancels")
         } else {
@@ -1979,10 +2038,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         ann?.outline = true
         if let ann = ann {
             sizeSlider.doubleValue = Double(ann.bounds.width)
-            if !markupOn { setMarkup(on: true) }   // clicking a stamp surfaces its controls
+            if mode != .markup { setMode(.markup) }   // clicking a stamp surfaces its controls
         }
-        sizeSlider.isEnabled = ann != nil
-        removeButton.isEnabled = ann != nil
+        syncStampControls()
         pdfView.needsDisplay = true
     }
 
