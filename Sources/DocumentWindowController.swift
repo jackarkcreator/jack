@@ -54,6 +54,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     // EDITABLE after saving (unlike the old Add Text, which placed a picture of the words).
     private weak var typewriterButton: NSButton?
     private let typewriterSizePopup = NSPopUpButton()
+    private let fontPopup = NSPopUpButton()
     private var typewriterEditor: TypewriterEditor?
     private var typewriterTarget: (page: PDFPage, point: CGPoint)?
     private var typewriterEditing: PDFAnnotation?   // set while re-editing an existing text
@@ -1103,16 +1104,34 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         modeRow.addSubview(tw)
         typewriterButton = tw
 
-        typewriterSizePopup.frame = NSRect(x: 294, y: 8, width: 60, height: 26)
-        typewriterSizePopup.controlSize = .small
-        if typewriterSizePopup.numberOfItems == 0 {
-            typewriterSizePopup.addItems(withTitles: ["10", "12", "14", "18", "24"])
-            typewriterSizePopup.selectItem(at: 2)
+        // Font + Size are PERMANENT row controls (they used to pop in over the color dots):
+        // idle, they set the default for the next typewriter text; while a capsule is open
+        // (typewriter, retype, or editing existing text) they restyle it live.
+        if fontPopup.numberOfItems == 0 {
+            fontPopup.addItems(withTitles: ["System", "Helvetica", "Arial", "Times New Roman",
+                                            "Georgia", "Courier New", "Verdana"])
+            let saved = UserDefaults.standard.string(forKey: "jack.textFontFamily") ?? "System"
+            if fontPopup.itemTitles.contains(saved) { fontPopup.selectItem(withTitle: saved) }
         }
-        typewriterSizePopup.isHidden = !pdfView.typewriterMode   // surfaces while typing (mock rest state)
+        fontPopup.frame = NSRect(x: 294, y: 8, width: 126, height: 26)
+        fontPopup.controlSize = .small
+        fontPopup.font = .systemFont(ofSize: 11)
+        fontPopup.target = self; fontPopup.action = #selector(textStylePicked(_:))
+        modeRow.addSubview(fontPopup)
+
+        if typewriterSizePopup.numberOfItems == 0 {
+            typewriterSizePopup.addItems(withTitles: ["8", "9", "10", "11", "12", "14", "18", "24", "36", "48"])
+            let saved = UserDefaults.standard.double(forKey: "jack.textSize")
+            typewriterSizePopup.selectItem(withTitle: saved > 0 ? String(Int(saved)) : "14")
+            if typewriterSizePopup.indexOfSelectedItem < 0 { typewriterSizePopup.selectItem(withTitle: "14") }
+        }
+        typewriterSizePopup.frame = NSRect(x: 426, y: 8, width: 56, height: 26)
+        typewriterSizePopup.controlSize = .small
+        typewriterSizePopup.font = .systemFont(ofSize: 11)
+        typewriterSizePopup.target = self; typewriterSizePopup.action = #selector(textStylePicked(_:))
         modeRow.addSubview(typewriterSizePopup)
 
-        var x: CGFloat = pdfView.typewriterMode ? 364 : 304
+        var x: CGFloat = 492
         for (i, entry) in Self.highlightColors.enumerated() {
             let dot = NSButton(image: Self.swatch(entry.color), target: self, action: #selector(highlightDotPicked(_:)))
             dot.isBordered = false
@@ -1247,6 +1266,24 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             return
         }
 
+        // Dissolve the CONTENT, not just the band (Keno): snapshot the region as it looks
+        // now, swap the erased page in beneath it, then fade the old pixels away. Blackout
+        // keeps its hard bar landing — decisive is the legal convention.
+        var dissolve: NSImageView?
+        if erase {
+            let viewRect = pdfView.convert(rect, from: page)
+            band.isHidden = true   // the snapshot must show the page, not the swipe band
+            if let rep = pdfView.bitmapImageRepForCachingDisplay(in: viewRect) {
+                pdfView.cacheDisplay(in: viewRect, to: rep)
+                let img = NSImage(size: viewRect.size)
+                img.addRepresentation(rep)
+                let iv = NSImageView(frame: viewRect)
+                iv.image = img
+                iv.imageScaling = .scaleAxesIndependently
+                pdfView.addSubview(iv)
+                dissolve = iv
+            }
+        }
         withPreservedPosition(anchorIndex: index) {
             doc.removePage(at: index)
             doc.insert(new, at: index)
@@ -1267,10 +1304,19 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
 
         // The page underneath is already painted — fading the band is the reveal, not an
         // effect painted over the truth.
-        NSAnimationContext.runAnimationGroup({ ctx in
-            ctx.duration = 0.28
-            band.animator().alphaValue = 0
-        }, completionHandler: { band.removeFromSuperview() })
+        if let snap = dissolve {
+            band.removeFromSuperview()
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = 0.38
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                snap.animator().alphaValue = 0
+            }, completionHandler: { snap.removeFromSuperview() })
+        } else {
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = 0.28
+                band.animator().alphaValue = 0
+            }, completionHandler: { band.removeFromSuperview() })
+        }
         flashSubtitle(erase ? "Erased — \u{2318}Z brings it back, drop an image to fill the space"
                             : "Redacted — a verification certificate saves alongside on \u{2318}S. \u{2318}Z undoes")
     }
@@ -1679,9 +1725,8 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         let on = !(pdfView.typewriterMode)
         pdfView.typewriterMode = on
         typewriterButton?.state = on ? .on : .off
-        typewriterSizePopup.isHidden = !on
         if on {
-            flashSubtitle("Typewriter — click the page and type. Return places the text, Esc cancels")
+            flashSubtitle("Typewriter — click the page and type. Click anywhere else places it, Esc cancels")
         } else {
             commitTypewriterEditor()
         }
@@ -1691,11 +1736,49 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         CGFloat(Double(typewriterSizePopup.titleOfSelectedItem ?? "14") ?? 14)
     }
 
+    /// The row's Font + Size choice as an actual font ("System" = SF).
+    private var currentTextFont: NSFont {
+        let fam = fontPopup.titleOfSelectedItem ?? "System"
+        let size = typewriterFontSize
+        if fam == "System" { return .systemFont(ofSize: size) }
+        return NSFontManager.shared.font(withFamily: fam, traits: [], weight: 5, size: size)
+            ?? NSFont(name: fam, size: size) ?? .systemFont(ofSize: size)
+    }
+
+    /// Reflect a matched/edited annotation's face in the row controls (adds the family and
+    /// size to the lists when the document uses one we don't carry).
+    private func syncTextStyleControls(matching font: NSFont) {
+        guard fontPopup.numberOfItems > 0 else { return }
+        let family = font.familyName ?? font.fontName
+        if !fontPopup.itemTitles.contains(family) { fontPopup.addItem(withTitle: family) }
+        fontPopup.selectItem(withTitle: family)
+        let sizeTitle = String(Int(font.pointSize.rounded()))
+        if !typewriterSizePopup.itemTitles.contains(sizeTitle) { typewriterSizePopup.addItem(withTitle: sizeTitle) }
+        typewriterSizePopup.selectItem(withTitle: sizeTitle)
+    }
+
+    @objc private func textStylePicked(_ sender: Any?) {
+        UserDefaults.standard.set(fontPopup.titleOfSelectedItem ?? "System", forKey: "jack.textFontFamily")
+        UserDefaults.standard.set(Double(typewriterFontSize), forKey: "jack.textSize")
+        guard let editor = typewriterEditor else { return }
+        let f = currentTextFont
+        retypeFont = f
+        if let scaled = NSFont(descriptor: f.fontDescriptor, size: f.pointSize * pdfView.scaleFactor) {
+            editor.field.font = scaled
+            editor.sizeToText()
+        }
+    }
+
     // MARK: Typewriter editor overlay
 
     func typewriterClicked(at point: CGPoint, on page: PDFPage) {
-        commitTypewriterEditor()   // clicking elsewhere places the pending text first
+        commitTypewriterEditor()   // a still-open capsule commits first
+        retypeFont = currentTextFont   // the row's Font/Size choice styles the new text
         openTypewriterEditor(on: page, at: point, existing: nil)
+        // One-shot (the armed tool kept spawning boxes on every click): placing the capsule
+        // disarms the tool. Click away to place the text; Esc cancels.
+        pdfView.typewriterMode = false
+        typewriterButton?.state = .off
     }
 
     func freeTextEditRequested(_ ann: PDFAnnotation) {
@@ -1704,6 +1787,11 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         // Edit in place: the annotation comes off the page while the editor is up, and
         // commit/cancel decides what goes back. Undo treats the whole edit as one step.
         typewriterEditing = ann
+        if let f = ann.font {
+            retypeFont = f
+            if mode == .markup { syncTextStyleControls(matching: f) }
+        }
+        if let c = ann.fontColor { retypeColor = c }
         page.removeAnnotation(ann)
         forceRefresh()
         openTypewriterEditor(on: page, at: CGPoint(x: ann.bounds.minX, y: ann.bounds.maxY),
@@ -1825,6 +1913,8 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         // The editor stands alone — Retype is one gesture, it must NOT leave the typewriter
         // armed. (Armed mode turned the next text-selection click into "place an editor here",
         // which also yanked the view to the new capsule — the "jumps when I select" bug.)
+        setMode(.markup)   // retype IS markup — the row's Font/Size controls restyle the capsule
+        if let f = retypeFont { syncTextStyleControls(matching: f) }
         openTypewriterEditor(on: new, at: CGPoint(x: rect.minX, y: originalInkTop ?? rect.maxY - 1),
                              existing: nil, prefill: text, sizeOverride: fontSize)
         typewriterEditor?.field.selectText(nil)
@@ -3112,6 +3202,12 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     }
 
     func controlTextDidEndEditing(_ obj: Notification) {
+        // Clicking anywhere outside the capsule places the text — Return is no longer the
+        // only way out (Keno: the Enter-to-escape flow felt like a trap).
+        if (obj.object as? NSTextField) === typewriterEditor?.field {
+            commitTypewriterEditor()
+            return
+        }
         // Focus moved away from the typewriter editor (click elsewhere, tab out): place the
         // text. Return also lands here after the action fires; the nil-guard makes it a no-op.
         if (obj.object as? NSTextField) === typewriterEditor?.field { commitTypewriterEditor() }
