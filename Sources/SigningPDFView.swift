@@ -10,11 +10,17 @@ protocol StampSelectionDelegate: AnyObject {
     func formFieldPlaced(kind: FormFieldKind, rect: CGRect, page: PDFPage)
     func fieldMoved(_ items: [(PDFAnnotation, CGRect)])
     func imageDropped(_ image: NSImage, at point: CGPoint, on page: PDFPage)
+    // Typewriter: click empty page → place an editor; drag moves the text; double-click re-edits.
+    func typewriterClicked(at point: CGPoint, on page: PDFPage)
+    func freeTextMoved(_ ann: PDFAnnotation, from oldBounds: CGRect)
+    func freeTextEditRequested(_ ann: PDFAnnotation)
 }
 
 final class SigningPDFView: PDFView {
     weak var stampDelegate: StampSelectionDelegate?
     var redactMode = false
+    // Typewriter: while on, a click on empty page area asks the delegate for a text editor.
+    var typewriterMode = false
     // Form authoring: while on, widgets drag instead of accepting input; an armed kind
     // places a new field on click/drag (same rubber-band pattern as redact marks).
     var formAuthoringOn = false
@@ -56,6 +62,9 @@ final class SigningPDFView: PDFView {
     private var dragStartMouse: CGPoint = .zero
     private var last: CGPoint = .zero
     private var dragStartBounds: CGRect = .zero
+    // Typewriter text drag (FreeText is a plain PDFAnnotation, not our stamp subclass).
+    private var draggingFree: PDFAnnotation?
+    private var freeStartBounds: CGRect = .zero
     // Redact rubber band: a plain view-space overlay (PDFView's page cache can't be trusted
     // to repaint annotation mutations live — see forceRefresh in DocumentWindowController).
     private var rubberBand: NSView?
@@ -151,6 +160,18 @@ final class SigningPDFView: PDFView {
             dragging = ann; dragPage = page; last = p
             dragStartBounds = ann.bounds
             stampDelegate?.didSelect(ann)
+        } else if let text = page.annotations.last(where: {
+            $0.type == "FreeText" && $0.bounds.insetBy(dx: -3, dy: -3).contains(p)
+        }) {
+            // Typewriter text: double-click re-opens the editor, single click starts a drag.
+            if event.clickCount >= 2 {
+                stampDelegate?.freeTextEditRequested(text)
+            } else {
+                draggingFree = text; dragPage = page; last = p
+                freeStartBounds = text.bounds
+            }
+        } else if typewriterMode {
+            stampDelegate?.typewriterClicked(at: p, on: page)
         } else {
             // Don't deselect on a background click — keep the active signature selected.
             super.mouseDown(with: event)
@@ -186,6 +207,13 @@ final class SigningPDFView: PDFView {
             }
             for (a, start) in dragSet { a.bounds = start.offsetBy(dx: dx, dy: dy) }
             updateSnapGuides(x: snapX, y: snapY, on: page)
+            needsDisplay = true
+            return
+        }
+        if let free = draggingFree, let page = dragPage {
+            let p = convert(convert(event.locationInWindow, from: nil), to: page)
+            free.bounds = free.bounds.offsetBy(dx: p.x - last.x, dy: p.y - last.y)
+            last = p
             needsDisplay = true
             return
         }
@@ -252,6 +280,9 @@ final class SigningPDFView: PDFView {
         if let ann = dragging {
             if ann.bounds != dragStartBounds { stampDelegate?.stampMoved(ann, from: dragStartBounds) }
             dragging = nil; dragPage = nil
+        } else if let free = draggingFree {
+            if free.bounds != freeStartBounds { stampDelegate?.freeTextMoved(free, from: freeStartBounds) }
+            draggingFree = nil; dragPage = nil
         } else {
             super.mouseUp(with: event)
         }

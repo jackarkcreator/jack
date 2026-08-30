@@ -50,6 +50,13 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     private let sidebar = PageSidebarController()
     private var searchField: NSSearchField?
     private weak var saveButton: NSButton?
+    // Typewriter: click the page, type, Return — a native FreeText annotation that stays
+    // EDITABLE after saving (unlike the old Add Text, which placed a picture of the words).
+    private weak var typewriterButton: NSButton?
+    private let typewriterSizePopup = NSPopUpButton()
+    private var typewriterEditor: NSTextField?
+    private var typewriterTarget: (page: PDFPage, point: CGPoint)?
+    private var typewriterEditing: PDFAnnotation?   // set while re-editing an existing text
     private var subtitleBase = ""
     private weak var selected: ImageStampAnnotation?
     private var sheet: SignatureSheetController?
@@ -187,6 +194,20 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         pdfView.annotateMenuItems = { [weak self] page, point in
             guard let self else { return [] }
             var items = self.buildAnnotateMenuItems(page: page, point: point)
+            // Typewriter text gets browser-style right-click actions.
+            if let page, let hit = page.annotations.last(where: {
+                $0.type == "FreeText" && $0.bounds.insetBy(dx: -3, dy: -3).contains(point)
+            }) {
+                let edit = NSMenuItem(title: "Edit Text…", action: #selector(self.editHitFreeText(_:)), keyEquivalent: "")
+                edit.target = self
+                edit.representedObject = hit
+                let remove = NSMenuItem(title: "Remove Text", action: #selector(self.removeHitFreeText(_:)), keyEquivalent: "")
+                remove.target = self
+                remove.representedObject = hit
+                items.insert(.separator(), at: 0)
+                items.insert(remove, at: 0)
+                items.insert(edit, at: 0)
+            }
             // Right-clicked on a picture? Offer it like a browser would.
             if let page, let hit = ImageHitEngine.image(at: point, on: page) {
                 self.lastImageHit = (hit, page)
@@ -883,6 +904,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             window.addTitlebarAccessoryViewController(acc)
             markupAccessory = acc
         } else {
+            commitTypewriterEditor()          // leaving the strip places pending text
+            pdfView.typewriterMode = false
+            typewriterButton?.state = .off
             markupAccessory?.removeFromParent()
             markupAccessory = nil
             didSelect(nil)
@@ -930,17 +954,26 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             return btn
         }
         _ = b("Add Signature", #selector(addSignature), 12, 116)
-        _ = b("Add Text", #selector(addText), 134, 84)
-        _ = b("✓", #selector(addCheck), 224, 36)
-        _ = b("✗", #selector(addCross), 264, 36)
+        let tw = b("Typewriter", #selector(toggleTypewriter), 134, 96)
+        tw.setButtonType(.pushOnPushOff)
+        typewriterButton = tw
+        typewriterSizePopup.frame = NSRect(x: 236, y: 7, width: 64, height: 26)
+        typewriterSizePopup.controlSize = .small
+        if typewriterSizePopup.numberOfItems == 0 {
+            typewriterSizePopup.addItems(withTitles: ["10", "12", "14", "18", "24"])
+            typewriterSizePopup.selectItem(at: 2)
+        }
+        strip.addSubview(typewriterSizePopup)
+        _ = b("✓", #selector(addCheck), 308, 36)
+        _ = b("✗", #selector(addCross), 348, 36)
 
         let sizeLabel = NSTextField(labelWithString: "Size")
         sizeLabel.textColor = .secondaryLabelColor
         sizeLabel.font = .systemFont(ofSize: 11)
-        sizeLabel.frame = NSRect(x: 314, y: 12, width: 30, height: 16)
+        sizeLabel.frame = NSRect(x: 398, y: 12, width: 30, height: 16)
         strip.addSubview(sizeLabel)
 
-        sizeSlider.frame = NSRect(x: 346, y: 9, width: 120, height: 22)
+        sizeSlider.frame = NSRect(x: 430, y: 9, width: 120, height: 22)
         sizeSlider.controlSize = .small
         sizeSlider.minValue = 14; sizeSlider.maxValue = 600
         sizeSlider.target = self; sizeSlider.action = #selector(resizeSelected)
@@ -951,7 +984,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         removeButton.bezelStyle = .rounded
         removeButton.controlSize = .small
         removeButton.target = self; removeButton.action = #selector(removeSelected)
-        removeButton.frame = NSRect(x: 478, y: 7, width: 76, height: 26)
+        removeButton.frame = NSRect(x: 562, y: 7, width: 76, height: 26)
         removeButton.isEnabled = false
         strip.addSubview(removeButton)
 
@@ -1686,20 +1719,162 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         }
     }
 
-    @objc private func addText() {
-        let alert = NSAlert()
-        alert.messageText = "Add text"
-        alert.informativeText = "Type the text to place on the page. You can drag and resize it after."
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
-        alert.accessoryView = field
-        alert.addButton(withTitle: "Add")
-        alert.addButton(withTitle: "Cancel")
-        alert.window.initialFirstResponder = field
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        let text = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, let img = renderText(text, size: 48, pad: 12) else { return }
-        place(img)
+    @objc private func toggleTypewriter() {
+        let on = !(pdfView.typewriterMode)
+        pdfView.typewriterMode = on
+        typewriterButton?.state = on ? .on : .off
+        if on {
+            flashSubtitle("Typewriter — click the page and type. Return places the text, Esc cancels")
+        } else {
+            commitTypewriterEditor()
+        }
     }
+
+    private var typewriterFontSize: CGFloat {
+        CGFloat(Double(typewriterSizePopup.titleOfSelectedItem ?? "14") ?? 14)
+    }
+
+    // MARK: Typewriter editor overlay
+
+    func typewriterClicked(at point: CGPoint, on page: PDFPage) {
+        commitTypewriterEditor()   // clicking elsewhere places the pending text first
+        openTypewriterEditor(on: page, at: point, existing: nil)
+    }
+
+    func freeTextEditRequested(_ ann: PDFAnnotation) {
+        guard let page = ann.page else { return }
+        commitTypewriterEditor()
+        // Edit in place: the annotation comes off the page while the editor is up, and
+        // commit/cancel decides what goes back. Undo treats the whole edit as one step.
+        typewriterEditing = ann
+        page.removeAnnotation(ann)
+        forceRefresh()
+        openTypewriterEditor(on: page, at: CGPoint(x: ann.bounds.minX, y: ann.bounds.maxY),
+                             existing: ann)
+    }
+
+    private func openTypewriterEditor(on page: PDFPage, at point: CGPoint, existing: PDFAnnotation?) {
+        let size = existing.flatMap { $0.font?.pointSize } ?? typewriterFontSize
+        let scale = pdfView.scaleFactor
+        let viewPoint = pdfView.convert(point, from: page)
+        let editor = NSTextField(frame: NSRect(x: viewPoint.x, y: viewPoint.y - (size + 8) * scale,
+                                               width: 280 * scale, height: (size + 8) * scale))
+        editor.font = .systemFont(ofSize: size * scale)
+        editor.stringValue = existing?.contents ?? ""
+        editor.placeholderString = "Type here…"
+        editor.isBordered = true
+        editor.focusRingType = .default
+        editor.backgroundColor = NSColor.textBackgroundColor.withAlphaComponent(0.9)
+        editor.delegate = self
+        editor.target = self
+        editor.action = #selector(typewriterCommitAction)
+        pdfView.addSubview(editor)
+        pdfView.window?.makeFirstResponder(editor)
+        typewriterEditor = editor
+        typewriterTarget = (page, point)
+    }
+
+    @objc private func typewriterCommitAction() { commitTypewriterEditor() }
+
+    @objc private func editHitFreeText(_ sender: NSMenuItem) {
+        guard let ann = sender.representedObject as? PDFAnnotation else { return }
+        freeTextEditRequested(ann)
+    }
+
+    @objc private func removeHitFreeText(_ sender: NSMenuItem) {
+        guard let ann = sender.representedObject as? PDFAnnotation, let page = ann.page else { return }
+        page.removeAnnotation(ann)
+        registerFreeTextUndo(page: page, add: nil, remove: ann, name: "Remove Text")
+        forceRefresh()
+        markDirty()
+    }
+
+    /// Places the editor's text as a FreeText annotation (or restores/updates the one being
+    /// edited). Safe to call when no editor is open.
+    private func commitTypewriterEditor() {
+        guard let editor = typewriterEditor, let target = typewriterTarget else { return }
+        let text = editor.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let editing = typewriterEditing
+        editor.removeFromSuperview()
+        typewriterEditor = nil
+        typewriterTarget = nil
+        typewriterEditing = nil
+
+        if text.isEmpty {
+            // Empty commit: a new placement becomes nothing; an edited annotation is removed.
+            if let old = editing {
+                registerFreeTextUndo(page: target.page, add: nil, remove: old, name: "Remove Text")
+                forceRefresh()
+                markDirty()
+            }
+            return
+        }
+
+        let size = editing.flatMap { $0.font?.pointSize } ?? typewriterFontSize
+        let font = NSFont.systemFont(ofSize: size)
+        let measured = (text as NSString).size(withAttributes: [.font: font])
+        let bounds: CGRect
+        if let old = editing {
+            bounds = CGRect(x: old.bounds.minX, y: old.bounds.maxY - measured.height - 4,
+                            width: measured.width + 8, height: measured.height + 4)
+        } else {
+            bounds = CGRect(x: target.point.x, y: target.point.y - measured.height - 4,
+                            width: measured.width + 8, height: measured.height + 4)
+        }
+        let ann = PDFAnnotation(bounds: bounds, forType: .freeText, withProperties: nil)
+        ann.contents = text
+        ann.font = font
+        ann.fontColor = .black
+        ann.color = .clear
+        let border = PDFBorder(); border.lineWidth = 0
+        ann.border = border
+        target.page.addAnnotation(ann)
+        registerFreeTextUndo(page: target.page, add: ann, remove: editing, name: editing == nil ? "Add Text" : "Edit Text")
+        forceRefresh()
+        markDirty()
+    }
+
+    private func cancelTypewriterEditor() {
+        guard let editor = typewriterEditor else { return }
+        let editing = typewriterEditing
+        let target = typewriterTarget
+        editor.removeFromSuperview()
+        typewriterEditor = nil
+        typewriterTarget = nil
+        typewriterEditing = nil
+        // Cancel while re-editing: put the original back untouched (no undo entry).
+        if let old = editing, let page = target?.page {
+            page.addAnnotation(old)
+            forceRefresh()
+        }
+    }
+
+    func freeTextMoved(_ ann: PDFAnnotation, from oldBounds: CGRect) {
+        docUndo.registerUndo(withTarget: self) { me in
+            let now = ann.bounds
+            ann.bounds = oldBounds
+            me.freeTextMoved(ann, from: now)
+            me.forceRefresh()
+        }
+        docUndo.setActionName("Move Text")
+        markDirty()
+    }
+
+    /// One undoable step covering add and/or remove; inverse re-registers, so redo is free.
+    private func registerFreeTextUndo(page: PDFPage, add: PDFAnnotation?, remove: PDFAnnotation?, name: String) {
+        docUndo.registerUndo(withTarget: self) { me in
+            if let a = add { page.removeAnnotation(a) }
+            if let r = remove { page.addAnnotation(r) }
+            me.registerFreeTextUndo(page: page, add: remove, remove: add, name: name)
+            me.forceRefresh()
+        }
+        docUndo.setActionName(name)
+    }
+
+    private func markDirty() { (document as? NSDocument)?.updateChangeCount(.changeDone) }
+
+    // addText (image-of-words) was replaced by the Typewriter: real FreeText,
+    // editable after saving. addCheck/addCross still use renderText below.
 
     @objc private func addCheck() { if let img = renderText("✔", size: 72, pad: 6, weight: .bold) { place(img, defaultWidth: 24) } }
     @objc private func addCross() { if let img = renderText("✘", size: 72, pad: 6, weight: .bold) { place(img, defaultWidth: 24) } }
@@ -2843,6 +3018,20 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     }
 
     // MARK: - Search
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        if control === typewriterEditor, commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+            cancelTypewriterEditor()
+            return true
+        }
+        return false
+    }
+
+    func controlTextDidEndEditing(_ obj: Notification) {
+        // Focus moved away from the typewriter editor (click elsewhere, tab out): place the
+        // text. Return also lands here after the action fires; the nil-guard makes it a no-op.
+        if (obj.object as? NSTextField) === typewriterEditor { commitTypewriterEditor() }
+    }
 
     func controlTextDidChange(_ obj: Notification) {
         if searchField?.stringValue.isEmpty == true { clearSearch() }
