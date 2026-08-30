@@ -18,8 +18,13 @@ enum RedactionEngine {
     /// How a marked region is destroyed: blackout = classic redaction box; erase = whiteout —
     /// the region reads as blank paper (logo/address removal). Both rasterize the page, so the
     /// removal is real either way; only the paint differs.
+    /// Blackout keeps a deliberate solid-black bar — that is the legal convention and it must
+    /// stay visible. Erase is cosmetic removal, so it paints the SURROUNDING background colour
+    /// sampled from the rendered page (white paper stays white; a black header bar stays black)
+    /// and the removal reads as blank space rather than a white sticker.
     enum Style { case blackout, erase
         var fill: NSColor { self == .blackout ? .black : .white }
+        var samplesBackground: Bool { self == .erase }
     }
 
     /// Write `doc` to `url` with the given redactions applied (page index → rects in page space).
@@ -38,7 +43,8 @@ enum RedactionEngine {
 
             if let rects = redactions[i], !rects.isEmpty {
                 // Kill path: page becomes pixels; the black is painted into the pixels.
-                if let cg = rasterized(page: page, blackout: rects, fill: style.fill) {
+                if let cg = rasterized(page: page, blackout: rects, fill: style.fill,
+                                       sampleBackground: style.samplesBackground) {
                     ctx.saveGState()
                     ctx.interpolationQuality = .high
                     ctx.draw(cg, in: box)
@@ -57,7 +63,8 @@ enum RedactionEngine {
     /// Erase path. Same rasterize discipline as apply(); the caller swaps it into the live
     /// document (undoable via page identity) and autosave persists it.
     static func destroyedPage(_ page: PDFPage, regions: [CGRect], style: Style) -> PDFPage? {
-        guard let img = rasterized(page: page, blackout: regions, fill: style.fill) else { return nil }
+        guard let img = rasterized(page: page, blackout: regions, fill: style.fill,
+                                   sampleBackground: style.samplesBackground) else { return nil }
         var box = page.bounds(for: .mediaBox)
         box.origin = .zero
         let data = NSMutableData()
@@ -110,7 +117,8 @@ enum RedactionEngine {
     // Render the page to a JPEG-backed CGImage with the redaction rects filled solid black.
     // Redaction overlays and stamps are handled explicitly so nothing depends on custom
     // annotation subclasses drawing themselves through page.draw.
-    private static func rasterized(page: PDFPage, blackout: [CGRect], fill: NSColor = .black) -> CGImage? {
+    private static func rasterized(page: PDFPage, blackout: [CGRect], fill: NSColor = .black,
+                                   sampleBackground: Bool = false) -> CGImage? {
         let box = page.bounds(for: .mediaBox)
         let w = Int(box.width * rasterScale), h = Int(box.height * rasterScale)
         guard w > 0, h > 0,
@@ -142,14 +150,61 @@ enum RedactionEngine {
         }
         overlays.forEach { page.addAnnotation($0) }   // keep the on-screen doc intact
 
-        cg.setFillColor(fill.cgColor)
-        for r in blackout { cg.fill(r) }
+        // Sample BEFORE painting: the bitmap currently holds the rendered page, so the ring
+        // just outside each region is the real background behind it.
+        let fills: [NSColor] = blackout.map { r in
+            guard sampleBackground else { return fill }
+            return backgroundColor(around: r, in: rep, pageBox: box, scale: rasterScale) ?? fill
+        }
+        for (r, c) in zip(blackout, fills) {
+            cg.setFillColor(c.cgColor)
+            cg.fill(r)
+        }
         cg.restoreGState()
 
         // JPEG round-trip keeps the embedded image (and the file) a sane size.
         guard let jpeg = rep.representation(using: .jpeg, properties: [.compressionFactor: jpegQuality]),
               let src = CGImageSourceCreateWithData(jpeg as CFData, nil) else { return nil }
         return CGImageSourceCreateImageAtIndex(src, 0, nil)
+    }
+
+    /// Median colour of a ring of pixels just outside `rect`, read from the already-rendered
+    /// page bitmap. Returns nil when the ring lands entirely off-page (a region covering the
+    /// whole sheet), so the caller keeps its default rather than inventing a colour.
+    ///
+    /// Median, not mean: averaging a ring that straddles a black bar and white paper yields grey,
+    /// which matches NEITHER side. The median picks a colour that actually occurs on the page.
+    /// This is PAINT sampled from the page, never reconstruction — Jack does not invent content.
+    private static func backgroundColor(around rect: CGRect, in rep: NSBitmapImageRep,
+                                        pageBox: CGRect, scale: CGFloat) -> NSColor? {
+        let inset: CGFloat = 3            // pixels outside the edge
+        let perSide = 16
+        // Page space → bitmap pixels. Row 0 of an NSBitmapImageRep is the TOP of the image,
+        // while the page's origin is bottom-left — hence the y flip.
+        func px(_ p: CGPoint) -> (Int, Int) {
+            (Int(((p.x - pageBox.origin.x) * scale).rounded()),
+             rep.pixelsHigh - 1 - Int(((p.y - pageBox.origin.y) * scale).rounded()))
+        }
+        var samples: [NSColor] = []
+        let outset = rect.insetBy(dx: -inset / scale, dy: -inset / scale)
+        for i in 0..<perSide {
+            let t = CGFloat(i) / CGFloat(max(1, perSide - 1))
+            let candidates = [
+                CGPoint(x: outset.minX + outset.width * t, y: outset.maxY),   // above
+                CGPoint(x: outset.minX + outset.width * t, y: outset.minY),   // below
+                CGPoint(x: outset.minX, y: outset.minY + outset.height * t),  // left
+                CGPoint(x: outset.maxX, y: outset.minY + outset.height * t)   // right
+            ]
+            for c in candidates {
+                let (x, y) = px(c)
+                guard x >= 0, y >= 0, x < rep.pixelsWide, y < rep.pixelsHigh,
+                      let col = rep.colorAt(x: x, y: y) else { continue }
+                samples.append(col)
+            }
+        }
+        guard !samples.isEmpty else { return nil }
+        let sorted = samples.sorted { $0.brightnessComponent < $1.brightnessComponent }
+        return sorted[sorted.count / 2]
     }
 
     // Vector passthrough for clean pages: burn stamps, keep everything else as drawn.
