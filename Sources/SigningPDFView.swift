@@ -14,6 +14,9 @@ protocol StampSelectionDelegate: AnyObject {
     func typewriterClicked(at point: CGPoint, on page: PDFPage)
     func freeTextMoved(_ ann: PDFAnnotation, from oldBounds: CGRect)
     func freeTextEditRequested(_ ann: PDFAnnotation)
+    /// Instant erase: the user lifted the mouse over `rect`; `band` is still covering it and
+    /// should be dissolved (or removed) by the receiver once the erase is applied.
+    func eraseSwiped(_ rect: CGRect, on page: PDFPage, band: NSView)
 }
 
 final class SigningPDFView: PDFView {
@@ -230,7 +233,9 @@ final class SigningPDFView: PDFView {
     override func mouseUp(with event: NSEvent) {
         if let band = rubberBand {
             let viewRect = band.frame
-            band.removeFromSuperview()
+            // Instant erase keeps its band on screen: the controller applies the erase and
+            // then dissolves the band over the (already background-matched) result.
+            if !(redactMode && eraseStyle) { band.removeFromSuperview() }
             rubberBand = nil
             defer { markingPage = nil; bandFieldKind = nil; bandIsRegion = false }
             if bandIsRegion, let page = markingPage {
@@ -255,6 +260,21 @@ final class SigningPDFView: PDFView {
                 let pageRect = CGRect(x: min(a.x, b.x), y: min(a.y, b.y),
                                       width: abs(b.x - a.x), height: abs(b.y - a.y))
                 stampDelegate?.formFieldPlaced(kind: kind, rect: pageRect, page: page)
+                return
+            }
+            // Erase is ONE gesture: lift the mouse and it's gone (the controller verifies,
+            // applies, and dissolves the band). Redact keeps its deliberate mark→Apply flow —
+            // a legal redaction should not happen by accident.
+            if eraseStyle, let page = markingPage {
+                if viewRect.width >= 4, viewRect.height >= 4 {
+                    let a = convert(viewRect.origin, to: page)
+                    let b = convert(CGPoint(x: viewRect.maxX, y: viewRect.maxY), to: page)
+                    let pageRect = CGRect(x: min(a.x, b.x), y: min(a.y, b.y),
+                                          width: abs(b.x - a.x), height: abs(b.y - a.y))
+                    stampDelegate?.eraseSwiped(pageRect, on: page, band: band)
+                } else {
+                    band.removeFromSuperview()
+                }
                 return
             }
             // Commit as one annotation with final bounds on the page where the drag started.

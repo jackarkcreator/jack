@@ -112,7 +112,6 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     private var eraseOn = false
     private var eraseAccessory: NSTitlebarAccessoryViewController?
     private var eraseButton: NSButton?
-    private let eraseCountLabel = NSTextField(labelWithString: "")
 
     // Form strip controls (field authoring)
     private var formOn = false
@@ -1085,7 +1084,6 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             acc.layoutAttribute = .bottom
             window.addTitlebarAccessoryViewController(acc)
             eraseAccessory = acc
-            updateEraseCount()
         } else {
             eraseAccessory?.removeFromParent()
             eraseAccessory = nil
@@ -1095,112 +1093,71 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     private func buildEraseStrip(width: CGFloat) -> NSView {
         let strip = ToolStripView(frame: NSRect(x: 0, y: 0, width: width, height: 40))
 
-        let hint = NSTextField(labelWithString: "Drag over anything to erase it — logos, addresses, images. Erased means removed, not covered.")
+        let hint = NSTextField(labelWithString: "Drag over anything and it\u{2019}s gone — logos, addresses, images. Removed, not covered. \u{2318}Z brings it back.")
         hint.textColor = .secondaryLabelColor
         hint.font = .systemFont(ofSize: 11)
         hint.frame = NSRect(x: 12, y: 12, width: 620, height: 16)
         strip.addSubview(hint)
 
-        eraseCountLabel.textColor = .secondaryLabelColor
-        eraseCountLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-        eraseCountLabel.frame = NSRect(x: 640, y: 12, width: 90, height: 16)
-        strip.addSubview(eraseCountLabel)
-
-        let clear = NSButton(title: "Clear Marks", target: self, action: #selector(clearEraseMarks))
-        clear.bezelStyle = .rounded
-        clear.controlSize = .small
-        clear.frame = NSRect(x: 0, y: 7, width: 100, height: 26)
-        strip.addSubview(clear)
-        strip.anchorRight(clear, gap: 154)
-
-        let apply = NSButton(title: "Apply Erase", target: self, action: #selector(applyErase))
-        apply.bezelStyle = .rounded
-        apply.controlSize = .small
-        apply.keyEquivalent = "\r"
-        apply.frame = NSRect(x: 0, y: 7, width: 134, height: 26)
-        strip.addSubview(apply)
-        strip.anchorRight(apply, gap: 12)
+        // No Apply, no Clear: erase is one gesture now. ⌘Z is the way back.
 
         return strip
     }
 
-    private func allEraseMarks() -> [(Int, RedactionAnnotation)] {
-        guard let doc = pdfView.document else { return [] }
-        var out: [(Int, RedactionAnnotation)] = []
-        for i in 0..<doc.pageCount {
-            for a in doc.page(at: i)?.annotations.compactMap({ $0 as? RedactionAnnotation }) ?? []
-            where a.isErase {
-                out.append((i, a))
-            }
-        }
-        return out
-    }
 
-    private func updateEraseCount() {
-        let n = allEraseMarks().count
-        eraseCountLabel.stringValue = n == 0 ? "" : "\(n) mark\(n == 1 ? "" : "s")"
-    }
 
-    @objc private func clearEraseMarks() {
-        let marks = allEraseMarks()
-        guard !marks.isEmpty, let doc = pdfView.document else { return }
-        for (_, a) in marks { a.page?.removeAnnotation(a) }
-        docUndo.registerUndo(withTarget: self) { me in
-            for (i, a) in marks { (me.pdfView.document ?? doc).page(at: i)?.addAnnotation(a) }
-            me.docUndo.registerUndo(withTarget: me) { $0.clearEraseMarks() }
-            me.updateEraseCount()
-            me.pdfView.needsDisplay = true
-        }
-        docUndo.setActionName("Clear Erase Marks")
-        updateEraseCount()
-        forceRefresh()
-    }
 
     // Erase is an EDIT, not an export: affected pages are swapped in place (undoable via
     // page identity), autosave persists into the file, Versions is the deep recovery.
-    @objc private func applyErase() {
-        guard let doc = pdfView.document else { return }
-        let marks = allEraseMarks()
-        guard !marks.isEmpty else {
-            infoAlert("Nothing marked", "Drag over the content you want removed first.")
+    // Instant erase — Keno: "why two steps when it can swoosh away magically."
+    //
+    // Each swipe applies immediately: build the replacement page, verify the target region is
+    // gone AND the rest of the page survived, swap, then dissolve the band over the result.
+    //
+    // 🧨 Repeated swipes must NOT re-rasterize the already-rasterized page — every pass through
+    // JPEG costs quality, and a page swiped five times would visibly rot. Each page keeps a
+    // SESSION (original page + every region so far, keyed by the current derived page object):
+    // a new swipe re-derives from the ORIGINAL with all regions, so the output is always one
+    // compression generation from the source no matter how many swipes land on it. Undo swaps
+    // back to the previous derived page, and the session map keeps entries for both, so
+    // undo/redo and further swipes all stay consistent.
+    private var eraseSessions: [ObjectIdentifier: (original: PDFPage, regions: [CGRect])] = [:]
+
+    func eraseSwiped(_ rect: CGRect, on page: PDFPage, band: NSView) {
+        guard let doc = pdfView.document else { band.removeFromSuperview(); return }
+        let index = doc.index(for: page)
+        guard index != NSNotFound, rect.width >= 2, rect.height >= 2 else {
+            band.removeFromSuperview(); return
+        }
+
+        let session = eraseSessions[ObjectIdentifier(page)] ?? (original: page, regions: [])
+        let regions = session.regions + [rect]
+
+        guard let new = RedactionEngine.destroyedPage(session.original, regions: regions, style: .erase),
+              (new.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              RedactionEngine.preservesContent(original: session.original, replacement: new, regions: regions) else {
+            band.removeFromSuperview()
+            infoAlert("Couldn\u{2019}t erase here", "This area couldn\u{2019}t be removed cleanly — nothing was changed.")
             return
         }
-        var regions: [Int: [CGRect]] = [:]
-        for (i, a) in marks { regions[i, default: []].append(a.bounds) }
 
-        // Build every replacement page BEFORE touching the document, and verify each:
-        // a rasterized page must carry zero extractable text or nothing is swapped.
-        var swaps: [(Int, PDFPage, PDFPage)] = []
-        for (i, rects) in regions {
-            guard let old = doc.page(at: i),
-                  let new = RedactionEngine.destroyedPage(old, regions: rects, style: .erase),
-                  (new.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                infoAlert("Erase NOT applied", "Page \(i + 1) couldn't be verified as fully removed — the document was not modified.")
-                return
-            }
-            // The rest of the page must survive. Without this a blank replacement counted as
-            // success, because "no extractable text" is trivially true of an empty page.
-            guard RedactionEngine.preservesContent(original: old, replacement: new, regions: rects) else {
-                infoAlert("Erase NOT applied",
-                          "Page \(i + 1) came back without the rest of its content, so nothing was changed. "
-                          + "This page may use graphics Jack can't re-render safely.")
-                return
-            }
-            swaps.append((i, old, new))
-        }
-        for (_, a) in marks { a.page?.removeAnnotation(a) }   // marks are consumed
-        for (i, _, new) in swaps {
-            doc.removePage(at: i)
-            doc.insert(new, at: i)
-        }
-        registerPermanentCropUndo(swaps, restoreOld: true, name: "Erase")
-        updateEraseCount()
+        doc.removePage(at: index)
+        doc.insert(new, at: index)
+        eraseSessions[ObjectIdentifier(new)] = (session.original, regions)
+        registerPermanentCropUndo([(index, page, new)], restoreOld: true, name: "Erase")
         sidebar.reload()
         forceRefresh()
-        setErase(on: false)   // done editing — hand the page back for logo drops etc.
-        NSSound(named: "Glass")?.play()
-        flashSubtitle("Erased — drop an image to fill the space, ⌘Z to undo")
+        markDirty()
+
+        // The page underneath is already erased and background-matched — fading the band is
+        // the reveal, not an effect painted over the truth.
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.28
+            band.animator().alphaValue = 0
+        }, completionHandler: { band.removeFromSuperview() })
+        flashSubtitle("Erased — \u{2318}Z brings it back, drop an image to fill the space")
     }
+
 
     // MARK: - Form mode (drag-and-drop fillable fields; Word-simple, AcroForm underneath)
 
@@ -1520,7 +1477,6 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         docUndo.registerUndo(withTarget: self) { $0.removeRedactionMark(ann) }
         docUndo.setActionName("Mark Redaction")
         updateRedactCount()
-        updateEraseCount()
         forceRefresh()
     }
 
@@ -1529,7 +1485,6 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         docUndo.registerUndo(withTarget: self) { $0.removeRedactionMark(ann) }
         docUndo.setActionName("Mark Redaction")
         updateRedactCount()
-        updateEraseCount()
         if refresh { forceRefresh() }
     }
 
@@ -1539,7 +1494,6 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         docUndo.registerUndo(withTarget: self) { $0.addRedactionMark(ann, to: page) }
         docUndo.setActionName("Mark Redaction")
         updateRedactCount()
-        updateEraseCount()
         forceRefresh()   // custom-annotation removal needs a forced repaint
     }
 
