@@ -105,6 +105,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSDocumentController.shared.autosavingDelay = 30
         setupStatusItem()
         setupPopover()
+        NSApp.servicesProvider = self
+        NSUpdateDynamicServices()
         configureLoginOnFirstRun()
         enforceDefaultIfWanted()
         MainMenu.install(newAction: #selector(newDocumentAction),
@@ -113,6 +115,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                          updateAction: #selector(checkUpdatesAction),
                          target: self)
         checkForUpdate()
+        // Dev/CLI launches pass files as argv; AppKit only auto-delivers SOME types that
+        // way (PDF yes, docx no — probed). LaunchServices launches use open-urls, so this
+        // fallback fires only when nothing was delivered.
+        let argvFiles = CommandLine.arguments.dropFirst()
+            .map { URL(fileURLWithPath: $0) }
+            .filter { FileManager.default.fileExists(atPath: $0.path) }
+        if !argvFiles.isEmpty {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                guard let self, !self.didHandleOpen else { return }
+                self.didHandleOpen = true
+                self.route(Array(argvFiles))
+            }
+        }
         // Show the launcher ONCE on the very first launch (discoverability) — never again.
         // After that, the menu bar icon is the way in.
         let shownKey = "jack.launcherShown"
@@ -143,6 +158,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             openBatch(folder)
             return
         }
+        // Word/RTF/text convert to PDF (JC's ask); spreadsheets get the honest refusal.
+        let convertibles = urls.filter(ConvertEngine.isConvertible)
+        let refused = urls.filter(ConvertEngine.isRefused)
+        if !convertibles.isEmpty || !refused.isEmpty {
+            convertFiles(convertibles, refused: refused)
+            let rest = urls.filter { !ConvertEngine.isConvertible($0) && !ConvertEngine.isRefused($0) }
+            if rest.isEmpty { return }
+            route(rest)
+            return
+        }
         let pdfs = urls.filter(isPDFURL)
         let images = urls.filter(isImageURL)
         if pdfs.count == 1 && images.isEmpty {
@@ -154,6 +179,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             showPopover()
         }
+    }
+
+    /// Convert each source beside itself; a single result opens straight in Jack,
+    /// several get revealed in Finder. Failures are reported plainly, never silently.
+    private func convertFiles(_ sources: [URL], refused: [URL]) {
+        for r in refused {
+            infoAlert("Can\u{2019}t convert \(r.lastPathComponent)",
+                      ConvertEngine.ConvertError.unsupported(r.pathExtension.lowercased()).localizedDescription)
+        }
+        var outputs: [URL] = []
+        var failures: [String] = []
+        for src in sources {
+            do { outputs.append(try ConvertEngine.convertToPDF(src)) }
+            catch { failures.append("\(src.lastPathComponent) — \(error.localizedDescription)") }
+        }
+        if !failures.isEmpty {
+            infoAlert("Some files couldn\u{2019}t be converted", failures.joined(separator: "\n"))
+        }
+        if outputs.count == 1 {
+            openDocument(outputs[0])
+        } else if !outputs.isEmpty {
+            NSWorkspace.shared.activateFileViewerSelecting(outputs)
+        }
+    }
+
+    // Finder right-click → Services → "Convert to PDF with Jack".
+    @objc func convertService(_ pboard: NSPasteboard, userData: String,
+                              error: AutoreleasingUnsafeMutablePointer<NSString>) {
+        let urls = (pboard.readObjects(forClasses: [NSURL.self],
+            options: [.urlReadingFileURLsOnly: true]) as? [URL]) ?? []
+        guard !urls.isEmpty else { return }
+        DispatchQueue.main.async { [weak self] in self?.route(urls) }
     }
 
     // MARK: - Menu bar item & popover

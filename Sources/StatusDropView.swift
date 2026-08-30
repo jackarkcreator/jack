@@ -16,7 +16,7 @@ final class StatusDropView: NSView {
     private func urls(_ sender: NSDraggingInfo) -> [URL] {
         (sender.draggingPasteboard.readObjects(forClasses: [NSURL.self],
             options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? [])
-            .filter { isPDFURL($0) || isImageURL($0) }
+            .filter { isPDFURL($0) || isImageURL($0) || ConvertEngine.isConvertible($0) || ConvertEngine.isRefused($0) }
     }
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
         urls(sender).isEmpty ? [] : .copy
