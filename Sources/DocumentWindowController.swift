@@ -95,7 +95,6 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     private var redactOn = false
     private var redactAccessory: NSTitlebarAccessoryViewController?
     private var redactButton: NSButton?
-    private let redactCountLabel = NSTextField(labelWithString: "")
     private let redactTermField = NSTextField()
     private var redactedTerms: Set<String> = []   // fed to the verify pass as forbidden terms
 
@@ -1022,7 +1021,6 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             acc.layoutAttribute = .bottom
             window.addTitlebarAccessoryViewController(acc)
             redactAccessory = acc
-            updateRedactCount()
         } else {
             redactAccessory?.removeFromParent()
             redactAccessory = nil
@@ -1032,7 +1030,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     private func buildRedactStrip(width: CGFloat) -> NSView {
         let strip = ToolStripView(frame: NSRect(x: 0, y: 0, width: width, height: 40))
 
-        let hint = NSTextField(labelWithString: "Drag over anything to mark it for redaction")
+        let hint = NSTextField(labelWithString: "Drag over anything — the black bar lands when you let go. \u{2318}Z undoes.")
         hint.textColor = .secondaryLabelColor
         hint.font = .systemFont(ofSize: 11)
         hint.frame = NSRect(x: 12, y: 12, width: 250, height: 16)
@@ -1045,32 +1043,14 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         redactTermField.action = #selector(redactAllMatches)
         strip.addSubview(redactTermField)
 
-        let all = NSButton(title: "Mark All", target: self, action: #selector(redactAllMatches))
+        let all = NSButton(title: "Redact All", target: self, action: #selector(redactAllMatches))
         all.bezelStyle = .rounded
         all.controlSize = .small
         all.frame = NSRect(x: 474, y: 7, width: 78, height: 26)
         strip.addSubview(all)
 
-        redactCountLabel.textColor = .secondaryLabelColor
-        redactCountLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-        redactCountLabel.frame = NSRect(x: 560, y: 12, width: 90, height: 16)
-        strip.addSubview(redactCountLabel)
 
-        let clear = NSButton(title: "Clear Marks", target: self, action: #selector(clearRedactionMarks))
-        clear.bezelStyle = .rounded
-        clear.controlSize = .small
-        clear.frame = NSRect(x: 0, y: 7, width: 100, height: 26)
-        strip.addSubview(clear)
-        strip.anchorRight(clear, gap: 168)
-
-        let apply = NSButton(title: "Apply Redactions…", target: self, action: #selector(applyRedactions))
-        apply.bezelStyle = .rounded
-        apply.controlSize = .small
-        apply.keyEquivalent = "\r"
-        apply.frame = NSRect(x: 0, y: 7, width: 148, height: 26)
-        strip.addSubview(apply)
-        strip.anchorRight(apply, gap: 12)
-
+        // No Apply, no Clear: the bar lands on mouse-up; ⌘Z is the way back.
         return strip
     }
 
@@ -1128,41 +1108,53 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     // compression generation from the source no matter how many swipes land on it. Undo swaps
     // back to the previous derived page, and the session map keeps entries for both, so
     // undo/redo and further swipes all stay consistent.
-    private var eraseSessions: [ObjectIdentifier: (original: PDFPage, regions: [CGRect])] = [:]
+    private var paintSessions: [ObjectIdentifier: (original: PDFPage, paints: [(rect: CGRect, style: RedactionEngine.Style)])] = [:]
 
-    func eraseSwiped(_ rect: CGRect, on page: PDFPage, band: NSView) {
+    func regionSwiped(_ rect: CGRect, on page: PDFPage, band: NSView, erase: Bool) {
         guard let doc = pdfView.document else { band.removeFromSuperview(); return }
         let index = doc.index(for: page)
         guard index != NSNotFound, rect.width >= 2, rect.height >= 2 else {
             band.removeFromSuperview(); return
         }
+        let style: RedactionEngine.Style = erase ? .erase : .blackout
+        let session = paintSessions[ObjectIdentifier(page)] ?? (original: page, paints: [])
+        let paints = session.paints + [(rect, style)]
 
-        let session = eraseSessions[ObjectIdentifier(page)] ?? (original: page, regions: [])
-        let regions = session.regions + [rect]
-
-        guard let new = RedactionEngine.destroyedPage(session.original, regions: regions, style: .erase),
+        guard let new = RedactionEngine.destroyedPage(session.original, paints: paints),
               (new.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              RedactionEngine.preservesContent(original: session.original, replacement: new, regions: regions) else {
+              RedactionEngine.preservesContent(original: session.original, replacement: new,
+                                               regions: paints.map { $0.rect }) else {
             band.removeFromSuperview()
-            infoAlert("Couldn\u{2019}t erase here", "This area couldn\u{2019}t be removed cleanly — nothing was changed.")
+            infoAlert(erase ? "Couldn\u{2019}t erase here" : "Couldn\u{2019}t redact here",
+                      "This area couldn\u{2019}t be removed cleanly — nothing was changed.")
             return
         }
 
         doc.removePage(at: index)
         doc.insert(new, at: index)
-        eraseSessions[ObjectIdentifier(new)] = (session.original, regions)
-        registerPermanentCropUndo([(index, page, new)], restoreOld: true, name: "Erase")
+        paintSessions[ObjectIdentifier(new)] = (session.original, paints)
+        docUndo.beginUndoGrouping()
+        registerPermanentCropUndo([(index, page, new)], restoreOld: true, name: erase ? "Erase" : "Redact")
+        if !erase {
+            // The save-time certificate must describe exactly what the document carries —
+            // and stop claiming it if the swipe is undone.
+            registerRedactionLogUndo(pages: [index], regions: 1, adding: true)
+            redactedPageLog.insert(index)
+            redactedRegionCount += 1
+        }
+        docUndo.endUndoGrouping()
         sidebar.reload()
         forceRefresh()
         markDirty()
 
-        // The page underneath is already erased and background-matched — fading the band is
-        // the reveal, not an effect painted over the truth.
+        // The page underneath is already painted — fading the band is the reveal, not an
+        // effect painted over the truth.
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = 0.28
             band.animator().alphaValue = 0
         }, completionHandler: { band.removeFromSuperview() })
-        flashSubtitle("Erased — \u{2318}Z brings it back, drop an image to fill the space")
+        flashSubtitle(erase ? "Erased — \u{2318}Z brings it back, drop an image to fill the space"
+                            : "Redacted — a verification certificate saves alongside on \u{2318}S. \u{2318}Z undoes")
     }
 
 
@@ -1480,134 +1472,70 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
 
     // From SigningPDFView after a rubber-band gesture: the mark exists — make it undoable
     // and force the repaint (PDFView's page cache doesn't reliably show annotation adds).
-    func redactionAdded(_ ann: RedactionAnnotation) {
-        docUndo.registerUndo(withTarget: self) { $0.removeRedactionMark(ann) }
-        docUndo.setActionName("Mark Redaction")
-        updateRedactCount()
-        forceRefresh()
-    }
 
-    private func addRedactionMark(_ ann: RedactionAnnotation, to page: PDFPage, refresh: Bool = true) {
-        page.addAnnotation(ann)
-        docUndo.registerUndo(withTarget: self) { $0.removeRedactionMark(ann) }
-        docUndo.setActionName("Mark Redaction")
-        updateRedactCount()
-        if refresh { forceRefresh() }
-    }
 
-    private func removeRedactionMark(_ ann: RedactionAnnotation) {
-        guard let page = ann.page else { return }
-        page.removeAnnotation(ann)
-        docUndo.registerUndo(withTarget: self) { $0.addRedactionMark(ann, to: page) }
-        docUndo.setActionName("Mark Redaction")
-        updateRedactCount()
-        forceRefresh()   // custom-annotation removal needs a forced repaint
-    }
 
-    private func allRedactionMarks() -> [(Int, RedactionAnnotation)] {
-        guard let doc = pdfView.document else { return [] }
-        var out: [(Int, RedactionAnnotation)] = []
-        for i in 0..<doc.pageCount {
-            for a in doc.page(at: i)?.annotations.compactMap({ $0 as? RedactionAnnotation }) ?? []
-            where !a.isErase {
-                out.append((i, a))
-            }
-        }
-        return out
-    }
 
-    private func updateRedactCount() {
-        let n = allRedactionMarks().count
-        redactCountLabel.stringValue = n == 0 ? "" : "\(n) mark\(n == 1 ? "" : "s")"
-    }
 
     @objc private func redactAllMatches() {
         let term = redactTermField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !term.isEmpty, let doc = pdfView.document else { return }
         let found = doc.findString(term, withOptions: [.caseInsensitive])
-        guard !found.isEmpty else { infoAlert("No matches", "“\(term)” wasn’t found in the document."); return }
+        guard !found.isEmpty else { infoAlert("No matches", "\u{201C}\(term)\u{201D} wasn\u{2019}t found in the document."); return }
+
+        // Group matches by page index, then apply each page ONCE — all its bars in a single
+        // derivation, the whole term as a single undo step.
+        var byPage: [Int: [CGRect]] = [:]
         for sel in found {
             for page in sel.pages {
+                let i = doc.index(for: page)
+                guard i != NSNotFound else { continue }
                 let r = sel.bounds(for: page).insetBy(dx: -2, dy: -2)
-                guard r.width > 0, r.height > 0 else { continue }
-                addRedactionMark(RedactionAnnotation(bounds: r), to: page, refresh: false)
+                if r.width > 0, r.height > 0 { byPage[i, default: []].append(r) }
             }
         }
+        var swaps: [(Int, PDFPage, PDFPage)] = []
+        var produced: [(Int, PDFPage, (original: PDFPage, paints: [(rect: CGRect, style: RedactionEngine.Style)]))] = []
+        for (i, rects) in byPage.sorted(by: { $0.key < $1.key }) {
+            guard let page = doc.page(at: i) else { continue }
+            let session = paintSessions[ObjectIdentifier(page)] ?? (original: page, paints: [])
+            let paints = session.paints + rects.map { ($0, RedactionEngine.Style.blackout) }
+            guard let new = RedactionEngine.destroyedPage(session.original, paints: paints),
+                  (new.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  RedactionEngine.preservesContent(original: session.original, replacement: new,
+                                                   regions: paints.map { $0.rect }) else {
+                infoAlert("Redaction NOT applied",
+                          "Page \(i + 1) couldn\u{2019}t be verified — the document was not modified.")
+                return
+            }
+            swaps.append((i, page, new))
+            produced.append((i, new, (session.original, paints)))
+        }
+        for (i, _, new) in swaps { doc.removePage(at: i); doc.insert(new, at: i) }
+        for (_, new, session) in produced { paintSessions[ObjectIdentifier(new)] = session }
+        let pages = swaps.map { $0.0 }
+        let regionCount = byPage.values.reduce(0) { $0 + $1.count }
+        docUndo.beginUndoGrouping()
+        registerPermanentCropUndo(swaps, restoreOld: true, name: "Redact \u{201C}\(term)\u{201D}")
+        registerRedactionLogUndo(pages: pages, regions: regionCount, adding: true)
+        docUndo.endUndoGrouping()
+        redactedPageLog.formUnion(pages)
+        redactedRegionCount += regionCount
         redactedTerms.insert(term)
         redactTermField.stringValue = ""
+        sidebar.reload()
         forceRefresh()
+        markDirty()
+        NSSound(named: "Glass")?.play()
+        flashSubtitle("Redacted \(regionCount) occurrence\(regionCount == 1 ? "" : "s") of \u{201C}\(term)\u{201D} across \(pages.count) page\(pages.count == 1 ? "" : "s") — \u{2318}Z undoes")
     }
 
-    @objc private func clearRedactionMarks() {
-        let marks = allRedactionMarks()
-        guard !marks.isEmpty, let doc = pdfView.document else { return }
-        for (_, a) in marks { a.page?.removeAnnotation(a) }
-        docUndo.registerUndo(withTarget: self) { me in
-            for (i, a) in marks { (me.pdfView.document ?? doc).page(at: i)?.addAnnotation(a) }
-            me.docUndo.registerUndo(withTarget: me) { $0.clearRedactionMarks() }
-            me.updateRedactCount()
-            me.pdfView.needsDisplay = true
-        }
-        docUndo.setActionName("Clear Redaction Marks")
-        updateRedactCount()
-        forceRefresh()
-    }
 
     // v2.5: Apply Redactions is an EDIT, not an export — the same discipline as Apply Erase.
     // Every replacement page is built and VERIFIED to carry zero extractable text BEFORE the
     // document is touched; a single failure leaves the document completely unmodified. The
     // verification certificate is emitted at SAVE time, so it hashes the file actually shipped
     // rather than an intermediate the user never sees.
-    @objc private func applyRedactions() {
-        guard let doc = pdfView.document else { return }
-        let marks = allRedactionMarks()
-        guard !marks.isEmpty else {
-            infoAlert("Nothing marked", "Drag over content (or use \u{201C}Redact every occurrence of\u{2026}\u{201D}) to mark it first.")
-            return
-        }
-        var regions: [Int: [CGRect]] = [:]
-        for (i, a) in marks { regions[i, default: []].append(a.bounds) }
-
-        var swaps: [(Int, PDFPage, PDFPage)] = []
-        for (i, rects) in regions.sorted(by: { $0.key < $1.key }) {
-            guard let old = doc.page(at: i),
-                  let new = RedactionEngine.destroyedPage(old, regions: rects, style: .blackout),
-                  (new.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                infoAlert("Redaction NOT applied",
-                          "Page \(i + 1) couldn\u{2019}t be verified as fully removed — the document was not modified.")
-                return
-            }
-            guard RedactionEngine.preservesContent(original: old, replacement: new, regions: rects) else {
-                infoAlert("Redaction NOT applied",
-                          "Page \(i + 1) came back without the rest of its content, so nothing was changed.")
-                return
-            }
-            swaps.append((i, old, new))
-        }
-
-        for (_, a) in marks { a.page?.removeAnnotation(a) }   // marks are consumed
-        for (i, _, new) in swaps {
-            doc.removePage(at: i)
-            doc.insert(new, at: i)
-        }
-
-        let pages = swaps.map { $0.0 }
-        // One ⌘Z undoes the page swap AND the certificate log together.
-        docUndo.beginUndoGrouping()
-        registerPermanentCropUndo(swaps, restoreOld: true, name: "Redact")
-        registerRedactionLogUndo(pages: pages, regions: marks.count, adding: true)
-        docUndo.endUndoGrouping()
-        redactedPageLog.formUnion(pages)
-        redactedRegionCount += marks.count
-
-        updateRedactCount()
-        sidebar.reload()
-        forceRefresh()
-        setRedact(on: false)
-        NSSound(named: "Glass")?.play()
-        let n = pages.count
-        flashSubtitle("Redacted \(n) page\(n == 1 ? "" : "s") — 0 recoverable characters. ⌘S to save; a certificate saves alongside.")
-    }
 
     // Keeps the certificate log in step with undo/redo, so ⌘Z after a redaction does not leave
     // Jack claiming a redaction the document no longer carries.

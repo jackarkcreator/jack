@@ -63,8 +63,13 @@ enum RedactionEngine {
     /// Erase path. Same rasterize discipline as apply(); the caller swaps it into the live
     /// document (undoable via page identity) and autosave persists it.
     static func destroyedPage(_ page: PDFPage, regions: [CGRect], style: Style) -> PDFPage? {
-        guard let img = rasterized(page: page, blackout: regions, fill: style.fill,
-                                   sampleBackground: style.samplesBackground) else { return nil }
+        destroyedPage(page, paints: regions.map { ($0, style) })
+    }
+
+    /// Mixed-style variant: one page can carry erase swipes AND redaction bars in a single
+    /// derivation, so a session that accumulates both still costs one compression generation.
+    static func destroyedPage(_ page: PDFPage, paints: [(rect: CGRect, style: Style)]) -> PDFPage? {
+        guard let img = rasterizedMixed(page: page, paints: paints) else { return nil }
         var box = page.bounds(for: .mediaBox)
         box.origin = .zero
         let data = NSMutableData()
@@ -169,8 +174,19 @@ enum RedactionEngine {
     // Render the page to a JPEG-backed CGImage with the redaction rects filled solid black.
     // Redaction overlays and stamps are handled explicitly so nothing depends on custom
     // annotation subclasses drawing themselves through page.draw.
+    private static func rasterizedMixed(page: PDFPage, paints: [(rect: CGRect, style: Style)]) -> CGImage? {
+        rasterized(page: page, paints: paints)
+    }
+
     private static func rasterized(page: PDFPage, blackout: [CGRect], fill: NSColor = .black,
                                    sampleBackground: Bool = false) -> CGImage? {
+        rasterized(page: page,
+                   paints: blackout.map { ($0, sampleBackground ? Style.erase : Style.blackout) },
+                   uniformFill: sampleBackground ? nil : fill)
+    }
+
+    private static func rasterized(page: PDFPage, paints: [(rect: CGRect, style: Style)],
+                                   uniformFill: NSColor? = nil) -> CGImage? {
         let box = page.bounds(for: .mediaBox)
         let w = Int(box.width * rasterScale), h = Int(box.height * rasterScale)
         guard w > 0, h > 0,
@@ -211,14 +227,19 @@ enum RedactionEngine {
         overlays.forEach { page.addAnnotation($0) }   // keep the on-screen doc intact
 
         // Sample BEFORE painting: the bitmap currently holds the rendered page, so the ring
-        // just outside each region is the real background behind it.
-        let fills: [NSColor] = blackout.map { r in
-            guard sampleBackground else { return fill }
-            return backgroundColor(around: r, in: rep, pageBox: box, scale: rasterScale) ?? fill
+        // just outside each region is the real background behind it. Blackout always paints
+        // solid black — a redaction bar is a legal convention and must stay visible.
+        let fills: [NSColor] = paints.map { paint in
+            switch paint.style {
+            case .blackout: return uniformFill ?? .black
+            case .erase:
+                return backgroundColor(around: paint.rect, in: rep, pageBox: box, scale: rasterScale)
+                    ?? uniformFill ?? .white
+            }
         }
-        for (r, c) in zip(blackout, fills) {
+        for (paint, c) in zip(paints, fills) {
             cg.setFillColor(c.cgColor)
-            cg.fill(r)
+            cg.fill(paint.rect)
         }
         cg.restoreGState()
 
