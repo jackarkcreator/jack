@@ -1130,8 +1130,10 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             return
         }
 
-        doc.removePage(at: index)
-        doc.insert(new, at: index)
+        withPreservedPosition(anchorIndex: index) {
+            doc.removePage(at: index)
+            doc.insert(new, at: index)
+        }
         paintSessions[ObjectIdentifier(new)] = (session.original, paints)
         docUndo.beginUndoGrouping()
         registerPermanentCropUndo([(index, page, new)], restoreOld: true, name: erase ? "Erase" : "Redact")
@@ -1144,7 +1146,6 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         }
         docUndo.endUndoGrouping()
         sidebar.reload()
-        forceRefresh()
         markDirty()
 
         // The page underneath is already painted — fading the band is the reveal, not an
@@ -1511,7 +1512,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             swaps.append((i, page, new))
             produced.append((i, new, (session.original, paints)))
         }
-        for (i, _, new) in swaps { doc.removePage(at: i); doc.insert(new, at: i) }
+        withPreservedPosition(anchorIndex: swaps.first?.0) {
+            for (i, _, new) in swaps { doc.removePage(at: i); doc.insert(new, at: i) }
+        }
         for (_, new, session) in produced { paintSessions[ObjectIdentifier(new)] = session }
         let pages = swaps.map { $0.0 }
         let regionCount = byPage.values.reduce(0) { $0 + $1.count }
@@ -1524,7 +1527,6 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         redactedTerms.insert(term)
         redactTermField.stringValue = ""
         sidebar.reload()
-        forceRefresh()
         markDirty()
         NSSound(named: "Glass")?.play()
         flashSubtitle("Redacted \(regionCount) occurrence\(regionCount == 1 ? "" : "s") of \u{201C}\(term)\u{201D} across \(pages.count) page\(pages.count == 1 ? "" : "s") — \u{2318}Z undoes")
@@ -1730,11 +1732,12 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             infoAlert("Couldn\u{2019}t retype here", "This span couldn\u{2019}t be removed cleanly, so nothing was changed.")
             return
         }
-        doc.removePage(at: index)
-        doc.insert(new, at: index)
+        withPreservedPosition(anchorIndex: index) {
+            doc.removePage(at: index)
+            doc.insert(new, at: index)
+        }
         registerPermanentCropUndo([(index, page, new)], restoreOld: true, name: "Retype")
         sidebar.reload()
-        forceRefresh()
         lastSelection = nil
         markDirty()
 
@@ -2041,46 +2044,47 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     // Dirty state and autosave flow from undo registrations on the document's undo manager.
     private func markEdited() {}
 
-    // Tahoe's PDFView render cache misses annotation adds/removes, so mutations force a
-    // repaint by reassigning the document. That reassignment resets scroll and zoom — and
-    // `go(to: page)` only put the user back at the TOP of the page, so every apply/undo made
-    // the document visibly lurch. Capture the exact destination (by page INDEX — the page
-    // object itself may just have been swapped out) and zoom, and put the reader back where
-    // they were. Editing must never feel like it moved the page.
-    private func forceRefresh() {
-        let doc = pdfView.document
+    /// THE position law: every mutation of the displayed document goes through here.
+    ///
+    /// Capture the reading position BEFORE the mutation (PDFView reacts to removePage/insert
+    /// on its live document, so capturing afterwards reads an already-disturbed view), run the
+    /// mutation, bust Tahoe's render cache by reassigning the document, restore — and then
+    /// RE-ASSERT the restore on the next two runloop turns, because PDFKit queues relayouts
+    /// (auto-fit, notification handlers) that can move the view after our synchronous restore
+    /// returns. `anchorIndex` is the page the user actually edited: if the captured
+    /// destination is unusable, the view stays on that page — never "some other page".
+    private func withPreservedPosition(anchorIndex: Int? = nil, _ mutate: () -> Void) {
         let scale = pdfView.scaleFactor
         let autoScales = pdfView.autoScales
         var destIndex: Int?
         var destPoint = CGPoint.zero
-        if let dest = pdfView.currentDestination, let p = dest.page, let d = doc {
+        if let dest = pdfView.currentDestination, let p = dest.page, let d = pdfView.document {
             let i = d.index(for: p)
-            if i != NSNotFound {
-                destIndex = i; destPoint = dest.point
-            } else {
-                // The viewed page object was just swapped out (erase/redact/retype). Its
-                // replacement sits at the index we were on — restore there, same point.
-                destIndex = min(lastKnownPageIndex, max(0, (d.pageCount) - 1))
-                destPoint = dest.point
-            }
+            destIndex = i != NSNotFound ? i : (anchorIndex ?? lastKnownPageIndex)
+            destPoint = dest.point
+        } else {
+            destIndex = anchorIndex ?? lastKnownPageIndex
         }
-        let fallbackPage = pdfView.currentPage
 
+        mutate()
+
+        let doc = pdfView.document
         pdfView.document = nil
         pdfView.document = doc
-
-        if autoScales {
-            pdfView.autoScales = true
-        } else {
-            pdfView.scaleFactor = scale
+        let restore: () -> Void = { [weak self] in
+            guard let self, let doc = self.pdfView.document else { return }
+            if autoScales { self.pdfView.autoScales = true } else { self.pdfView.scaleFactor = scale }
+            if let i = destIndex, let page = doc.page(at: min(i, max(0, doc.pageCount - 1))) {
+                self.pdfView.go(to: PDFDestination(page: page, at: destPoint))
+            }
         }
-        if let i = destIndex, let page = doc?.page(at: i) {
-            pdfView.go(to: PDFDestination(page: page, at: destPoint))
-        } else if let page = fallbackPage, page.document != nil {
-            pdfView.go(to: page)
-        }
+        restore()
+        DispatchQueue.main.async(execute: restore)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: restore)
         pageChanged()
     }
+
+    private func forceRefresh() { withPreservedPosition {} }
 
     // MARK: - Save (flatten stamps + form values, keep the original file untouched)
 
@@ -2498,12 +2502,13 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             return
         }
 
-        doc.removePage(at: index)
-        doc.insert(cleaned, at: index)
+        withPreservedPosition(anchorIndex: index) {
+            doc.removePage(at: index)
+            doc.insert(cleaned, at: index)
+        }
         registerPermanentCropUndo([(index, page, cleaned)], restoreOld: true, name: "Remove Object")
         lastImageHit = nil
         sidebar.reload()
-        forceRefresh()
         NSSound(named: "Glass")?.play()
         flashSubtitle("Object removed — background and text untouched, ⌘Z to undo")
     }
@@ -2709,13 +2714,14 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     private func registerPermanentCropUndo(_ swaps: [(Int, PDFPage, PDFPage)], restoreOld: Bool, name: String) {
         docUndo.registerUndo(withTarget: self) { me in
             guard let doc = me.pdfView.document else { return }
-            for (i, old, new) in swaps {
-                doc.removePage(at: i)
-                doc.insert(restoreOld ? old : new, at: i)
+            me.withPreservedPosition(anchorIndex: swaps.first?.0) {
+                for (i, old, new) in swaps {
+                    doc.removePage(at: i)
+                    doc.insert(restoreOld ? old : new, at: i)
+                }
             }
             me.registerPermanentCropUndo(swaps, restoreOld: !restoreOld, name: name)
             me.sidebar.reload()
-            me.forceRefresh()
         }
         docUndo.setActionName(name)
     }
@@ -2782,13 +2788,14 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             swaps.append((i, old, new))
         }
         guard !swaps.isEmpty else { return true }
-        for (i, _, new) in swaps {
-            doc.removePage(at: i)
-            doc.insert(new, at: i)
+        withPreservedPosition(anchorIndex: swaps.first?.0) {
+            for (i, _, new) in swaps {
+                doc.removePage(at: i)
+                doc.insert(new, at: i)
+            }
         }
         registerPermanentCropUndo(swaps, restoreOld: true, name: name)
         sidebar.reload()
-        forceRefresh()
         return true
     }
 
