@@ -1115,6 +1115,14 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
                 infoAlert("Erase NOT applied", "Page \(i + 1) couldn't be verified as fully removed — the document was not modified.")
                 return
             }
+            // The rest of the page must survive. Without this a blank replacement counted as
+            // success, because "no extractable text" is trivially true of an empty page.
+            guard RedactionEngine.preservesContent(original: old, replacement: new, regions: rects) else {
+                infoAlert("Erase NOT applied",
+                          "Page \(i + 1) came back without the rest of its content, so nothing was changed. "
+                          + "This page may use graphics Jack can't re-render safely.")
+                return
+            }
             swaps.append((i, old, new))
         }
         for (_, a) in marks { a.page?.removeAnnotation(a) }   // marks are consumed
@@ -1543,6 +1551,11 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
                   (new.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 infoAlert("Redaction NOT applied",
                           "Page \(i + 1) couldn\u{2019}t be verified as fully removed — the document was not modified.")
+                return
+            }
+            guard RedactionEngine.preservesContent(original: old, replacement: new, regions: rects) else {
+                infoAlert("Redaction NOT applied",
+                          "Page \(i + 1) came back without the rest of its content, so nothing was changed.")
                 return
             }
             swaps.append((i, old, new))

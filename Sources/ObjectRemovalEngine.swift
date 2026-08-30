@@ -63,6 +63,11 @@ enum ObjectRemovalEngine {
             $0.pixelWidth == target.pixelWidth && $0.pixelHeight == target.pixelHeight &&
             abs($0.rect.minX - target.rect.minX) < 1 && abs($0.rect.minY - target.rect.minY) < 1
         }) else { return nil }
+        // 🧨 And the REST of the page must still be there. Checking only that the image left
+        // would accept a page that came back completely blank — an empty page trivially
+        // satisfies "the image is gone".
+        guard RedactionEngine.preservesContent(original: page, replacement: outPage,
+                                               regions: [image.rect]) else { return nil }
         return outPage
     }
 

@@ -63,8 +63,17 @@ enum RedactionEngine {
     /// Erase path. Same rasterize discipline as apply(); the caller swaps it into the live
     /// document (undoable via page identity) and autosave persists it.
     static func destroyedPage(_ page: PDFPage, regions: [CGRect], style: Style) -> PDFPage? {
-        guard let img = rasterized(page: page, blackout: regions, fill: style.fill,
-                                   sampleBackground: style.samplesBackground) else { return nil }
+        // Retry a blank raster before using it: see contentSignal — page rendering is racy, and
+        // baking a transiently-empty render into the document is exactly how pages went blank.
+        var img = rasterized(page: page, blackout: regions, fill: style.fill,
+                             sampleBackground: style.samplesBackground)
+        if img != nil, contentSignal(of: page, excluding: regions) > 200 {
+            for _ in 0..<2 where rasterIsBlank(img!) {
+                img = rasterized(page: page, blackout: regions, fill: style.fill,
+                                 sampleBackground: style.samplesBackground)
+            }
+        }
+        guard let img else { return nil }
         var box = page.bounds(for: .mediaBox)
         box.origin = .zero
         let data = NSMutableData()
@@ -79,6 +88,81 @@ enum RedactionEngine {
         ctx.endPDFPage()
         ctx.closePDF()
         return PDFDocument(data: data as Data)?.page(at: 0)
+    }
+
+    /// How much ink a page carries outside the regions being changed. This is the check that
+    /// was missing: every destructive operation verified that the TARGET was gone, and none
+    /// verified that THE REST OF THE PAGE SURVIVED — so a replacement page that came back
+    /// completely blank passed as a success and was written to the user's file.
+    ///
+    /// Sampled, not exact: we only need "did the page's content collapse", not a pixel count.
+    static func inkLevel(of page: PDFPage, excluding: [CGRect] = []) -> Int {
+        let box = page.bounds(for: .mediaBox)
+        guard box.width >= 1, box.height >= 1,
+              let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(box.width),
+                                         pixelsHigh: Int(box.height), bitsPerSample: 8,
+                                         samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                         colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
+              let gctx = NSGraphicsContext(bitmapImageRep: rep) else { return -1 }
+        let cg = gctx.cgContext
+        cg.setFillColor(NSColor.white.cgColor)
+        cg.fill(CGRect(origin: .zero, size: box.size))
+        cg.translateBy(x: -box.origin.x, y: -box.origin.y)
+        page.draw(with: .mediaBox, to: cg)
+        var n = 0
+        for x in stride(from: 0, to: rep.pixelsWide, by: 4) {
+            for y in stride(from: 0, to: rep.pixelsHigh, by: 4) {
+                let pt = CGPoint(x: box.origin.x + CGFloat(x),
+                                 y: box.origin.y + CGFloat(rep.pixelsHigh - 1 - y))
+                if excluding.contains(where: { $0.insetBy(dx: -4, dy: -4).contains(pt) }) { continue }
+                if let c = rep.colorAt(x: x, y: y), c.brightnessComponent < 0.98 { n += 1 }
+            }
+        }
+        return n
+    }
+
+    /// 🧨 Rendering a PDF page is NOT deterministic. The same page, same file, same code has
+    /// been observed returning a fully blank raster one moment and 8017 inked pixels the next —
+    /// a font/resource loading race inside PDFKit/CoreGraphics. That is what produced blank
+    /// pages in saved documents: an operation rasterized during a blank moment and persisted it.
+    ///
+    /// So a zero is never trusted on a page that demonstrably HAS content: re-render before
+    /// believing it. Cheap, because it only happens when the first read looks empty.
+    static func contentSignal(of page: PDFPage, excluding: [CGRect] = []) -> Int {
+        var ink = inkLevel(of: page, excluding: excluding)
+        guard ink <= 200 else { return ink }
+        let hasText = !((page.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        let hasImages = !ImageHitEngine.images(on: page).isEmpty
+        guard hasText || hasImages else { return ink }   // genuinely an empty page
+        for _ in 0..<2 {
+            ink = max(ink, inkLevel(of: page, excluding: excluding))
+            if ink > 200 { break }
+        }
+        return ink
+    }
+
+    /// True when `replacement` still carries the content `original` had outside `regions`.
+    /// A page that had content and comes back empty is a failed operation, never a success.
+    static func preservesContent(original: PDFPage, replacement: PDFPage, regions: [CGRect]) -> Bool {
+        let before = contentSignal(of: original, excluding: regions)
+        guard before > 200 else { return true }        // page was already near-blank; nothing to lose
+        let after = contentSignal(of: replacement, excluding: regions)
+        return after >= before / 2
+    }
+
+    /// Is this rendered page image essentially empty?
+    private static func rasterIsBlank(_ img: CGImage) -> Bool {
+        guard let rep = NSBitmapImageRep(cgImage: img) as NSBitmapImageRep? else { return false }
+        var n = 0
+        for x in stride(from: 0, to: rep.pixelsWide, by: 8) {
+            for y in stride(from: 0, to: rep.pixelsHigh, by: 8) {
+                if let c = rep.colorAt(x: x, y: y), c.brightnessComponent < 0.98 {
+                    n += 1
+                    if n > 50 { return false }
+                }
+            }
+        }
+        return true
     }
 
     /// Adversarial check of an APPLIED file. Returns human-readable issues; empty == verified.

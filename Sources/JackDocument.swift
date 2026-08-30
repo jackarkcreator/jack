@@ -40,8 +40,19 @@ final class JackDocument: NSDocument {
     /// Set only while routing a first save through the save panel, to seed the "-edited" name.
     private var pendingCopyName: String?
 
-    /// True while the open file is still someone else's untouched original.
-    var protectsOriginal: Bool { fileURL != nil && !isJackProduced && !hasSavedCopy }
+    /// Set by the last build when the written document lost its searchable text.
+    /// 🧨 PDFKit's writer converts text to vector OUTLINES for fonts it cannot re-embed — the
+    /// page looks pixel-identical while becoming unsearchable and several times larger. It is
+    /// invisible unless we measure it, so we measure it and say so.
+    private var droppedTextLayer = false
+
+    /// True while the file on disk is still the one the user opened, untouched.
+    ///
+    /// v2.6.1: this deliberately no longer exempts Jack's OWN files. Keno's rule is simply
+    /// "keep the original" — so the FIRST save of any existing document in a session goes to a
+    /// new file, whoever made it. Later saves in the same session write to that new file rather
+    /// than spawning one per ⌘S.
+    var protectsOriginal: Bool { fileURL != nil && !hasSavedCopy }
 
     override class var autosavesInPlace: Bool { false }
     override class func canConcurrentlyReadDocuments(ofType typeName: String) -> Bool { true }
@@ -67,6 +78,7 @@ final class JackDocument: NSDocument {
                           userInfo: [NSLocalizedDescriptionKey: "“\(url.lastPathComponent)” couldn’t be read as a PDF."])
         }
         pdf = doc
+        originalURLForReveal = url
         isJackProduced = (doc.documentAttributes?[PDFDocumentAttribute.creatorAttribute] as? String)
             == JackDocument.creatorMarker
         hasSavedCopy = false
@@ -85,6 +97,9 @@ final class JackDocument: NSDocument {
             throw NSError(domain: NSCocoaErrorDomain, code: NSFileWriteUnknownError,
                           userInfo: [NSLocalizedDescriptionKey: "Couldn’t serialize the PDF."])
         }
+        droppedTextLayer = JackDocument.textLength(of: live) > 200
+            && JackDocument.textLength(of: out) < JackDocument.textLength(of: live) / 4
+
         // The fresh-document rebuild drops /AcroForm (fields go dead in Acrobat/Chrome)
         // and loses radio /V + /AS. Repair both at the byte level; no-op for widget-free docs.
         guard FormFieldEngine.hasWidgets(live) else { return data }
@@ -105,12 +120,35 @@ final class JackDocument: NSDocument {
     // `save(_:)`/`saveAs(_:)`. Overriding `save(_:)` DOES replace the ObjC implementation, so
     // ⌘S from the menu (Selector("saveDocument:")) lands here.
     override func save(_ sender: Any?) {
-        guard protectsOriginal, let current = fileURL else {
+        guard prepareCopyIfProtecting() else {
             super.save(sender)
             return
         }
-        pendingCopyName = current.deletingPathExtension().lastPathComponent + "-edited.pdf"
         saveAs(sender)
+    }
+
+    // 🧨 The close-with-unsaved-changes sheet does NOT go through save(_:). Its Save button
+    // calls this, which without an override writes straight to the user's original file — no
+    // panel, no copy. That is how an original got overwritten in v2.5/2.6 even though ⌘S was
+    // handled correctly. Any future save entry point must be routed through here too.
+    override func save(withDelegate delegate: Any?, didSave didSaveSelector: Selector?,
+                       contextInfo: UnsafeMutableRawPointer?) {
+        guard prepareCopyIfProtecting() else {
+            super.save(withDelegate: delegate, didSave: didSaveSelector, contextInfo: contextInfo)
+            return
+        }
+        // Run the panel but keep the caller's completion, so the close flow still finishes.
+        runModalSavePanel(for: .saveAsOperation, delegate: delegate,
+                          didSave: didSaveSelector, contextInfo: contextInfo)
+    }
+
+    /// Returns true when this save must become a copy, seeding the suggested name.
+    private func prepareCopyIfProtecting() -> Bool {
+        guard protectsOriginal, let current = fileURL else { return false }
+        // Don't stack suffixes: "Report-edited.pdf" edited again is still "Report-edited.pdf".
+        let base = current.deletingPathExtension().lastPathComponent
+        pendingCopyName = (base.hasSuffix("-edited") ? base : base + "-edited") + ".pdf"
+        return true
     }
 
     override func prepareSavePanel(_ panel: NSSavePanel) -> Bool {
@@ -135,6 +173,7 @@ final class JackDocument: NSDocument {
                 self?.pendingCopyName = nil
                 self?.postDirtyChanged()
                 self?.emitRedactionCertificateIfNeeded(savedTo: url)
+                self?.warnIfTextLayerDropped(savedTo: url)
             }
             completionHandler(error)
         }
@@ -145,6 +184,29 @@ final class JackDocument: NSDocument {
         super.updateChangeCount(change)
         postDirtyChanged()
     }
+
+    /// Tell the user plainly when a save produced a file that is no longer searchable. The
+    /// original they opened is untouched by then — the copy rule guarantees that — so this is
+    /// information, not an emergency.
+    private func warnIfTextLayerDropped(savedTo url: URL) {
+        guard droppedTextLayer else { return }
+        droppedTextLayer = false
+        let a = NSAlert()
+        a.alertStyle = .warning
+        a.messageText = "Saved, but the text is no longer selectable"
+        a.informativeText = "“\(url.lastPathComponent)” looks identical, but this document uses embedded "
+            + "fonts macOS cannot rewrite, so its text became outlines — search and text selection will not "
+            + "work in it, and the file is larger.\n\nThe original you opened is unchanged. Use it whenever "
+            + "you need the searchable version."
+        a.addButton(withTitle: "OK")
+        a.addButton(withTitle: "Show the Original")
+        if a.runModal() == .alertSecondButtonReturn, let original = originalURLForReveal {
+            NSWorkspace.shared.activateFileViewerSelecting([original])
+        }
+    }
+
+    /// The file this document was opened from, remembered before the first save moved us.
+    private var originalURLForReveal: URL?
 
     private func postDirtyChanged() {
         NotificationCenter.default.post(name: .jackDocumentDirtyChanged, object: self)
@@ -187,6 +249,14 @@ final class JackDocument: NSDocument {
 
     // MARK: - Persistence builder
 
+    static func textLength(of doc: PDFDocument) -> Int {
+        var n = 0
+        for i in 0..<doc.pageCount {
+            n += (doc.page(at: i)?.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines).count
+        }
+        return n
+    }
+
     static func buildPersistedDocument(from live: PDFDocument) -> PDFDocument? {
         let out = PDFDocument()
         var outIndex = 0
@@ -195,9 +265,19 @@ final class JackDocument: NSDocument {
             // Watermark/Bates burn into the page as real vector content, so a page carrying
             // one is flattened exactly like a signed page.
             let hasStamps = page.annotations.contains { $0 is ImageStampAnnotation || $0 is OverlayAnnotation }
-            let persisted: PDFPage?
+            var persisted: PDFPage?
             if hasStamps {
                 persisted = flattenedCopy(of: page, pageIndex: i)
+                // 🧨 Page rendering is racy (see RedactionEngine.contentSignal): a flatten can
+                // come back blank on a page that has content. Retry, and if it still comes back
+                // empty, write the page VERBATIM. Losing a burned-in watermark is recoverable;
+                // writing a blank page over the user's content is not.
+                if let p = persisted, !RedactionEngine.preservesContent(original: page, replacement: p, regions: []) {
+                    persisted = flattenedCopy(of: page, pageIndex: i)
+                }
+                if persisted == nil || !RedactionEngine.preservesContent(original: page, replacement: persisted!, regions: []) {
+                    persisted = page.copy() as? PDFPage
+                }
             } else {
                 persisted = page.copy() as? PDFPage
             }
