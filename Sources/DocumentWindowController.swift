@@ -6,7 +6,7 @@ import PDFKit
 
 final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSToolbarDelegate,
                                       StampSelectionDelegate, PageSidebarDelegate, NSSearchFieldDelegate,
-                                      NSMenuDelegate {
+                                      NSMenuDelegate, NSTextViewDelegate {
 
     // v2.0: the file's identity lives with the NSDocument (rename/move/duplicate are native).
     private var exportBaseName: String {
@@ -204,6 +204,13 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         content.addSubview(askPanel)
         buildHUD()
         content.addSubview(hud)
+        fieldAdornment.isHidden = true
+        pdfView.addSubview(fieldAdornment)
+        if let clip = pdfView.subviews.compactMap({ ($0 as? NSScrollView)?.contentView }).first {
+            clip.postsBoundsChangedNotifications = true
+            NotificationCenter.default.addObserver(self, selector: #selector(pdfViewScrolled),
+                                                   name: NSView.boundsDidChangeNotification, object: clip)
+        }
         layoutViews()
 
         NotificationCenter.default.addObserver(self, selector: #selector(pageChanged),
@@ -318,7 +325,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         layoutHUD()
     }
 
-    @objc private func scaleChanged() { updateHUD() }
+    @objc private func scaleChanged() { updateHUD(); layoutFieldAdornment() }
 
     @objc private func selectionChanged() {
         if let s = pdfView.currentSelection,
@@ -903,7 +910,11 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             pdfView.armedFieldKind = nil
             pdfView.formAuthoringOn = false
             fieldPopover?.close()
-        case .read: break
+            commitCaptionEditor()
+            pdfView.clearFieldSelection()
+        case .read:
+            commitFieldTextEditor()
+            closeComboPanel()
         }
         mode = new
         switch new {                         // enter the new one
@@ -1227,7 +1238,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             formPaletteButtons.append(btn)
             x += w + 6
         }
-        rowHint("click a field to use it · drag its label to move · corner resizes · double-click edits")
+        rowHint("click selects · drag moves · corner resizes · double-click caption renames · ⌫ deletes · fill in Read")
     }
 
     // Erase is an EDIT, not an export: affected pages are swapped in place (undoable via
@@ -1442,8 +1453,356 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             }
         }
         registerFieldMoveUndo(items, name: "Resize Field")
+        selectedStartSize = widget.bounds.size
+        fieldAdornment.chipText = nil
+        forceRefresh()
+        layoutFieldAdornment()
+        markDirty()
+    }
+
+    // MARK: - Form Kit (approved mock): adornment, fill editors, combo panel, rename, delete
+
+    /// Ring + 4 handles + size chip, drawn in VIEW space so no page-cache repaint is
+    /// needed per click; tracks scroll/zoom via notifications.
+    private final class FieldAdornment: NSView {
+        var chipText: String?
+        static let pad: CGFloat = 10
+        static let chipBand: CGFloat = 30
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+        override func draw(_ dirtyRect: NSRect) {
+            let pad = Self.pad
+            var fieldRect = CGRect(x: pad, y: pad, width: bounds.width - pad * 2, height: bounds.height - pad * 2)
+            if chipText != nil { fieldRect.size.height -= Self.chipBand }
+            guard fieldRect.width > 4, fieldRect.height > 4, let ctx = NSGraphicsContext.current?.cgContext else { return }
+            let ring = fieldRect.insetBy(dx: -4, dy: -4)
+            ctx.addPath(CGPath(roundedRect: ring, cornerWidth: 8, cornerHeight: 8, transform: nil))
+            ctx.setStrokeColor(JackFormUI.accent.cgColor)
+            ctx.setLineWidth(1.5)
+            ctx.strokePath()
+            let h: CGFloat = 8
+            for c in [CGPoint(x: ring.minX, y: ring.maxY), CGPoint(x: ring.maxX, y: ring.maxY),
+                      CGPoint(x: ring.minX, y: ring.minY), CGPoint(x: ring.maxX, y: ring.minY)] {
+                let r = CGRect(x: c.x - h / 2, y: c.y - h / 2, width: h, height: h)
+                let path = CGPath(roundedRect: r, cornerWidth: 2, cornerHeight: 2, transform: nil)
+                ctx.addPath(path); ctx.setFillColor(NSColor.white.cgColor); ctx.fillPath()
+                ctx.addPath(path); ctx.setStrokeColor(JackFormUI.accent.cgColor); ctx.setLineWidth(1.5); ctx.strokePath()
+            }
+            if let chip = chipText {
+                let attr = NSAttributedString(string: chip, attributes: [
+                    .font: NSFont.systemFont(ofSize: 10.5, weight: .semibold), .foregroundColor: NSColor.white])
+                let line = CTLineCreateWithAttributedString(attr)
+                let w = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil)) + 16
+                let rect = CGRect(x: ring.maxX - w, y: ring.maxY + 8, width: w, height: 19)
+                ctx.addPath(CGPath(roundedRect: rect, cornerWidth: 6, cornerHeight: 6, transform: nil))
+                ctx.setFillColor(JackFormUI.accent.cgColor)
+                ctx.fillPath()
+                ctx.textPosition = CGPoint(x: rect.minX + 8, y: rect.minY + 5)
+                CTLineDraw(line, ctx)
+            }
+        }
+    }
+
+    private let fieldAdornment = FieldAdornment()
+    private weak var selectedFieldWidget: PDFAnnotation?
+    private var selectedStartSize: CGSize?
+
+    private func layoutFieldAdornment() {
+        guard mode == .forms, let widget = selectedFieldWidget, let page = widget.page else {
+            fieldAdornment.isHidden = true
+            return
+        }
+        let viewRect = pdfView.convert(widget.bounds, from: page)
+        var frame = viewRect.insetBy(dx: -FieldAdornment.pad, dy: -FieldAdornment.pad)
+        if fieldAdornment.chipText != nil { frame.size.height += FieldAdornment.chipBand }
+        fieldAdornment.frame = frame
+        fieldAdornment.isHidden = false
+        fieldAdornment.needsDisplay = true
+    }
+
+    @objc private func pdfViewScrolled() { layoutFieldAdornment() }
+
+    func fieldSelected(name: String?, widget: PDFAnnotation?) {
+        selectedFieldWidget = widget
+        selectedStartSize = widget?.bounds.size
+        fieldAdornment.chipText = nil
+        layoutFieldAdornment()
+    }
+
+    func fieldBoundsChanging() {
+        if let w = selectedFieldWidget, let s0 = selectedStartSize, w.bounds.size != s0 {
+            fieldAdornment.chipText = "\(Int(w.bounds.width.rounded())) × \(Int(w.bounds.height.rounded()))"
+        } else {
+            fieldAdornment.chipText = nil
+        }
+        layoutFieldAdornment()
+    }
+
+    func fieldValueChanged() {
+        markDirty()
+        forceRefresh()   // chrome renders in the page path — the Tahoe cache needs the push
+    }
+
+    func fieldDeleteRequested(name: String) {
+        guard let doc = pdfView.document else { return }
+        var removed: [(PDFPage, PDFAnnotation)] = []
+        for i in 0..<doc.pageCount {
+            guard let pg = doc.page(at: i) else { continue }
+            for a in pg.annotations where (a.type == "Widget" && a.fieldName == name)
+                || FormFieldEngine.isLabel(a, for: name) {
+                removed.append((pg, a))
+            }
+        }
+        guard !removed.isEmpty else { return }
+        removed.forEach { $0.0.removeAnnotation($0.1) }
+        registerAnnotationAddUndo(removed, name: "Delete Field")
+        pdfView.clearFieldSelection()
         forceRefresh()
         markDirty()
+    }
+
+    /// One rename path for the popover, the inline caption editor, and anyone else.
+    private func renameField(from oldName: String, to rawNew: String) {
+        guard let doc = pdfView.document else { return }
+        var newName = rawNew.trimmingCharacters(in: .whitespaces)
+        guard !newName.isEmpty, newName != oldName else { return }
+        if !groupWidgets(named: newName).isEmpty {
+            newName = FormFieldEngine.uniqueName(base: newName, in: doc)   // avoid silent merges
+        }
+        groupWidgets(named: oldName).forEach { $0.1.fieldName = newName }
+        for (_, a) in groupAnnotations(named: oldName) where FormFieldEngine.isLabel(a) {
+            if a.contents == oldName { a.contents = newName }    // option captions keep their text
+            let suffix = (a.userName ?? "").replacingOccurrences(
+                of: FormFieldEngine.labelName(for: oldName), with: "")
+            a.userName = FormFieldEngine.labelName(for: newName) + suffix
+        }
+        docUndo.registerUndo(withTarget: self) { _ in }
+        docUndo.setActionName("Rename Field")
+        markDirty()
+    }
+
+    // MARK: Inline caption rename (double-click the caption, type, Return)
+
+    private var captionEditorBox: NSView?
+    private weak var captionField: NSTextField?
+    private var captionOldName: String?
+
+    func captionRenameRequested(_ label: PDFAnnotation, fieldName: String, on page: PDFPage) {
+        commitCaptionEditor()
+        let viewRect = pdfView.convert(label.bounds, from: page)
+        let box = NSView(frame: viewRect.insetBy(dx: -3, dy: -2))
+        box.wantsLayer = true
+        box.layer?.backgroundColor = NSColor.white.cgColor
+        let underline = CALayer()
+        underline.backgroundColor = JackFormUI.accent.cgColor
+        underline.frame = CGRect(x: 0, y: 0, width: box.bounds.width, height: 1.5)
+        box.layer?.addSublayer(underline)
+        let size = (label.font?.pointSize ?? 12) * pdfView.scaleFactor
+        let tf = NSTextField(frame: box.bounds.insetBy(dx: 3, dy: 2))
+        tf.isBordered = false
+        tf.focusRingType = .none
+        tf.drawsBackground = false
+        tf.font = .systemFont(ofSize: size)
+        tf.stringValue = fieldName
+        tf.delegate = self
+        tf.target = self
+        tf.action = #selector(commitCaptionAction)
+        box.addSubview(tf)
+        pdfView.addSubview(box)
+        window?.makeFirstResponder(tf)
+        tf.selectText(nil)
+        captionEditorBox = box
+        captionField = tf
+        captionOldName = fieldName
+    }
+
+    @objc private func commitCaptionAction() { commitCaptionEditor() }
+
+    private func commitCaptionEditor() {
+        guard let box = captionEditorBox else { return }
+        let newName = captionField?.stringValue ?? ""
+        let oldName = captionOldName
+        box.removeFromSuperview()
+        captionEditorBox = nil; captionField = nil; captionOldName = nil
+        if let oldName { renameField(from: oldName, to: newName) }
+        forceRefresh()
+    }
+
+    private func cancelCaptionEditor() {
+        captionEditorBox?.removeFromSuperview()
+        captionEditorBox = nil; captionField = nil; captionOldName = nil
+    }
+
+    // MARK: Fill-mode inline text editor (focus ring + caret are Jack's, per the mock)
+
+    private var fieldTextBox: NSView?
+    private weak var fieldTextWidget: PDFAnnotation?
+    private weak var fieldTextSingle: NSTextField?
+    private weak var fieldTextMulti: NSTextView?
+
+    func fieldFillText(_ widget: PDFAnnotation, on page: PDFPage) {
+        commitFieldTextEditor()
+        let scale = pdfView.scaleFactor
+        let viewRect = pdfView.convert(widget.bounds, from: page)
+        let box = NSView(frame: viewRect.insetBy(dx: -2, dy: -2))
+        box.wantsLayer = true
+        box.layer?.backgroundColor = NSColor.white.cgColor
+        box.layer?.cornerRadius = 6 * scale
+        box.layer?.borderWidth = 2
+        box.layer?.borderColor = JackFormUI.accent.cgColor
+        box.layer?.masksToBounds = true
+        let size = min(widget.font?.pointSize ?? 13, max(9, widget.bounds.height - 12)) * scale
+        let font = widget.font.flatMap { NSFont(descriptor: $0.fontDescriptor, size: size) }
+            ?? .systemFont(ofSize: size)
+        if widget.isMultiline {
+            let tv = NSTextView(frame: box.bounds.insetBy(dx: 8, dy: 6))
+            tv.font = font
+            tv.string = widget.widgetStringValue ?? ""
+            tv.drawsBackground = false
+            tv.textColor = .black
+            tv.delegate = self
+            tv.autoresizingMask = [.width, .height]
+            box.addSubview(tv)
+            fieldTextMulti = tv
+        } else {
+            let h = font.ascender - font.descender + 4
+            let tf = NSTextField(frame: NSRect(x: 8, y: (box.bounds.height - h) / 2,
+                                               width: box.bounds.width - 16, height: h))
+            tf.isBordered = false
+            tf.focusRingType = .none
+            tf.drawsBackground = false
+            tf.font = font
+            tf.textColor = .black
+            tf.stringValue = widget.widgetStringValue ?? ""
+            tf.delegate = self
+            tf.target = self
+            tf.action = #selector(commitFieldTextAction)
+            box.addSubview(tf)
+            fieldTextSingle = tf
+        }
+        pdfView.addSubview(box)
+        window?.makeFirstResponder((fieldTextSingle as NSView?) ?? fieldTextMulti)
+        fieldTextBox = box
+        fieldTextWidget = widget
+    }
+
+    @objc private func commitFieldTextAction() { commitFieldTextEditor() }
+
+    private func commitFieldTextEditor() {
+        guard let box = fieldTextBox else { return }
+        let text = fieldTextSingle?.stringValue ?? fieldTextMulti?.string ?? ""
+        let widget = fieldTextWidget
+        box.removeFromSuperview()
+        fieldTextBox = nil; fieldTextWidget = nil; fieldTextSingle = nil; fieldTextMulti = nil
+        guard let widget else { return }
+        widget.widgetStringValue = text
+        markDirty()
+        forceRefresh()
+    }
+
+    private func cancelFieldTextEditor() {
+        fieldTextBox?.removeFromSuperview()
+        fieldTextBox = nil; fieldTextWidget = nil; fieldTextSingle = nil; fieldTextMulti = nil
+    }
+
+    // Esc inside the multiline field editor cancels it.
+    func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        if textView === fieldTextMulti, commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+            cancelFieldTextEditor()
+            return true
+        }
+        return false
+    }
+    func textDidEndEditing(_ notification: Notification) {
+        if (notification.object as? NSTextView) === fieldTextMulti { commitFieldTextEditor() }
+    }
+
+    // MARK: Fill-mode dropdown — an anchored panel, not an NSMenu (the mock's call)
+
+    private var comboPanel: NSPanel?
+    private weak var comboWidget: PDFAnnotation?
+    private var comboMonitor: Any?
+
+    private final class ComboRow: NSButton {
+        var highlightOn = false
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            trackingAreas.forEach(removeTrackingArea)
+            addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways],
+                                           owner: self, userInfo: nil))
+        }
+        override func mouseEntered(with event: NSEvent) { setHighlight(true) }
+        override func mouseExited(with event: NSEvent) { setHighlight(false) }
+        private func setHighlight(_ on: Bool) {
+            highlightOn = on
+            wantsLayer = true
+            layer?.backgroundColor = on ? JackFormUI.accent.cgColor : NSColor.clear.cgColor
+            layer?.cornerRadius = 6
+            contentTintColor = on ? .white : .black
+        }
+    }
+
+    func fieldFillCombo(_ widget: PDFAnnotation, on page: PDFPage) {
+        closeComboPanel()
+        let options = widget.choices ?? []
+        guard !options.isEmpty, let win = window else { return }
+        let rowH: CGFloat = 26, pad: CGFloat = 5
+        let fieldRect = pdfView.convert(widget.bounds, from: page)
+        let width = max(fieldRect.width, 160)
+        let h = CGFloat(options.count) * rowH + pad * 2
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: width, height: h))
+        content.wantsLayer = true
+        content.layer?.backgroundColor = NSColor(calibratedWhite: 0.99, alpha: 0.98).cgColor
+        content.layer?.cornerRadius = 9
+        content.layer?.borderWidth = 0.5
+        content.layer?.borderColor = NSColor.black.withAlphaComponent(0.12).cgColor
+        let current = widget.widgetStringValue
+        for (i, opt) in options.enumerated() {
+            let row = ComboRow(title: (opt == current ? "✓  " : "    ") + opt, target: self,
+                               action: #selector(comboRowPicked(_:)))
+            row.isBordered = false
+            row.alignment = .left
+            row.font = .systemFont(ofSize: 13)
+            row.contentTintColor = .black
+            row.tag = i
+            row.frame = NSRect(x: pad, y: h - pad - CGFloat(i + 1) * rowH, width: width - pad * 2, height: rowH)
+            content.addSubview(row)
+        }
+        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: width, height: h),
+                            styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.contentView = content
+        let winRect = pdfView.convert(fieldRect, to: nil)
+        let screen = win.convertToScreen(winRect)
+        panel.setFrame(NSRect(x: screen.minX, y: screen.minY - h - 4, width: width, height: h), display: true)
+        win.addChildWindow(panel, ordered: .above)
+        comboPanel = panel
+        comboWidget = widget
+        comboMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] ev in
+            if ev.window !== self?.comboPanel { self?.closeComboPanel() }
+            return ev
+        }
+    }
+
+    @objc private func comboRowPicked(_ sender: NSButton) {
+        if let widget = comboWidget, let options = widget.choices,
+           sender.tag >= 0, sender.tag < options.count {
+            widget.widgetStringValue = options[sender.tag]
+            markDirty()
+        }
+        closeComboPanel()
+        forceRefresh()
+    }
+
+    private func closeComboPanel() {
+        if let m = comboMonitor { NSEvent.removeMonitor(m); comboMonitor = nil }
+        if let p = comboPanel {
+            window?.removeChildWindow(p)
+            p.orderOut(nil)
+            comboPanel = nil
+        }
+        comboWidget = nil
     }
 
     // MARK: Date fields — click pops a calendar; the value lands as plain text, so the
@@ -1686,17 +2045,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             }
         } else {
             if isChoice, !newOptions.isEmpty { first.1.choices = newOptions }
-            if newName != oldName {
-                widgets.forEach { $0.1.fieldName = newName }
-                // Captions carry the name — keep text and the /NM link in step.
-                for (_, a) in groupAnnotations(named: oldName) where FormFieldEngine.isLabel(a) {
-                    a.contents = newName
-                    // Preserve marker suffixes (:kind:date) across renames.
-                    let suffix = (a.userName ?? "").replacingOccurrences(
-                        of: FormFieldEngine.labelName(for: oldName), with: "")
-                    a.userName = FormFieldEngine.labelName(for: newName) + suffix
-                }
-            }
+            if newName != oldName { renameField(from: oldName, to: newName) }
             docUndo.registerUndo(withTarget: self) { _ in }   // dirty the document for autosave
             docUndo.setActionName("Edit Field")
         }
@@ -3316,9 +3665,10 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     // MARK: - Search
 
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
-        if control === typewriterEditor?.field, commandSelector == #selector(NSResponder.cancelOperation(_:)) {
-            cancelTypewriterEditor()
-            return true
+        if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+            if control === typewriterEditor?.field { cancelTypewriterEditor(); return true }
+            if control === captionField { cancelCaptionEditor(); return true }
+            if control === fieldTextSingle { cancelFieldTextEditor(); return true }
         }
         return false
     }
@@ -3330,6 +3680,8 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             commitTypewriterEditor()
             return
         }
+        if (obj.object as? NSTextField) === captionField { commitCaptionEditor(); return }
+        if (obj.object as? NSTextField) === fieldTextSingle { commitFieldTextEditor(); return }
         // Focus moved away from the typewriter editor (click elsewhere, tab out): place the
         // text. Return also lands here after the action fires; the nil-guard makes it a no-op.
         if (obj.object as? NSTextField) === typewriterEditor?.field { commitTypewriterEditor() }

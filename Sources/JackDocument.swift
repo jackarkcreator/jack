@@ -26,7 +26,12 @@ extension Notification.Name {
 }
 
 @objc(JackDocument)
-final class JackDocument: NSDocument {
+final class JackDocument: NSDocument, PDFDocumentDelegate {
+    // Every page renders through JackPage so Jack's field chrome (the approved Form Kit)
+    // draws in the view, thumbnails, and flattens. Set as the PDFDocument's delegate
+    // BEFORE any page is touched — PDFKit creates page objects lazily.
+    func classForPage() -> AnyClass { JackPage.self }
+
     var pdf: PDFDocument?
 
     /// Written into /Creator on every save so a reopened file is recognizable as Jack's own —
@@ -68,7 +73,8 @@ final class JackDocument: NSDocument {
         self.init()
         fileType = typeName
         let blank = PDFDocument()
-        blank.insert(PDFPage(), at: 0)
+        blank.delegate = self
+        blank.insert(JackPage(), at: 0)
         pdf = blank
     }
 
@@ -77,6 +83,7 @@ final class JackDocument: NSDocument {
             throw NSError(domain: NSCocoaErrorDomain, code: NSFileReadCorruptFileError,
                           userInfo: [NSLocalizedDescriptionKey: "“\(url.lastPathComponent)” couldn’t be read as a PDF."])
         }
+        doc.delegate = self    // before baseline/page access — lazy pages become JackPage
         pdf = doc
         originalURLForReveal = url
         if let raw = try? Data(contentsOf: url) {

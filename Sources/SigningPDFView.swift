@@ -10,6 +10,15 @@ protocol StampSelectionDelegate: AnyObject {
     func formFieldEditRequested(name: String)
     func fieldResized(_ widget: PDFAnnotation, from oldBounds: CGRect)
     func dateFieldClicked(_ widget: PDFAnnotation, on page: PDFPage)
+    // Form Kit (approved mock): build-mode selection + inline caption rename + delete,
+    // fill-mode text/combo editors and toggle changes, live adornment tracking.
+    func fieldSelected(name: String?, widget: PDFAnnotation?)
+    func fieldBoundsChanging()
+    func fieldDeleteRequested(name: String)
+    func captionRenameRequested(_ label: PDFAnnotation, fieldName: String, on page: PDFPage)
+    func fieldFillText(_ widget: PDFAnnotation, on page: PDFPage)
+    func fieldFillCombo(_ widget: PDFAnnotation, on page: PDFPage)
+    func fieldValueChanged()
     func fieldMoved(_ items: [(PDFAnnotation, CGRect)])
     func imageDropped(_ image: NSImage, at point: CGPoint, on page: PDFPage)
     // Typewriter: click empty page → place an editor; drag moves the text; double-click re-edits.
@@ -37,6 +46,30 @@ final class SigningPDFView: PDFView {
     var armedFieldKind: FormFieldKind?
     private var resizingWidget: PDFAnnotation?
     private var resizeStart: CGRect = .zero
+    /// Build-mode selection (the adornment view and ⌫ read this).
+    private(set) var selectedField: (name: String, widget: PDFAnnotation)?
+
+    func clearFieldSelection() {
+        selectedField = nil
+        stampDelegate?.fieldSelected(name: nil, widget: nil)
+    }
+
+    // Placeholders ("Type here") are armed ONLY while this view paints itself, so no
+    // flatten, raster, OCR, or export path can ever bake them into a file.
+    override func draw(_ dirtyRect: NSRect) {
+        JackFormUI.placeholdersEnabled = true
+        super.draw(dirtyRect)
+        JackFormUI.placeholdersEnabled = false
+    }
+
+    override func keyDown(with event: NSEvent) {
+        if formAuthoringOn, let sel = selectedField,
+           event.charactersIgnoringModifiers == String(UnicodeScalar(NSDeleteCharacter)!) {
+            stampDelegate?.fieldDeleteRequested(name: sel.name)
+            return
+        }
+        super.keyDown(with: event)
+    }
     var formFieldMenuItems: ((PDFAnnotation) -> [NSMenuItem])?
     var annotateMenuItems: ((PDFPage?, CGPoint) -> [NSMenuItem])?
 
@@ -98,8 +131,14 @@ final class SigningPDFView: PDFView {
             return
         }
         if formAuthoringOn {
-            // Drag an existing field; with a kind armed, click or drag places a new one.
-            // A hit on a widget OR its label picks up the whole field (widgets + captions).
+            // Build mode, Keynote model (approved mock): click selects with handles, drag
+            // moves the whole unit, the SE handle resizes, double-click the caption renames
+            // in place, double-click a choice field opens its options.
+            if let sel = selectedField, sel.widget.page === page,
+               JackFormUI.seHandleHit(for: sel.widget.bounds).contains(p) {
+                resizingWidget = sel.widget; resizeStart = sel.widget.bounds; dragPage = page
+                return
+            }
             let hit = page.annotations.last(where: { $0.type == "Widget" && $0.bounds.insetBy(dx: -2, dy: -2).contains(p) })
                 ?? page.annotations.last(where: { FormFieldEngine.isLabel($0) && $0.bounds.contains(p) })
             if let hit {
@@ -111,40 +150,28 @@ final class SigningPDFView: PDFView {
                     fieldName = base.components(separatedBy: ":opt:").first?
                         .components(separatedBy: ":kind:").first
                 } else { fieldName = nil }
-                var set: [PDFAnnotation] = []
-                if let fieldName {
-                    set = page.annotations.filter {
-                        ($0.type == "Widget" && $0.fieldName == fieldName) || FormFieldEngine.isLabel($0, for: fieldName)
-                    }
+                guard let fieldName else { super.mouseDown(with: event); return }
+                let set = page.annotations.filter {
+                    ($0.type == "Widget" && $0.fieldName == fieldName) || FormFieldEngine.isLabel($0, for: fieldName)
                 }
-                // Double-click a field or its label: straight to the editor popover.
-                if event.clickCount >= 2, let fieldName {
-                    stampDelegate?.formFieldEditRequested(name: fieldName)
+                let widget = set.first { $0.type == "Widget" } ?? hit
+                if event.clickCount >= 2 {
+                    if hit.type != "Widget", let nm = hit.userName, !nm.contains(":opt:") {
+                        stampDelegate?.captionRenameRequested(hit, fieldName: fieldName, on: page)
+                    } else {
+                        stampDelegate?.formFieldEditRequested(name: fieldName)
+                    }
                     return
                 }
-                if hit.type == "Widget" {
-                    // The widget is for USING: corner resizes, a date field pops its
-                    // calendar, anything else goes to PDFKit (type, check, choose).
-                    // Moving the whole unit is the LABEL's job.
-                    let corner = CGRect(x: hit.bounds.maxX - 10, y: hit.bounds.minY - 4, width: 14, height: 14)
-                    if corner.contains(p) {
-                        resizingWidget = hit; resizeStart = hit.bounds; dragPage = page
-                        return
-                    }
-                    if FormFieldEngine.isDateField(hit, on: page) {
-                        stampDelegate?.dateFieldClicked(hit, on: page)
-                        return
-                    }
-                    super.mouseDown(with: event)
-                    return
-                }
-                if set.isEmpty { set = [hit] }
+                selectedField = (fieldName, widget)
+                stampDelegate?.fieldSelected(name: fieldName, widget: widget)
                 dragSet = set.map { ($0, $0.bounds) }
-                dragPrimary = set.first { $0.type == "Widget" } ?? hit
+                dragPrimary = widget
                 dragPage = page; last = p; dragStartMouse = p
-                dragStartBounds = dragPrimary?.bounds ?? hit.bounds
+                dragStartBounds = widget.bounds
                 return
             }
+            clearFieldSelection()
             if let kind = armedFieldKind {
                 bandFieldKind = kind
                 markOriginView = viewPoint
@@ -199,6 +226,28 @@ final class SigningPDFView: PDFView {
                 draggingFree = text; dragPage = page; last = p
                 freeStartBounds = text.bounds
             }
+        } else if let widget = page.annotations.last(where: {
+            JackFormUI.isSupported($0) && $0.bounds.insetBy(dx: -2, dy: -2).contains(p)
+        }), !redactMode {
+            // Fill mode: fields are live (approved mock) — toggle, choose, type, pick a date.
+            switch widget.widgetFieldType {
+            case .button:
+                if widget.widgetControlType == .radioButtonControl {
+                    let group = page.annotations.filter { $0.type == "Widget" && $0.fieldName == widget.fieldName }
+                    group.forEach { $0.buttonWidgetState = ($0 === widget) ? .onState : .offState }
+                } else {
+                    widget.buttonWidgetState = widget.buttonWidgetState == .onState ? .offState : .onState
+                }
+                stampDelegate?.fieldValueChanged()
+            case .choice:
+                stampDelegate?.fieldFillCombo(widget, on: page)
+            default:
+                if FormFieldEngine.isDateField(widget, on: page) {
+                    stampDelegate?.dateFieldClicked(widget, on: page)
+                } else {
+                    stampDelegate?.fieldFillText(widget, on: page)
+                }
+            }
         } else if typewriterMode {
             stampDelegate?.typewriterClicked(at: p, on: page)
         } else {
@@ -222,6 +271,7 @@ final class SigningPDFView: PDFView {
             if isButton { let side = max(14, min(max(newW, newH), 40)); newW = side; newH = side }
             w.bounds = CGRect(x: resizeStart.minX, y: resizeStart.maxY - newH, width: newW, height: newH)
             needsDisplay = true
+            stampDelegate?.fieldBoundsChanging()
             return
         }
         if !dragSet.isEmpty, let page = dragPage {
@@ -247,6 +297,7 @@ final class SigningPDFView: PDFView {
             for (a, start) in dragSet { a.bounds = start.offsetBy(dx: dx, dy: dy) }
             updateSnapGuides(x: snapX, y: snapY, on: page)
             needsDisplay = true
+            stampDelegate?.fieldBoundsChanging()
             return
         }
         if let free = draggingFree, let page = dragPage {
