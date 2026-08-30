@@ -228,7 +228,7 @@ final class SigningPDFView: PDFView {
                 draggingFree = text; dragPage = page; last = p
                 freeStartBounds = text.bounds
             }
-        } else if let widget = page.annotations.last(where: {
+        } else if JackFormUI.enabled, let widget = page.annotations.last(where: {
             JackFormUI.isSupported($0) && $0.bounds.insetBy(dx: -2, dy: -2).contains(p)
         }), !redactMode {
             // Fill mode: fields are live (approved mock) — toggle, choose, type, pick a date.

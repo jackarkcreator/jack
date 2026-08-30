@@ -476,10 +476,17 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             return item
         case ItemID.modeSegment:
             let item = NSToolbarItem(itemIdentifier: id)
-            let seg = NSSegmentedControl(labels: ["Read", "Markup", "Redact", "Forms"],
+            let seg = NSSegmentedControl(labels: modeChoices.map {
+                                             switch $0 {
+                                             case .read: return "Read"
+                                             case .markup: return "Markup"
+                                             case .redact: return "Redact"
+                                             case .forms: return "Forms"
+                                             }
+                                         },
                                          trackingMode: .selectOne,
                                          target: self, action: #selector(modeSegmentChanged(_:)))
-            seg.selectedSegment = mode.rawValue
+            seg.selectedSegment = modeChoices.firstIndex(of: mode) ?? 0
             seg.segmentStyle = .automatic
             modeSegment = seg
             item.view = seg
@@ -880,13 +887,23 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
 
     // MARK: - Mode system (v2.8): Read · Markup · Redact · Forms
 
+    /// The modes the segment offers. Forms is product-pulled (2026-08-30) unless the
+    /// hidden pref re-enables the kit.
+    private var modeChoices: [Mode] { JackFormUI.enabled ? [.read, .markup, .redact, .forms]
+                                                         : [.read, .markup, .redact] }
+
     @objc private func modeSegmentChanged(_ sender: NSSegmentedControl) {
-        setMode(Mode(rawValue: sender.selectedSegment) ?? .read)
+        let choices = modeChoices
+        let i = sender.selectedSegment
+        setMode(i >= 0 && i < choices.count ? choices[i] : .read)
     }
 
     // The legacy toggles remain the shortcut/menu entry points (⇧⌘A, ⇧⌘R, ⇧⌘F, View menu).
     @objc func toggleMarkup(_ sender: Any?) { setMode(mode == .markup ? .read : .markup) }
-    @objc func toggleForm(_ sender: Any?)   { setMode(mode == .forms ? .read : .forms) }
+    @objc func toggleForm(_ sender: Any?)   {
+        guard JackFormUI.enabled else { return }
+        setMode(mode == .forms ? .read : .forms)
+    }
     @objc func toggleRedact(_ sender: Any?) {
         if mode == .redact && !redactUsesErase { setMode(.read) }
         else { redactUsesErase = false; setMode(.redact); applyRedactStyle() }
@@ -926,7 +943,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             pdfView.formAuthoringOn = true
             pdfView.formFieldMenuItems = { [weak self] widget in self?.fieldMenuItems(for: widget) ?? [] }
         }
-        modeSegment?.selectedSegment = new.rawValue
+        modeSegment?.selectedSegment = modeChoices.firstIndex(of: new) ?? 0
         populateModeRow()
     }
 

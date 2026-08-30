@@ -85,7 +85,9 @@ enum MainMenu {
         view.addItem(item("Single Page", #selector(DocumentWindowController.displaySinglePage(_:)), ""))
         view.addItem(item("Two Pages", #selector(DocumentWindowController.displayTwoPages(_:)), ""))
         view.addItem(item("Markup", #selector(DocumentWindowController.toggleMarkup(_:)), "A"))
-        view.addItem(item("Prepare Form", #selector(DocumentWindowController.toggleForm(_:)), "F"))
+        if JackFormUI.enabled {
+            view.addItem(item("Prepare Form", #selector(DocumentWindowController.toggleForm(_:)), "F"))
+        }
         view.addItem(item("Erase", #selector(DocumentWindowController.toggleErase(_:)), ""))
         view.addItem(item("Redact", #selector(DocumentWindowController.toggleRedact(_:)), "R"))
         viewItem.submenu = view

@@ -87,9 +87,11 @@ final class JackDocument: NSDocument, PDFDocumentDelegate {
         // Jack renders supported widgets itself (JackPage chrome); PDFView's own widget
         // painting sits ON TOP of the page render and would cover it. Runtime-only —
         // buildPersistedDocument restores visibility on everything it writes.
-        for i in 0..<doc.pageCount {
-            guard let pg = doc.page(at: i) else { continue }
-            for a in pg.annotations where JackFormUI.isSupported(a) { a.shouldDisplay = false }
+        if JackFormUI.enabled {
+            for i in 0..<doc.pageCount {
+                guard let pg = doc.page(at: i) else { continue }
+                for a in pg.annotations where JackFormUI.isSupported(a) { a.shouldDisplay = false }
+            }
         }
         pdf = doc
         originalURLForReveal = url

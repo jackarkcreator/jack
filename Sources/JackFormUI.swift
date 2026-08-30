@@ -12,6 +12,11 @@ import AppKit
 import PDFKit
 
 enum JackFormUI {
+    /// Master switch. Keno pulled Forms from the product 2026-08-30 after the authoring
+    /// UX failed hands-on twice; the kit stays in the codebase behind this hidden pref
+    /// (`defaults write net.thinkopen.jack jack.formsEnabled -bool YES`) for the next run.
+    static var enabled: Bool { UserDefaults.standard.bool(forKey: "jack.formsEnabled") }
+
     // MARK: Spec tokens
     static let border = NSColor(calibratedRed: 0.788, green: 0.804, blue: 0.827, alpha: 1)  // #C9CDD3
     static let accent = NSColor(calibratedRed: 0.039, green: 0.518, blue: 1.0, alpha: 1)    // #0A84FF
@@ -207,6 +212,7 @@ enum JackFormUI {
 final class JackPage: PDFPage {
     override func draw(with box: PDFDisplayBox, to context: CGContext) {
         super.draw(with: box, to: context)
+        guard JackFormUI.enabled else { return }   // widgets stay PDFKit-native when Forms is off
         for a in annotations where JackFormUI.isSupported(a) {
             JackFormUI.drawChrome(for: a, in: context)
         }
