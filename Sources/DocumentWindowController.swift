@@ -1721,9 +1721,11 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         // sits ON the old line, not merely inside the selection box.
         let originalInkTop = RetypeMetrics.inkTop(of: page, in: rect)
         // Pad the erase: raster rounding and glyph antialiasing leave sliver artifacts at the
-        // exact selection edge ("small artifacts" on Keno's screen). ~1pt each way clears them
-        // without reaching the neighbouring words.
-        let eraseRect = rect.insetBy(dx: -1.25, dy: -1.5)
+        // exact selection edge. The halo is vertical (above/below the glyph run), so pad
+        // generously there — but neighbouring words sit ~1pt away HORIZONTALLY, and 1.25pt of
+        // side padding clipped the tail of the word before the selection. 0.4pt kills the
+        // rounding sliver without touching the neighbour.
+        let eraseRect = rect.insetBy(dx: -0.4, dy: -1.5)
             .intersection(page.bounds(for: .mediaBox))
         let index = doc.index(for: page)
         guard index != NSNotFound,
