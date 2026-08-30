@@ -75,7 +75,12 @@ enum RedactionEngine {
     }
 
     /// Adversarial check of an APPLIED file. Returns human-readable issues; empty == verified.
-    static func verify(outputURL: URL, redactedPages: [Int], forbiddenTerms: [String]) -> [String] {
+    /// `checkMetadata` belongs to the EXPORT path, which builds a fresh context and drops the
+    /// /Info dict by construction. An in-place redaction is an edit of the user's own document
+    /// and keeps its metadata on purpose — sanitising that is Clean for Sharing's job — so the
+    /// in-place caller passes false rather than reporting a failure it does not mean.
+    static func verify(outputURL: URL, redactedPages: [Int], forbiddenTerms: [String],
+                       checkMetadata: Bool = true) -> [String] {
         guard let doc = PDFDocument(url: outputURL) else { return ["Couldn’t reopen the output file."] }
         var issues: [String] = []
 
@@ -90,10 +95,12 @@ enum RedactionEngine {
                 issues.append("“\(term)” is still findable in the document.")
             }
         }
-        let attrs = doc.documentAttributes ?? [:]
-        for key: PDFDocumentAttribute in [.titleAttribute, .authorAttribute, .subjectAttribute,
-                                          .keywordsAttribute, .creatorAttribute] {
-            if let v = attrs[key] { issues.append("Metadata survived: \(key.rawValue) = \(v)") }
+        if checkMetadata {
+            let attrs = doc.documentAttributes ?? [:]
+            for key: PDFDocumentAttribute in [.titleAttribute, .authorAttribute, .subjectAttribute,
+                                              .keywordsAttribute, .creatorAttribute] {
+                if let v = attrs[key] { issues.append("Metadata survived: \(key.rawValue) = \(v)") }
+            }
         }
         return issues
     }

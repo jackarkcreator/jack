@@ -14,8 +14,12 @@ enum CertificateEngine {
     }
 
     @discardableResult
+    /// `metadataStripped` MUST reflect reality: the export path drops the /Info dict by
+    /// construction, an in-place redaction does not. A certificate is a legal artifact — it
+    /// never claims a check that was not performed. No default value, on purpose.
     static func generate(forRedacted redactedURL: URL, redactedPages: [Int], regionCount: Int,
-                         terms: [String], appVersion: String, to url: URL) -> Bool {
+                         terms: [String], appVersion: String, metadataStripped: Bool,
+                         to url: URL) -> Bool {
         guard let digest = sha256Hex(of: redactedURL) else { return false }
 
         var box = CGRect(x: 0, y: 0, width: 612, height: 792)
@@ -79,7 +83,12 @@ enum CertificateEngine {
         } else {
             draw("[PASS]  Document-wide search for \(terms.count) redacted term\(terms.count == 1 ? "" : "s") returned 0 matches.", size: 10.5, gapAfter: 6)
         }
-        draw("[PASS]  Document metadata (author, title, creation tool) removed.", size: 10.5, gapAfter: 14)
+        if metadataStripped {
+            draw("[PASS]  Document metadata (author, title, creation tool) removed.", size: 10.5, gapAfter: 14)
+        } else {
+            draw("[NOTE]  Document metadata was PRESERVED — this file was edited in place, not", size: 10.5, gapAfter: 6)
+            draw("        exported. Use Clean for Sharing to strip metadata before distribution.", size: 10.5, gapAfter: 14)
+        }
         rule()
 
         draw("To verify this certificate matches the file you hold, run:", size: 10, gapAfter: 5)

@@ -134,6 +134,7 @@ final class JackDocument: NSDocument {
                 self?.hasSavedCopy = true
                 self?.pendingCopyName = nil
                 self?.postDirtyChanged()
+                self?.emitRedactionCertificateIfNeeded(savedTo: url)
             }
             completionHandler(error)
         }
@@ -147,6 +148,41 @@ final class JackDocument: NSDocument {
 
     private func postDirtyChanged() {
         NotificationCenter.default.post(name: .jackDocumentDirtyChanged, object: self)
+    }
+
+    // v2.5: redaction applies in place, so the certificate is issued here — against the file
+    // the user actually wrote, not an intermediate. The primary guarantee is already met by
+    // then: every redacted page was verified to carry zero extractable text BEFORE it entered
+    // the document, so unverifiable content never reaches disk in the first place.
+    //
+    // NOTE — this deliberately narrows the v1.5 "unverified output is DELETED" rule. That rule
+    // protected a deliverable Jack authored on its own. Here the file is one the user asked to
+    // save, and silently deleting their document would be the worse failure. The gate moved
+    // EARLIER (pre-swap) instead; this pass is a second net that reports rather than destroys.
+    private func emitRedactionCertificateIfNeeded(savedTo url: URL) {
+        guard let wc = windowControllers.compactMap({ $0 as? DocumentWindowController }).first,
+              let info = wc.pendingCertificateInfo else { return }
+
+        let issues = RedactionEngine.verify(outputURL: url, redactedPages: info.pages,
+                                            forbiddenTerms: info.terms, checkMetadata: false)
+        guard issues.isEmpty else {
+            let alert = NSAlert()
+            alert.alertStyle = .critical
+            alert.messageText = "Saved, but the redaction did NOT verify"
+            alert.informativeText = "“\(url.lastPathComponent)” was written as you asked, but it failed "
+                + "verification and may still contain recoverable content. Do not distribute it.\n\n• "
+                + issues.joined(separator: "\n• ")
+            alert.runModal()
+            return
+        }
+
+        let certURL = url.deletingPathExtension().appendingPathExtension("certificate.pdf")
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+        let ok = CertificateEngine.generate(forRedacted: url, redactedPages: info.pages,
+                                            regionCount: info.regions, terms: info.terms,
+                                            appVersion: version, metadataStripped: false, to: certURL)
+        wc.noteCertificate(ok ? "Redaction verified — certificate saved as \(certURL.lastPathComponent)"
+                              : "Redaction verified — the certificate could not be written")
     }
 
     // MARK: - Persistence builder

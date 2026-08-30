@@ -92,6 +92,15 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     private let redactTermField = NSTextField()
     private var redactedTerms: Set<String> = []   // fed to the verify pass as forbidden terms
 
+    // Redactions applied in this session. The save path reads this to emit the verification
+    // certificate beside the file the user actually wrote.
+    private(set) var redactedPageLog: Set<Int> = []
+    private(set) var redactedRegionCount = 0
+    var pendingCertificateInfo: (pages: [Int], regions: Int, terms: [String])? {
+        redactedPageLog.isEmpty ? nil : (redactedPageLog.sorted(), redactedRegionCount, Array(redactedTerms))
+    }
+    func noteCertificate(_ message: String) { flashSubtitle(message) }
+
     // Erase strip controls (whiteout that actually removes)
     private var eraseOn = false
     private var eraseAccessory: NSTitlebarAccessoryViewController?
@@ -1504,51 +1513,72 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         forceRefresh()
     }
 
+    // v2.5: Apply Redactions is an EDIT, not an export — the same discipline as Apply Erase.
+    // Every replacement page is built and VERIFIED to carry zero extractable text BEFORE the
+    // document is touched; a single failure leaves the document completely unmodified. The
+    // verification certificate is emitted at SAVE time, so it hashes the file actually shipped
+    // rather than an intermediate the user never sees.
     @objc private func applyRedactions() {
-        guard let doc = pdfView.document, let window = window else { return }
+        guard let doc = pdfView.document else { return }
         let marks = allRedactionMarks()
         guard !marks.isEmpty else {
-            infoAlert("Nothing marked", "Drag over content (or use “Redact every occurrence of…”) to mark it first.")
+            infoAlert("Nothing marked", "Drag over content (or use \u{201C}Redact every occurrence of\u{2026}\u{201D}) to mark it first.")
             return
         }
-        var redactions: [Int: [CGRect]] = [:]
-        for (i, a) in marks { redactions[i, default: []].append(a.bounds) }
-        let redactedPages = Array(redactions.keys).sorted()
-        let terms = Array(redactedTerms)
+        var regions: [Int: [CGRect]] = [:]
+        for (i, a) in marks { regions[i, default: []].append(a.bounds) }
 
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = exportBaseName + "-redacted.pdf"
-        panel.directoryURL = pdfURL.deletingLastPathComponent()
-        if #available(macOS 11.0, *) { panel.allowedContentTypes = [.pdf] }
-        panel.beginSheetModal(for: window) { [weak self] resp in
-            guard resp == .OK, let out = panel.url, let self = self else { return }
-            guard RedactionEngine.apply(doc, redactions: redactions, to: out) else {
-                infoAlert("Redaction failed", "Couldn’t write the redacted PDF. Nothing was saved.")
+        var swaps: [(Int, PDFPage, PDFPage)] = []
+        for (i, rects) in regions.sorted(by: { $0.key < $1.key }) {
+            guard let old = doc.page(at: i),
+                  let new = RedactionEngine.destroyedPage(old, regions: rects, style: .blackout),
+                  (new.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                infoAlert("Redaction NOT applied",
+                          "Page \(i + 1) couldn\u{2019}t be verified as fully removed — the document was not modified.")
                 return
             }
-            let issues = RedactionEngine.verify(outputURL: out, redactedPages: redactedPages, forbiddenTerms: terms)
-            if issues.isEmpty {
-                self.clearRedactionMarks()
-                // The differentiator: a verification certificate beside every verified redaction.
-                let certURL = out.deletingPathExtension().appendingPathExtension("certificate.pdf")
-                let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
-                let certOK = CertificateEngine.generate(forRedacted: out, redactedPages: redactedPages,
-                                                        regionCount: marks.count, terms: terms,
-                                                        appVersion: version, to: certURL)
-                NSWorkspace.shared.activateFileViewerSelecting(certOK ? [out, certURL] : [out])
-                NSSound(named: "Glass")?.play()
-                let n = redactedPages.count
-                infoAlert("Redaction verified",
-                          "\(n) page\(n == 1 ? "" : "s") permanently flattened — 0 recoverable characters under the redactions, metadata removed. Saved as \(out.lastPathComponent)."
-                          + (certOK ? "\n\nA verification certificate with the file's SHA-256 digest was saved alongside it." : ""))
+            swaps.append((i, old, new))
+        }
+
+        for (_, a) in marks { a.page?.removeAnnotation(a) }   // marks are consumed
+        for (i, _, new) in swaps {
+            doc.removePage(at: i)
+            doc.insert(new, at: i)
+        }
+
+        let pages = swaps.map { $0.0 }
+        // One ⌘Z undoes the page swap AND the certificate log together.
+        docUndo.beginUndoGrouping()
+        registerPermanentCropUndo(swaps, restoreOld: true, name: "Redact")
+        registerRedactionLogUndo(pages: pages, regions: marks.count, adding: true)
+        docUndo.endUndoGrouping()
+        redactedPageLog.formUnion(pages)
+        redactedRegionCount += marks.count
+
+        updateRedactCount()
+        sidebar.reload()
+        forceRefresh()
+        setRedact(on: false)
+        NSSound(named: "Glass")?.play()
+        let n = pages.count
+        flashSubtitle("Redacted \(n) page\(n == 1 ? "" : "s") — 0 recoverable characters. ⌘S to save; a certificate saves alongside.")
+    }
+
+    // Keeps the certificate log in step with undo/redo, so ⌘Z after a redaction does not leave
+    // Jack claiming a redaction the document no longer carries.
+    private func registerRedactionLogUndo(pages: [Int], regions: Int, adding: Bool) {
+        docUndo.registerUndo(withTarget: self) { me in
+            if adding {
+                me.redactedPageLog.subtract(pages)
+                me.redactedRegionCount = max(0, me.redactedRegionCount - regions)
             } else {
-                // Never leave a leaky artifact on disk.
-                try? FileManager.default.removeItem(at: out)
-                infoAlert("Redaction NOT verified — file deleted",
-                          "The output failed verification and was deleted:\n\n• " + issues.joined(separator: "\n• "))
+                me.redactedPageLog.formUnion(pages)
+                me.redactedRegionCount += regions
             }
+            me.registerRedactionLogUndo(pages: pages, regions: regions, adding: !adding)
         }
     }
+
 
     // MARK: - Clean for Sharing (flatten everything + strip metadata + optional lock)
 
