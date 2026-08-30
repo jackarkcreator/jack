@@ -197,6 +197,12 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
                 items.insert(.separator(), at: 0)
                 items.insert(save, at: 0)
                 items.insert(copy, at: 0)
+                if ObjectRemovalEngine.canRemove(hit) {
+                    let remove = NSMenuItem(title: "Remove Object",
+                                            action: #selector(self.removeHitObject(_:)), keyEquivalent: "")
+                    remove.target = self
+                    items.insert(remove, at: 2)
+                }
             }
             return items
         }
@@ -2219,6 +2225,34 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     // - a real file on disk + its file-URL flavor → Finder/Desktop paste works too
     //   (image data alone leaves Finder's Paste greyed out — the classic complaint)
     // Then a read-back self-check: if the write didn't land, SAY so.
+    // Remove Object: delete this one image and leave the rest of the page exactly as drawn —
+    // background, text layer and all. Erase is the fallback for anything that is not a discrete
+    // object (a region of a photo, a scanned page), and the alert says so when this can't run.
+    @objc private func removeHitObject(_ sender: Any?) {
+        guard let (hit, page) = lastImageHit, let doc = pdfView.document else { return }
+        let index = doc.index(for: page)
+        guard index != NSNotFound else { return }
+
+        // The engine returns nil unless it can PROVE the image object left the file, so a
+        // non-nil result is the guarantee — there is nothing to re-check here.
+        guard let cleaned = ObjectRemovalEngine.removing(hit, from: page) else {
+            infoAlert("Couldn’t remove this object",
+                      "This image couldn’t be removed on its own — it may be used more than once on the page, "
+                      + "or be part of a scanned page rather than a separate object.\n\nUse Erase to remove it "
+                      + "as a region instead. Nothing was changed.")
+            return
+        }
+
+        doc.removePage(at: index)
+        doc.insert(cleaned, at: index)
+        registerPermanentCropUndo([(index, page, cleaned)], restoreOld: true, name: "Remove Object")
+        lastImageHit = nil
+        sidebar.reload()
+        forceRefresh()
+        NSSound(named: "Glass")?.play()
+        flashSubtitle("Object removed — background and text untouched, ⌘Z to undo")
+    }
+
     @objc private func copyHitImage(_ sender: Any?) {
         guard let (hit, page) = lastImageHit,
               let img = ImageHitEngine.extract(hit, from: page),

@@ -14,6 +14,9 @@ struct PDFPageImage {
     let pixelWidth: Int
     let pixelHeight: Int
     let jpegData: Data?       // DCTDecode passthrough when available
+    /// XObject resource name (e.g. "Im0") — what `Do` refers to. Remove Object needs this to
+    /// find the object in the file; extraction ignores it.
+    let name: String
 }
 
 enum ImageHitEngine {
@@ -152,7 +155,7 @@ enum ImageHitEngine {
                 let jpeg = (fmt == .jpegEncoded) ? (data as Data?) : nil
                 found.append(PDFPageImage(rect: rect.standardized,
                                           pixelWidth: Int(wInt), pixelHeight: Int(hInt),
-                                          jpegData: jpeg))
+                                          jpegData: jpeg, name: String(cString: name)))
             } else if subtype == "Form", depth < 8 {
                 depth += 1
                 defer { depth -= 1 }
