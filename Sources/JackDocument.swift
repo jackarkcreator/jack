@@ -84,6 +84,13 @@ final class JackDocument: NSDocument, PDFDocumentDelegate {
                           userInfo: [NSLocalizedDescriptionKey: "“\(url.lastPathComponent)” couldn’t be read as a PDF."])
         }
         doc.delegate = self    // before baseline/page access — lazy pages become JackPage
+        // Jack renders supported widgets itself (JackPage chrome); PDFView's own widget
+        // painting sits ON TOP of the page render and would cover it. Runtime-only —
+        // buildPersistedDocument restores visibility on everything it writes.
+        for i in 0..<doc.pageCount {
+            guard let pg = doc.page(at: i) else { continue }
+            for a in pg.annotations where JackFormUI.isSupported(a) { a.shouldDisplay = false }
+        }
         pdf = doc
         originalURLForReveal = url
         if let raw = try? Data(contentsOf: url) {
@@ -338,8 +345,11 @@ final class JackDocument: NSDocument, PDFDocumentDelegate {
             guard let p = persisted else { continue }
 
             // Ephemeral overlays never reach disk; badges convert to standard notes.
+            // Widgets hidden for Jack's own rendering become visible again — a written
+            // file must NEVER carry /F hidden on form fields (Acrobat would blank them).
             for ann in p.annotations {
                 if ann is RedactionAnnotation { p.removeAnnotation(ann) }
+                if ann.type == "Widget" { ann.shouldDisplay = true }
             }
             for ann in page.annotations.compactMap({ $0 as? CommentBadgeAnnotation }) {
                 // Remove any straggler badge on the copy, then add the portable note.

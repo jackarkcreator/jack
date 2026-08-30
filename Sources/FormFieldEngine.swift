@@ -66,6 +66,10 @@ enum FormFieldEngine {
             a.backgroundColor = .white
             a.color = NSColor(calibratedWhite: 0.72, alpha: 1)
             let b = PDFBorder(); b.lineWidth = 0.75; a.border = b
+            // PDFView paints widgets ITSELF, over the page render — hiding them at runtime
+            // is what lets JackPage's chrome be the thing on screen. buildPersistedDocument
+            // restores visibility on the written copies, so no other reader ever sees /F hidden.
+            a.shouldDisplay = false
             return a
         }
         switch kind {

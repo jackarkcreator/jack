@@ -943,7 +943,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     /// One row, fixed height, always present — only its content changes (the mock's law).
     private func populateModeRow() {
         modeRow.subviews.forEach { $0.removeFromSuperview() }
-        modeRow.rightAligned = []
+        modeRow.resetAnchors()
         pagePopup = nil
         blackoutChip = nil; eraseChip = nil
         markupHint = nil
@@ -971,7 +971,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         hint.alignment = .right
         hint.frame = NSRect(x: 0, y: 13, width: min(640, hint.intrinsicContentSize.width + 8), height: 16)
         modeRow.addSubview(hint)
-        modeRow.anchorRight(hint, gap: 16)
+        modeRow.anchorRight(hint, gap: 16, yields: true)
         return hint
     }
 
@@ -986,8 +986,19 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     private final class ToolStripView: NSView {
         /// (view, gap): each view's trailing edge sits `gap` points in from the strip's right.
         var rightAligned: [(view: NSView, gap: CGFloat)] = []
-        func anchorRight(_ view: NSView, gap: CGFloat) {
+        var yielding: Set<ObjectIdentifier> = []          // hints: hide instead of overlapping
+        private var yieldOverride: [ObjectIdentifier: Bool] = [:]
+        func anchorRight(_ view: NSView, gap: CGFloat, yields: Bool = false) {
             rightAligned.append((view, gap))
+            if yields { yielding.insert(ObjectIdentifier(view)) }
+            realign()
+        }
+        func resetAnchors() {
+            rightAligned = []; yielding = []; yieldOverride = [:]
+        }
+        /// External visibility control for a yielding view (collision still wins).
+        func setYieldHidden(_ view: NSView, _ hidden: Bool) {
+            yieldOverride[ObjectIdentifier(view)] = hidden
             realign()
         }
         private func realign() {
@@ -995,8 +1006,16 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             for v in subviews where v.frame.height < bounds.height {
                 v.frame.origin.y = ((bounds.height - v.frame.height) / 2).rounded()
             }
+            let anchored = Set(rightAligned.map { ObjectIdentifier($0.view) })
+            let leftMax = subviews.filter { !anchored.contains(ObjectIdentifier($0)) }
+                .map { $0.frame.maxX }.max() ?? 0
             for (v, gap) in rightAligned {
                 v.frame.origin.x = bounds.maxX - gap - v.frame.width
+                let id = ObjectIdentifier(v)
+                if yielding.contains(id) {
+                    // A hint never overlaps real controls — it yields (narrow windows).
+                    v.isHidden = (yieldOverride[id] ?? false) || v.frame.minX < leftMax + 12
+                }
             }
         }
         override func resizeSubviews(withOldSize oldSize: NSSize) {
@@ -1201,7 +1220,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         sizeSlider.isHidden = !has;   sizeSlider.isEnabled = has
         removeButton.isHidden = !has; removeButton.isEnabled = has
         stampSizeLabel.isHidden = !has
-        markupHint?.isHidden = has
+        if let hint = markupHint { modeRow.setYieldHidden(hint, has) }
     }
 
     private func buildRedactRow() {
@@ -2697,6 +2716,22 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         mutate()
 
         let doc = pdfView.document
+        // The reassign rebuilds PDFView's tiles ASYNCHRONOUSLY — the view blanks (white)
+        // until they land, a visible flash on dark pages. Cover the visible page area with
+        // its real post-mutation pixels (page render — the proven path) while tiles settle.
+        var cover: NSImageView?
+        if let doc, let i = destIndex, let page = doc.page(at: min(max(0, i), max(0, doc.pageCount - 1))) {
+            let pageVisible = pdfView.convert(pdfView.bounds, to: page)
+                .intersection(page.bounds(for: .cropBox))
+            if pageVisible.width > 4, pageVisible.height > 4,
+               let img = CropEngine.snapshotImage(page: page, region: pageVisible) {
+                let iv = NSImageView(frame: pdfView.convert(pageVisible, from: page))
+                iv.image = img
+                iv.imageScaling = .scaleAxesIndependently
+                pdfView.addSubview(iv)
+                cover = iv
+            }
+        }
         pdfView.document = nil
         pdfView.document = doc
         let restore: () -> Void = { [weak self] in
@@ -2709,6 +2744,14 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         restore()
         DispatchQueue.main.async(execute: restore)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: restore)
+        if let cover {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.32) {
+                NSAnimationContext.runAnimationGroup({ ctx in
+                    ctx.duration = 0.12
+                    cover.animator().alphaValue = 0
+                }, completionHandler: { cover.removeFromSuperview() })
+            }
+        }
         pageChanged()
     }
 

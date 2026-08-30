@@ -46,6 +46,7 @@ final class SigningPDFView: PDFView {
     var armedFieldKind: FormFieldKind?
     private var resizingWidget: PDFAnnotation?
     private var resizeStart: CGRect = .zero
+    private var resizeGrab: CGPoint = .zero
     /// Build-mode selection (the adornment view and ⌫ read this).
     private(set) var selectedField: (name: String, widget: PDFAnnotation)?
 
@@ -136,7 +137,8 @@ final class SigningPDFView: PDFView {
             // in place, double-click a choice field opens its options.
             if let sel = selectedField, sel.widget.page === page,
                JackFormUI.seHandleHit(for: sel.widget.bounds).contains(p) {
-                resizingWidget = sel.widget; resizeStart = sel.widget.bounds; dragPage = page
+                resizingWidget = sel.widget; resizeStart = sel.widget.bounds
+                resizeGrab = p; dragPage = page
                 return
             }
             let hit = page.annotations.last(where: { $0.type == "Widget" && $0.bounds.insetBy(dx: -2, dy: -2).contains(p) })
@@ -264,11 +266,18 @@ final class SigningPDFView: PDFView {
             return
         }
         if let w = resizingWidget, let page = dragPage {
+            // DELTA from the grab point (grabbing the handle must not jump the size), free
+            // range in both directions — small to large and everything between (Keno).
             let p = convert(convert(event.locationInWindow, from: nil), to: page)
+            let dx = p.x - resizeGrab.x
+            let dy = p.y - resizeGrab.y
             let isButton = w.widgetControlType == .checkBoxControl || w.widgetControlType == .radioButtonControl
-            var newW = max(16, p.x - resizeStart.minX)
-            var newH = max(14, resizeStart.maxY - p.y)
-            if isButton { let side = max(14, min(max(newW, newH), 40)); newW = side; newH = side }
+            var newW = max(12, resizeStart.width + dx)
+            var newH = max(12, resizeStart.height - dy)
+            if isButton {
+                let side = max(10, min(64, (newW + newH) / 2))
+                newW = side; newH = side
+            }
             w.bounds = CGRect(x: resizeStart.minX, y: resizeStart.maxY - newH, width: newW, height: newH)
             needsDisplay = true
             stampDelegate?.fieldBoundsChanging()
