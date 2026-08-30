@@ -272,9 +272,16 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         }
     }
 
+    // Continuously tracked so forceRefresh can restore position even when the page OBJECT
+    // the view was on has just been swapped out (erase/redact/retype replace page objects —
+    // a destination captured after the swap points at a page with no index, and without this
+    // the restore silently did nothing and the view snapped to the top: "the page jumps").
+    private var lastKnownPageIndex = 0
+
     @objc private func pageChanged() {
         guard let doc = pdfView.document, let page = pdfView.currentPage else { return }
         let index = doc.index(for: page)
+        if index != NSNotFound { lastKnownPageIndex = index }
         setSubtitle("Page \(index + 1) of \(doc.pageCount)")
         sidebar.highlight(pageIndex: index)
     }
@@ -2120,7 +2127,14 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         var destPoint = CGPoint.zero
         if let dest = pdfView.currentDestination, let p = dest.page, let d = doc {
             let i = d.index(for: p)
-            if i != NSNotFound { destIndex = i; destPoint = dest.point }
+            if i != NSNotFound {
+                destIndex = i; destPoint = dest.point
+            } else {
+                // The viewed page object was just swapped out (erase/redact/retype). Its
+                // replacement sits at the index we were on — restore there, same point.
+                destIndex = min(lastKnownPageIndex, max(0, (d.pageCount) - 1))
+                destPoint = dest.point
+            }
         }
         let fallbackPage = pdfView.currentPage
 
