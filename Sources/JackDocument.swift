@@ -79,6 +79,9 @@ final class JackDocument: NSDocument {
         }
         pdf = doc
         originalURLForReveal = url
+        if let raw = try? Data(contentsOf: url) {
+            incrementalBaseline = IncrementalSave.baseline(for: doc, data: raw)
+        }
         isJackProduced = (doc.documentAttributes?[PDFDocumentAttribute.creatorAttribute] as? String)
             == JackDocument.creatorMarker
         hasSavedCopy = false
@@ -91,6 +94,22 @@ final class JackDocument: NSDocument {
     }
 
     override func data(ofType typeName: String) throws -> Data {
+        // FIRST CHOICE: the incremental save. PDFKit's writer outlines text for fonts it
+        // cannot re-embed, so untouched pages must keep their ORIGINAL bytes. Only pages Jack
+        // itself rasterized are appended; the result must self-verify (untouched-page text
+        // identical, swapped pages render) or we fall back to the full rewrite below —
+        // worst case is exactly yesterday's behavior. Widget-bearing docs always fall back:
+        // typed form values change annotation STATE without changing the annotation set,
+        // and the incremental path would silently drop them.
+        if let live = pdf, let baseline = incrementalBaseline,
+           !FormFieldEngine.hasWidgets(live),
+           let candidate = IncrementalSave.build(current: live, baseline: baseline),
+           IncrementalSave.verify(candidate: candidate, current: live, baseline: baseline).isEmpty {
+            droppedTextLayer = false
+            incrementalBaseline = IncrementalSave.baseline(for: live, data: candidate)
+            return candidate
+        }
+
         guard let live = pdf,
               let out = JackDocument.buildPersistedDocument(from: live),
               let data = out.dataRepresentation() else {
@@ -102,8 +121,13 @@ final class JackDocument: NSDocument {
 
         // The fresh-document rebuild drops /AcroForm (fields go dead in Acrobat/Chrome)
         // and loses radio /V + /AS. Repair both at the byte level; no-op for widget-free docs.
-        guard FormFieldEngine.hasWidgets(live) else { return data }
-        return AcroFormFixup.fix(data: data, radioAsserts: FormFieldEngine.radioAsserts(from: live))
+        let final = FormFieldEngine.hasWidgets(live)
+            ? AcroFormFixup.fix(data: data, radioAsserts: FormFieldEngine.radioAsserts(from: live))
+            : data
+        // Disk is now PDFKit-normalized (classic xref) — future saves can increment on top,
+        // and the live pages ARE the file's pages again.
+        incrementalBaseline = IncrementalSave.baseline(for: live, data: final)
+        return final
     }
 
     override func makeWindowControllers() {
@@ -207,6 +231,10 @@ final class JackDocument: NSDocument {
 
     /// The file this document was opened from, remembered before the first save moved us.
     private var originalURLForReveal: URL?
+
+    /// Snapshot for the incremental save: the file's original bytes plus what each page looked
+    /// like at load. Refreshed after every successful save so ⌘S chains further increments.
+    private var incrementalBaseline: IncrementalSave.Baseline?
 
     private func postDirtyChanged() {
         NotificationCenter.default.post(name: .jackDocumentDirtyChanged, object: self)
