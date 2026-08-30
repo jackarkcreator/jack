@@ -1826,10 +1826,18 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             }
         }
 
+        // Where the original ink actually starts vertically — measured, so the replacement
+        // sits ON the old line, not merely inside the selection box.
+        let originalInkTop = RetypeMetrics.inkTop(of: page, in: rect)
+        // Pad the erase: raster rounding and glyph antialiasing leave sliver artifacts at the
+        // exact selection edge ("small artifacts" on Keno's screen). ~1pt each way clears them
+        // without reaching the neighbouring words.
+        let eraseRect = rect.insetBy(dx: -1.25, dy: -1.5)
+            .intersection(page.bounds(for: .mediaBox))
         let index = doc.index(for: page)
         guard index != NSNotFound,
-              let new = RedactionEngine.destroyedPage(page, regions: [rect], style: .erase),
-              RedactionEngine.preservesContent(original: page, replacement: new, regions: [rect]) else {
+              let new = RedactionEngine.destroyedPage(page, regions: [eraseRect], style: .erase),
+              RedactionEngine.preservesContent(original: page, replacement: new, regions: [eraseRect]) else {
             infoAlert("Couldn\u{2019}t retype here", "This span couldn\u{2019}t be removed cleanly, so nothing was changed.")
             return
         }
@@ -1857,7 +1865,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         // The editor stands alone — Retype is one gesture, it must NOT leave the typewriter
         // armed. (Armed mode turned the next text-selection click into "place an editor here",
         // which also yanked the view to the new capsule — the "jumps when I select" bug.)
-        openTypewriterEditor(on: new, at: CGPoint(x: rect.minX, y: rect.maxY),
+        openTypewriterEditor(on: new, at: CGPoint(x: rect.minX, y: originalInkTop ?? rect.maxY - 1),
                              existing: nil, prefill: text, sizeOverride: fontSize)
         typewriterEditor?.field.selectText(nil)
         flashSubtitle("Retype — edit the words, Return places them. \u{2318}Z twice undoes everything")
@@ -1913,7 +1921,11 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             bounds = CGRect(x: target.point.x, y: target.point.y - measured.height - 4,
                             width: measured.width + 8, height: measured.height + 4)
         }
-        let ann = PDFAnnotation(bounds: bounds, forType: .freeText, withProperties: nil)
+        // The point the user (or Retype) gave us is where the INK should start — compensate
+        // for FreeText's internal inset so it does, instead of drifting right and down.
+        let inset = RetypeMetrics.inkInset(for: font)
+        let placed = bounds.offsetBy(dx: -inset.left, dy: inset.top)
+        let ann = PDFAnnotation(bounds: placed, forType: .freeText, withProperties: nil)
         ann.contents = text
         ann.font = font
         ann.fontColor = color
