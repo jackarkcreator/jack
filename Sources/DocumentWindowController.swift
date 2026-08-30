@@ -347,11 +347,24 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         toolbarDefaultItemIdentifiers(toolbar)
     }
 
+    // One symbol pipeline for the whole toolbar: consistent size, weight and scale is most of
+    // what separates a current-looking Tahoe toolbar from a dated one. Candidates are tried in
+    // order so newer glyph names can ship with safe fallbacks for older systems.
+    static let toolbarSymbolConfig = NSImage.SymbolConfiguration(pointSize: 15, weight: .medium, scale: .large)
+    static func toolbarSymbol(_ candidates: [String], _ label: String) -> NSImage? {
+        for name in candidates {
+            if let img = NSImage(systemSymbolName: name, accessibilityDescription: label) {
+                return img.withSymbolConfiguration(toolbarSymbolConfig) ?? img
+            }
+        }
+        return nil
+    }
+
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier id: NSToolbarItem.Identifier,
                  willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
         func simple(_ id: NSToolbarItem.Identifier, _ symbol: String, _ label: String, _ action: Selector) -> NSToolbarItem {
             let item = NSToolbarItem(itemIdentifier: id)
-            item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)
+            item.image = Self.toolbarSymbol([symbol], label)
             item.label = label
             item.toolTip = label
             item.target = self
@@ -363,7 +376,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         case ItemID.sidebar:
             // Preview-style view pull-down: Thumbnails toggle + page display modes.
             let item = NSMenuToolbarItem(itemIdentifier: id)
-            item.image = NSImage(systemSymbolName: "sidebar.left", accessibilityDescription: "View")
+            item.image = Self.toolbarSymbol(["sidebar.leading", "sidebar.left"], "View")
             item.label = "View"
             item.toolTip = "Thumbnails and page layout"
             let menu = NSMenu()
@@ -377,8 +390,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             return item
         case ItemID.ask:
             let item = NSToolbarItem(itemIdentifier: id)
-            let b = NSButton(image: NSImage(systemSymbolName: "wand.and.stars",
-                                            accessibilityDescription: "Ask") ?? NSImage(),
+            let b = NSButton(image: Self.toolbarSymbol(["wand.and.stars"], "Ask") ?? NSImage(),
                              target: self, action: #selector(toggleAsk(_:)))
             b.setButtonType(.pushOnPushOff)
             b.bezelStyle = .texturedRounded
@@ -389,8 +401,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             return item
         case ItemID.share:
             let item = NSToolbarItem(itemIdentifier: id)
-            let b = NSButton(image: NSImage(systemSymbolName: "square.and.arrow.up",
-                                            accessibilityDescription: "Share") ?? NSImage(),
+            let b = NSButton(image: Self.toolbarSymbol(["square.and.arrow.up"], "Share") ?? NSImage(),
                              target: self, action: #selector(shareDocument(_:)))
             b.bezelStyle = .texturedRounded
             shareButton = b
@@ -406,7 +417,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         case ItemID.clean:   return simple(id, "sparkles", "Clean for Sharing", #selector(cleanForSharing(_:)))
         case ItemID.tools:
             let item = NSMenuToolbarItem(itemIdentifier: id)
-            item.image = NSImage(systemSymbolName: "wrench.and.screwdriver", accessibilityDescription: "Tools")
+            item.image = Self.toolbarSymbol(["wrench.and.screwdriver"], "Tools")
             item.label = "Tools"
             item.toolTip = "Document tools"
             let menu = NSMenu()
@@ -426,7 +437,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             return item
         case ItemID.highlight:
             let item = NSMenuToolbarItem(itemIdentifier: id)
-            item.image = NSImage(systemSymbolName: "highlighter", accessibilityDescription: "Annotate")
+            item.image = Self.toolbarSymbol(["highlighter"], "Annotate")
             item.label = "Annotate"
             item.toolTip = "Highlight, underline, strikethrough"
             let menu = NSMenu()
@@ -446,8 +457,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             return item
         case ItemID.redact:
             let item = NSToolbarItem(itemIdentifier: id)
-            let b = NSButton(image: NSImage(systemSymbolName: "rectangle.slash",
-                                            accessibilityDescription: "Redact") ?? NSImage(),
+            let b = NSButton(image: Self.toolbarSymbol(["rectangle.slash"], "Redact") ?? NSImage(),
                              target: self, action: #selector(toggleRedact(_:)))
             b.setButtonType(.pushOnPushOff)
             b.bezelStyle = .texturedRounded
@@ -458,8 +468,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             return item
         case ItemID.erase:
             let item = NSToolbarItem(itemIdentifier: id)
-            let img = NSImage(systemSymbolName: "eraser", accessibilityDescription: "Erase")
-                ?? NSImage(systemSymbolName: "rectangle.badge.minus", accessibilityDescription: "Erase")
+            let img = Self.toolbarSymbol(["eraser", "rectangle.badge.minus"], "Erase")
             let b = NSButton(image: img ?? NSImage(), target: self, action: #selector(toggleErase(_:)))
             b.setButtonType(.pushOnPushOff)
             b.bezelStyle = .texturedRounded
@@ -470,8 +479,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             return item
         case ItemID.form:
             let item = NSToolbarItem(itemIdentifier: id)
-            let b = NSButton(image: NSImage(systemSymbolName: "character.textbox",
-                                            accessibilityDescription: "Form") ?? NSImage(),
+            let b = NSButton(image: Self.toolbarSymbol(["character.textbox"], "Form") ?? NSImage(),
                              target: self, action: #selector(toggleForm(_:)))
             b.setButtonType(.pushOnPushOff)
             b.bezelStyle = .texturedRounded
@@ -483,8 +491,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         case ItemID.print:   return simple(id, "printer", "Print", #selector(printDocument(_:)))
         case ItemID.markup:
             let item = NSToolbarItem(itemIdentifier: id)
-            let b = NSButton(image: NSImage(systemSymbolName: "pencil.tip.crop.circle",
-                                            accessibilityDescription: "Markup") ?? NSImage(),
+            let b = NSButton(image: Self.toolbarSymbol(["pencil.and.scribble", "pencil.tip.crop.circle"], "Markup") ?? NSImage(),
                              target: self, action: #selector(toggleMarkup(_:)))
             b.setButtonType(.pushOnPushOff)
             b.bezelStyle = .texturedRounded
