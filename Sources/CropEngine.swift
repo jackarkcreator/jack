@@ -32,7 +32,9 @@ enum CropEngine {
         ctx.restoreGState()
         ctx.endPDFPage()
         ctx.closePDF()
-        return PDFDocument(data: data as Data)?.page(at: 0)
+        guard let built = PDFDocument(data: data as Data), let out = built.page(at: 0) else { return nil }
+        out.retainBackingDocument(built)
+        return out
     }
 
     /// Region render for the snapshot tool.

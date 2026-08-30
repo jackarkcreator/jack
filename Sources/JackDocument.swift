@@ -268,13 +268,9 @@ final class JackDocument: NSDocument {
             var persisted: PDFPage?
             if hasStamps {
                 persisted = flattenedCopy(of: page, pageIndex: i)
-                // 🧨 Page rendering is racy (see RedactionEngine.contentSignal): a flatten can
-                // come back blank on a page that has content. Retry, and if it still comes back
-                // empty, write the page VERBATIM. Losing a burned-in watermark is recoverable;
-                // writing a blank page over the user's content is not.
-                if let p = persisted, !RedactionEngine.preservesContent(original: page, replacement: p, regions: []) {
-                    persisted = flattenedCopy(of: page, pageIndex: i)
-                }
+                // Backstop: if a flatten ever comes back without the page's content, write the
+                // page VERBATIM instead. Losing a burned-in watermark is recoverable; writing a
+                // blank page over the user's content is not.
                 if persisted == nil || !RedactionEngine.preservesContent(original: page, replacement: persisted!, regions: []) {
                     persisted = page.copy() as? PDFPage
                 }
@@ -353,6 +349,8 @@ final class JackDocument: NSDocument {
 
         ctx.endPDFPage()
         ctx.closePDF()
-        return PDFDocument(data: data as Data)?.page(at: 0)
+        guard let built = PDFDocument(data: data as Data), let out = built.page(at: 0) else { return nil }
+        out.retainBackingDocument(built)
+        return out
     }
 }

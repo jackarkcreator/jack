@@ -68,6 +68,7 @@ enum ObjectRemovalEngine {
         // satisfies "the image is gone".
         guard RedactionEngine.preservesContent(original: page, replacement: outPage,
                                                regions: [image.rect]) else { return nil }
+        outPage.retainBackingDocument(out)
         return outPage
     }
 

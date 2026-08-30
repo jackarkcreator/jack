@@ -2538,6 +2538,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         var swaps: [(Int, PDFPage, PDFPage)] = []
         for i in changed {
             guard let old = doc.page(at: i), let new = produced.page(at: i) else { return false }
+            new.retainBackingDocument(produced)   // else it copies as blank when saved
             swaps.append((i, old, new))
         }
         guard !swaps.isEmpty else { return true }
