@@ -387,6 +387,8 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             menu.addItem({ let m = NSMenuItem(title: "Make Searchable (OCR)…", action: #selector(makeSearchable(_:)), keyEquivalent: ""); m.target = self; return m }())
             menu.addItem({ let m = NSMenuItem(title: "Bates Numbering…", action: #selector(batesNumbering(_:)), keyEquivalent: ""); m.target = self; return m }())
             menu.addItem({ let m = NSMenuItem(title: "Watermark…", action: #selector(addWatermark(_:)), keyEquivalent: ""); m.target = self; return m }())
+            menu.addItem({ let m = NSMenuItem(title: "Remove Watermark", action: #selector(removeWatermark(_:)), keyEquivalent: ""); m.target = self; return m }())
+            menu.addItem({ let m = NSMenuItem(title: "Remove Bates Numbering", action: #selector(removeBates(_:)), keyEquivalent: ""); m.target = self; return m }())
             menu.addItem({ let m = NSMenuItem(title: "Compress…", action: #selector(compressDocument(_:)), keyEquivalent: ""); m.target = self; return m }())
             menu.addItem(.separator())
             menu.addItem({ let m = NSMenuItem(title: "Copy Region as Image", action: #selector(copyRegionAsImage(_:)), keyEquivalent: ""); m.target = self; return m }())
@@ -2588,11 +2590,14 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         }
     }
 
+    // v2.5 Phase 3: Bates and Watermark are LIVE marks on the open document — visible at once,
+    // undoable, removable — and they burn into the page as REAL VECTOR CONTENT at save, so a
+    // Bates number stays extractable and searchable the way legal production requires.
     @objc func batesNumbering(_ sender: Any?) {
-        guard let doc = pdfView.document, let window = window else { return }
+        guard let doc = pdfView.document else { return }
         let alert = NSAlert()
         alert.messageText = "Bates Numbering"
-        alert.informativeText = "Stamps a sequential number on every page (as real, searchable text). The original file is untouched."
+        alert.informativeText = "Numbers every page sequentially. The numbers appear now and are written into the file when you save."
         let box = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 58))
         let prefix = NSTextField(frame: NSRect(x: 0, y: 32, width: 150, height: 24))
         prefix.placeholderString = "Prefix (e.g. TRC-)"
@@ -2605,35 +2610,28 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         corner.addItems(withTitles: ["Bottom Right", "Bottom Left", "Top Right", "Top Left"])
         box.addSubview(prefix); box.addSubview(start); box.addSubview(digits); box.addSubview(corner)
         alert.accessoryView = box
-        alert.addButton(withTitle: "Stamp…")
+        alert.addButton(withTitle: "Add Numbering")
         alert.addButton(withTitle: "Cancel")
         alert.window.initialFirstResponder = prefix
         guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard confirmFlattenIfForm("Bates numbering") else { return }
+
         let startN = Int(start.stringValue.trimmingCharacters(in: .whitespaces)) ?? 1
         let digitsN = [4, 6, 8][max(0, digits.indexOfSelectedItem)]
         let cornerV = StampEngine.Corner(rawValue: corner.indexOfSelectedItem) ?? .bottomRight
 
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = exportBaseName + "-bates.pdf"
-        panel.directoryURL = pdfURL.deletingLastPathComponent()
-        if #available(macOS 11.0, *) { panel.allowedContentTypes = [.pdf] }
-        panel.beginSheetModal(for: window) { resp in
-            guard resp == .OK, let out = panel.url else { return }
-            if StampEngine.bates(doc, to: out, prefix: prefix.stringValue, start: startN,
-                                 digits: digitsN, corner: cornerV) {
-                NSWorkspace.shared.activateFileViewerSelecting([out])
-                NSSound(named: "Glass")?.play()
-            } else {
-                infoAlert("Stamp failed", "Couldn’t write the numbered PDF.")
-            }
+        applyOverlay(name: "Bates Numbering", replacing: { $0 is BatesAnnotation }) { page in
+            BatesAnnotation(prefix: prefix.stringValue, start: startN, digits: digitsN,
+                            corner: cornerV, pageBox: page.bounds(for: .mediaBox))
         }
+        flashSubtitle("Bates numbering added — renumbers if you reorder pages. \u{2318}S to save, \u{2318}Z to undo")
     }
 
     @objc func addWatermark(_ sender: Any?) {
-        guard let doc = pdfView.document, let window = window else { return }
+        guard pdfView.document != nil else { return }
         let alert = NSAlert()
         alert.messageText = "Watermark"
-        alert.informativeText = "Stamps a diagonal watermark across every page. The original file is untouched."
+        alert.informativeText = "Stamps a diagonal watermark across every page. It appears now and is written into the file when you save."
         let box = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 26))
         let text = NSTextField(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
         text.stringValue = "CONFIDENTIAL"
@@ -2642,27 +2640,97 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         strength.selectItem(at: 1)
         box.addSubview(text); box.addSubview(strength)
         alert.accessoryView = box
-        alert.addButton(withTitle: "Stamp…")
+        alert.addButton(withTitle: "Add Watermark")
         alert.addButton(withTitle: "Cancel")
         alert.window.initialFirstResponder = text
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         let wmText = text.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !wmText.isEmpty else { return }
+        guard confirmFlattenIfForm("A watermark") else { return }
         let opacity: CGFloat = [0.10, 0.18, 0.28][max(0, strength.indexOfSelectedItem)]
 
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = exportBaseName + "-watermarked.pdf"
-        panel.directoryURL = pdfURL.deletingLastPathComponent()
-        if #available(macOS 11.0, *) { panel.allowedContentTypes = [.pdf] }
-        panel.beginSheetModal(for: window) { resp in
-            guard resp == .OK, let out = panel.url else { return }
-            if StampEngine.watermark(doc, to: out, text: wmText, opacity: opacity) {
-                NSWorkspace.shared.activateFileViewerSelecting([out])
-                NSSound(named: "Glass")?.play()
-            } else {
-                infoAlert("Watermark failed", "Couldn’t write the watermarked PDF.")
+        applyOverlay(name: "Watermark", replacing: { $0 is WatermarkAnnotation }) { page in
+            WatermarkAnnotation(text: wmText, opacity: opacity, pageBox: page.bounds(for: .mediaBox))
+        }
+        flashSubtitle("Watermark added — \u{2318}S to save, \u{2318}Z to undo")
+    }
+
+    @objc func removeWatermark(_ sender: Any?) { removeOverlays(name: "Remove Watermark") { $0 is WatermarkAnnotation } }
+    @objc func removeBates(_ sender: Any?) { removeOverlays(name: "Remove Bates Numbering") { $0 is BatesAnnotation } }
+
+    // MARK: - Overlay plumbing
+
+    /// Burning a mark into a page rebuilds it, and a rebuilt page cannot keep live form
+    /// widgets. Say so plainly and let the user decide rather than silently killing their form.
+    private func confirmFlattenIfForm(_ what: String) -> Bool {
+        guard let doc = pdfView.document, FormFieldEngine.hasWidgets(doc) else { return true }
+        let a = NSAlert()
+        a.alertStyle = .warning
+        a.messageText = "This document has fillable form fields"
+        a.informativeText = "\(what) is written into the page itself when you save, which finalizes the form fields on these pages — they will keep their current values but stop being fillable.\n\nNothing is written until you save, and \u{2318}Z undoes this."
+        a.addButton(withTitle: "Add Anyway")
+        a.addButton(withTitle: "Cancel")
+        return a.runModal() == .alertFirstButtonReturn
+    }
+
+    /// Add one mark per page, replacing any of the same kind, as ONE undoable step.
+    private func applyOverlay(name: String, replacing matches: @escaping (PDFAnnotation) -> Bool,
+                              make: (PDFPage) -> OverlayAnnotation) {
+        guard let doc = pdfView.document else { return }
+        var removed: [(PDFPage, PDFAnnotation)] = []
+        var added: [(PDFPage, PDFAnnotation)] = []
+        for i in 0..<doc.pageCount {
+            guard let page = doc.page(at: i) else { continue }
+            for old in page.annotations where matches(old) {
+                page.removeAnnotation(old)
+                removed.append((page, old))
+            }
+            let mark = make(page)
+            page.addAnnotation(mark)
+            added.append((page, mark))
+        }
+        docUndo.beginUndoGrouping()
+        registerOverlayUndo(added: added, removed: removed, name: name)
+        docUndo.endUndoGrouping()
+        forceRefresh()
+        sidebar.reload()
+        NSSound(named: "Glass")?.play()
+    }
+
+    private func removeOverlays(name: String, matching: (PDFAnnotation) -> Bool) {
+        guard let doc = pdfView.document else { return }
+        var removed: [(PDFPage, PDFAnnotation)] = []
+        for i in 0..<doc.pageCount {
+            guard let page = doc.page(at: i) else { continue }
+            for a in page.annotations where matching(a) {
+                page.removeAnnotation(a)
+                removed.append((page, a))
             }
         }
+        guard !removed.isEmpty else {
+            infoAlert("Nothing to remove", "This document doesn\u{2019}t carry that mark.")
+            return
+        }
+        docUndo.beginUndoGrouping()
+        registerOverlayUndo(added: [], removed: removed, name: name)
+        docUndo.endUndoGrouping()
+        forceRefresh()
+        sidebar.reload()
+        flashSubtitle("Removed — \u{2318}Z to undo")
+    }
+
+    /// Inverse re-registers itself, so redo comes free — the pattern used by every other
+    /// undoable mutation in this window.
+    private func registerOverlayUndo(added: [(PDFPage, PDFAnnotation)],
+                                     removed: [(PDFPage, PDFAnnotation)], name: String) {
+        docUndo.registerUndo(withTarget: self) { me in
+            for (page, a) in added { page.removeAnnotation(a) }
+            for (page, a) in removed { page.addAnnotation(a) }
+            me.registerOverlayUndo(added: removed, removed: added, name: name)
+            me.forceRefresh()
+            me.sidebar.reload()
+        }
+        docUndo.setActionName(name)
     }
 
     // MARK: - Lock for Sharing

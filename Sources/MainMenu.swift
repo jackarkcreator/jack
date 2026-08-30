@@ -96,6 +96,8 @@ enum MainMenu {
         tools.addItem(item("Make Searchable (OCR)…", #selector(DocumentWindowController.makeSearchable(_:)), ""))
         tools.addItem(item("Bates Numbering…", #selector(DocumentWindowController.batesNumbering(_:)), ""))
         tools.addItem(item("Watermark…", #selector(DocumentWindowController.addWatermark(_:)), ""))
+        tools.addItem(item("Remove Watermark", #selector(DocumentWindowController.removeWatermark(_:)), ""))
+        tools.addItem(item("Remove Bates Numbering", #selector(DocumentWindowController.removeBates(_:)), ""))
         tools.addItem(item("Compress…", #selector(DocumentWindowController.compressDocument(_:)), ""))
         tools.addItem(.separator())
         tools.addItem(item("Copy Region as Image", #selector(DocumentWindowController.copyRegionAsImage(_:)), ""))

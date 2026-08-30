@@ -64,13 +64,21 @@ enum CropEngine {
             $0 is RedactionAnnotation || $0 is CommentBadgeAnnotation || $0.type == "Text"
         }
         let stamps = page.annotations.compactMap { $0 as? ImageStampAnnotation }
-        (overlays + stamps).forEach { page.removeAnnotation($0) }
+        let marks = page.overlayAnnotations
+        (overlays + stamps + marks).forEach { page.removeAnnotation($0) }
         page.draw(with: .mediaBox, to: cg)
         for s in stamps {
             if let img = s.image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
                 cg.draw(img, in: s.bounds)
             }
             page.addAnnotation(s)
+        }
+        // Watermark/Bates are page content, not review chatter — they belong in these outputs.
+        for m in marks {
+            cg.saveGState()
+            m.drawInto(cg, pageBox: page.bounds(for: .mediaBox))
+            cg.restoreGState()
+            page.addAnnotation(m)
         }
         overlays.forEach { page.addAnnotation($0) }
         cg.restoreGState()

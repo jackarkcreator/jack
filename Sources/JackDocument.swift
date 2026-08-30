@@ -192,10 +192,12 @@ final class JackDocument: NSDocument {
         var outIndex = 0
         for i in 0..<live.pageCount {
             guard let page = live.page(at: i) else { continue }
-            let hasStamps = page.annotations.contains { $0 is ImageStampAnnotation }
+            // Watermark/Bates burn into the page as real vector content, so a page carrying
+            // one is flattened exactly like a signed page.
+            let hasStamps = page.annotations.contains { $0 is ImageStampAnnotation || $0 is OverlayAnnotation }
             let persisted: PDFPage?
             if hasStamps {
-                persisted = flattenedCopy(of: page)
+                persisted = flattenedCopy(of: page, pageIndex: i)
             } else {
                 persisted = page.copy() as? PDFPage
             }
@@ -229,7 +231,7 @@ final class JackDocument: NSDocument {
 
     // Render one page (with stamps burned, overlays stripped) through a single-page PDF
     // context, so the flattened result can sit beside verbatim vector pages.
-    private static func flattenedCopy(of page: PDFPage) -> PDFPage? {
+    private static func flattenedCopy(of page: PDFPage, pageIndex: Int = 0) -> PDFPage? {
         var box = page.bounds(for: .mediaBox)
         let data = NSMutableData()
         guard let consumer = CGDataConsumer(data: data as CFMutableData),
@@ -241,9 +243,23 @@ final class JackDocument: NSDocument {
         overlays.forEach { page.removeAnnotation($0) }
         let stamps = page.annotations.compactMap { $0 as? ImageStampAnnotation }
         stamps.forEach { page.removeAnnotation($0) }
+        // Marks that burn as vector content — pulled out so page.draw cannot double-draw them,
+        // then drawn into the context by hand (custom annotations never render via page.draw).
+        let marks = page.overlayAnnotations
+        marks.forEach { page.removeAnnotation($0) }
         ctx.saveGState()
         page.draw(with: .mediaBox, to: ctx)
         ctx.restoreGState()
+        for m in marks {
+            ctx.saveGState()
+            if let b = m as? BatesAnnotation {
+                b.drawInto(ctx, pageBox: box, pageIndex: pageIndex)
+            } else {
+                m.drawInto(ctx, pageBox: box)
+            }
+            ctx.restoreGState()
+        }
+        marks.forEach { page.addAnnotation($0) }
         for s in stamps {
             if let cg = s.image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
                 ctx.saveGState()
