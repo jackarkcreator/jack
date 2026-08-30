@@ -1753,14 +1753,25 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
                              existing: ann)
     }
 
+    // Set by Retype so the replacement matches the ORIGINAL run — exact face, size and colour
+    // read from the selection (PDFKit exposes all three). Cleared on commit/cancel.
+    private var retypeFont: NSFont?
+    private var retypeColor: NSColor?
+
     private func openTypewriterEditor(on page: PDFPage, at point: CGPoint, existing: PDFAnnotation?,
                                       prefill: String? = nil, sizeOverride: CGFloat? = nil) {
-        let size = sizeOverride ?? existing.flatMap { $0.font?.pointSize } ?? typewriterFontSize
+        let size = sizeOverride ?? retypeFont?.pointSize
+            ?? existing.flatMap { $0.font?.pointSize } ?? typewriterFontSize
         let scale = pdfView.scaleFactor
         let viewPoint = pdfView.convert(point, from: page)
         let editor = TypewriterEditor(text: prefill ?? existing?.contents ?? "",
                                       fontSize: size * scale,
                                       at: NSPoint(x: viewPoint.x - 7, y: viewPoint.y - 60))
+        // WYSIWYG: type in the face you'll get.
+        if let f = retypeFont, let scaled = NSFont(descriptor: f.fontDescriptor, size: size * scale) {
+            editor.field.font = scaled
+            editor.sizeToText()
+        }
         editor.setFrameOrigin(NSPoint(x: viewPoint.x - 7, y: viewPoint.y + 7 - editor.frame.height))
         editor.field.delegate = self
         editor.field.target = self
@@ -1830,11 +1841,22 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         lastSelection = nil
         markDirty()
 
-        // Editor lands exactly on the old words, pre-filled, sized to the line.
-        if !markupOn { setMarkup(on: true) }
-        pdfView.typewriterMode = true
-        typewriterButton?.state = .on
-        let fontSize = min(72, max(8, (rect.height * 0.72).rounded()))
+        // Match the ORIGINAL run: PDFKit's selection carries the exact face, size and colour.
+        // (A subset-embedded name like "ABCDEF+Arial" needs its prefix stripped to resolve.)
+        var fontSize = min(72, max(8, (rect.height * 0.72).rounded()))
+        if let attr = sel.attributedString, attr.length > 0 {
+            let a = attr.attributes(at: 0, effectiveRange: nil)
+            if let f = a[.font] as? NSFont {
+                fontSize = f.pointSize
+                let bare = f.fontName.contains("+") ? String(f.fontName.split(separator: "+").last!) : f.fontName
+                retypeFont = NSFont(name: bare, size: f.pointSize)
+                    ?? NSFont(descriptor: f.fontDescriptor, size: f.pointSize)
+            }
+            if let c = a[.foregroundColor] as? NSColor { retypeColor = c }
+        }
+        // The editor stands alone — Retype is one gesture, it must NOT leave the typewriter
+        // armed. (Armed mode turned the next text-selection click into "place an editor here",
+        // which also yanked the view to the new capsule — the "jumps when I select" bug.)
         openTypewriterEditor(on: new, at: CGPoint(x: rect.minX, y: rect.maxY),
                              existing: nil, prefill: text, sizeOverride: fontSize)
         typewriterEditor?.field.selectText(nil)
@@ -1877,8 +1899,11 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             return
         }
 
-        let size = ((editor.field.font?.pointSize ?? 14) / max(0.01, pdfView.scaleFactor)).rounded()
-        let font = NSFont.systemFont(ofSize: size)
+        let size = (editor.field.font?.pointSize ?? 14) / max(0.01, pdfView.scaleFactor)
+        let font = retypeFont.flatMap { NSFont(descriptor: $0.fontDescriptor, size: size) }
+            ?? NSFont.systemFont(ofSize: size.rounded())
+        let color = retypeColor ?? .black
+        retypeFont = nil; retypeColor = nil
         let measured = (text as NSString).size(withAttributes: [.font: font])
         let bounds: CGRect
         if let old = editing {
@@ -1891,7 +1916,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         let ann = PDFAnnotation(bounds: bounds, forType: .freeText, withProperties: nil)
         ann.contents = text
         ann.font = font
-        ann.fontColor = .black
+        ann.fontColor = color
         ann.color = .clear
         let border = PDFBorder(); border.lineWidth = 0
         ann.border = border
@@ -1902,6 +1927,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     }
 
     private func cancelTypewriterEditor() {
+        retypeFont = nil; retypeColor = nil
         guard let editor = typewriterEditor else { return }
         let editing = typewriterEditing
         let target = typewriterTarget
