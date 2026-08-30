@@ -54,7 +54,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     // EDITABLE after saving (unlike the old Add Text, which placed a picture of the words).
     private weak var typewriterButton: NSButton?
     private let typewriterSizePopup = NSPopUpButton()
-    private var typewriterEditor: NSTextField?
+    private var typewriterEditor: TypewriterEditor?
     private var typewriterTarget: (page: PDFPage, point: CGPoint)?
     private var typewriterEditing: PDFAnnotation?   // set while re-editing an existing text
     private var subtitleBase = ""
@@ -1753,25 +1753,92 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
                              existing: ann)
     }
 
-    private func openTypewriterEditor(on page: PDFPage, at point: CGPoint, existing: PDFAnnotation?) {
-        let size = existing.flatMap { $0.font?.pointSize } ?? typewriterFontSize
+    private func openTypewriterEditor(on page: PDFPage, at point: CGPoint, existing: PDFAnnotation?,
+                                      prefill: String? = nil, sizeOverride: CGFloat? = nil) {
+        let size = sizeOverride ?? existing.flatMap { $0.font?.pointSize } ?? typewriterFontSize
         let scale = pdfView.scaleFactor
         let viewPoint = pdfView.convert(point, from: page)
-        let editor = NSTextField(frame: NSRect(x: viewPoint.x, y: viewPoint.y - (size + 8) * scale,
-                                               width: 280 * scale, height: (size + 8) * scale))
-        editor.font = .systemFont(ofSize: size * scale)
-        editor.stringValue = existing?.contents ?? ""
-        editor.placeholderString = "Type here…"
-        editor.isBordered = true
-        editor.focusRingType = .default
-        editor.backgroundColor = NSColor.textBackgroundColor.withAlphaComponent(0.9)
-        editor.delegate = self
-        editor.target = self
-        editor.action = #selector(typewriterCommitAction)
+        let editor = TypewriterEditor(text: prefill ?? existing?.contents ?? "",
+                                      fontSize: size * scale,
+                                      at: NSPoint(x: viewPoint.x - 7, y: viewPoint.y - 60))
+        editor.setFrameOrigin(NSPoint(x: viewPoint.x - 7, y: viewPoint.y + 7 - editor.frame.height))
+        editor.field.delegate = self
+        editor.field.target = self
+        editor.field.action = #selector(typewriterCommitAction)
+        // Dragging the capsule's ring repositions the pending text; the commit point follows.
+        editor.onMoved = { [weak self, weak editor] in
+            guard let self, let editor, let target = self.typewriterTarget else { return }
+            let topLeft = self.pdfView.convert(editor.textTopLeftInSuperview, to: target.page)
+            self.typewriterTarget = (target.page, topLeft)
+        }
         pdfView.addSubview(editor)
-        pdfView.window?.makeFirstResponder(editor)
+        pdfView.window?.makeFirstResponder(editor.field)
         typewriterEditor = editor
         typewriterTarget = (page, point)
+    }
+
+    // Retype: the fused Erase + Typewriter gesture — select words, and Jack removes exactly
+    // that span (verified, background-matched) and opens the editor pre-filled with the same
+    // words, sized to the line, right where they were.
+    //
+    // What Adobe's "Edit PDF" does — rewriting glyph runs in place — silently substitutes
+    // fonts and reflows lines whenever the embedded subset lacks a glyph, which is most edits
+    // in most branded documents. Jack refuses to fake that. Retype is the honest version, and
+    // it says plainly what it does: the page is re-rendered (like Erase), the replacement text
+    // is a real annotation that stays editable, and Make Searchable can restore the page's
+    // text layer afterwards — at which point the retyped words become searchable too, because
+    // OCR reads the page WITH its annotations.
+    @objc func retypeSelection(_ sender: Any?) {
+        guard let doc = pdfView.document else { return }
+        let live = pdfView.currentSelection
+        let liveOK = !((live?.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        guard let sel = liveOK ? live : lastSelection,
+              let page = sel.pages.first else {
+            infoAlert("Nothing selected", "Select the words you want to retype first.")
+            return
+        }
+        let text = (sel.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let rect = sel.bounds(for: page)
+        guard !text.isEmpty, rect.width > 1, rect.height > 1 else { return }
+
+        if !UserDefaults.standard.bool(forKey: "jack.retypeExplained") {
+            let a = NSAlert()
+            a.messageText = "Retype these words?"
+            a.informativeText = "Jack removes the selected words by re-rendering this page (it becomes an image, like Erase), then places the same words as editable text for you to change.\n\nRun Make Searchable afterwards if you need this page's text searchable again. Nothing is written until you save, and \u{2318}Z undoes it."
+            a.addButton(withTitle: "Retype")
+            a.addButton(withTitle: "Cancel")
+            a.showsSuppressionButton = true
+            a.suppressionButton?.title = "Don\u{2019}t ask again"
+            guard a.runModal() == .alertFirstButtonReturn else { return }
+            if a.suppressionButton?.state == .on {
+                UserDefaults.standard.set(true, forKey: "jack.retypeExplained")
+            }
+        }
+
+        let index = doc.index(for: page)
+        guard index != NSNotFound,
+              let new = RedactionEngine.destroyedPage(page, regions: [rect], style: .erase),
+              RedactionEngine.preservesContent(original: page, replacement: new, regions: [rect]) else {
+            infoAlert("Couldn\u{2019}t retype here", "This span couldn\u{2019}t be removed cleanly, so nothing was changed.")
+            return
+        }
+        doc.removePage(at: index)
+        doc.insert(new, at: index)
+        registerPermanentCropUndo([(index, page, new)], restoreOld: true, name: "Retype")
+        sidebar.reload()
+        forceRefresh()
+        lastSelection = nil
+        markDirty()
+
+        // Editor lands exactly on the old words, pre-filled, sized to the line.
+        if !markupOn { setMarkup(on: true) }
+        pdfView.typewriterMode = true
+        typewriterButton?.state = .on
+        let fontSize = min(72, max(8, (rect.height * 0.72).rounded()))
+        openTypewriterEditor(on: new, at: CGPoint(x: rect.minX, y: rect.maxY),
+                             existing: nil, prefill: text, sizeOverride: fontSize)
+        typewriterEditor?.field.selectText(nil)
+        flashSubtitle("Retype — edit the words, Return places them. \u{2318}Z twice undoes everything")
     }
 
     @objc private func typewriterCommitAction() { commitTypewriterEditor() }
@@ -1793,7 +1860,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     /// edited). Safe to call when no editor is open.
     private func commitTypewriterEditor() {
         guard let editor = typewriterEditor, let target = typewriterTarget else { return }
-        let text = editor.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = editor.field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let editing = typewriterEditing
         editor.removeFromSuperview()
         typewriterEditor = nil
@@ -1810,7 +1877,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             return
         }
 
-        let size = editing.flatMap { $0.font?.pointSize } ?? typewriterFontSize
+        let size = ((editor.field.font?.pointSize ?? 14) / max(0.01, pdfView.scaleFactor)).rounded()
         let font = NSFont.systemFont(ofSize: size)
         let measured = (text as NSString).size(withAttributes: [.font: font])
         let bounds: CGRect
@@ -2228,6 +2295,10 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         let hasSel = !((live?.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             || lastSelection != nil
         if hasSel {
+            let retype = NSMenuItem(title: "Retype\u{2026}", action: #selector(retypeSelection(_:)), keyEquivalent: "")
+            retype.target = self
+            items.append(retype)
+            items.append(.separator())
             for (i, entry) in Self.highlightColors.enumerated() {
                 let m = NSMenuItem(title: "Highlight \(entry.name)", action: #selector(highlightColorPicked(_:)), keyEquivalent: "")
                 m.target = self; m.tag = i; m.image = Self.swatch(entry.color)
@@ -3020,7 +3091,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     // MARK: - Search
 
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
-        if control === typewriterEditor, commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+        if control === typewriterEditor?.field, commandSelector == #selector(NSResponder.cancelOperation(_:)) {
             cancelTypewriterEditor()
             return true
         }
@@ -3030,10 +3101,14 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     func controlTextDidEndEditing(_ obj: Notification) {
         // Focus moved away from the typewriter editor (click elsewhere, tab out): place the
         // text. Return also lands here after the action fires; the nil-guard makes it a no-op.
-        if (obj.object as? NSTextField) === typewriterEditor { commitTypewriterEditor() }
+        if (obj.object as? NSTextField) === typewriterEditor?.field { commitTypewriterEditor() }
     }
 
     func controlTextDidChange(_ obj: Notification) {
+        if (obj.object as? NSTextField) === typewriterEditor?.field {
+            typewriterEditor?.sizeToText()
+            return
+        }
         if searchField?.stringValue.isEmpty == true { clearSearch() }
     }
 

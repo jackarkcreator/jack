@@ -67,6 +67,7 @@ enum MainMenu {
         edit.addItem(item("Underline Selection", #selector(DocumentWindowController.underlineSelection(_:)), "U"))
         edit.addItem(item("Strikethrough Selection", #selector(DocumentWindowController.strikethroughSelection(_:)), "K"))
         edit.addItem(item("Add Comment…", #selector(DocumentWindowController.addComment(_:)), "C"))
+        edit.addItem(item("Retype Selection…", #selector(DocumentWindowController.retypeSelection(_:)), ""))
         editItem.submenu = edit
         main.addItem(editItem)
 
