@@ -45,6 +45,22 @@ iconutil -c icns "$ICONSET" -o "$APPDIR/Contents/Resources/jack.icns"
 echo "==> Install Info.plist"
 cp "$DIR/Info.plist" "$APPDIR/Contents/Info.plist"
 
+echo "==> Build Finder extension (top-level right-click: Convert to PDF with Jack)"
+APPEX="$APPDIR/Contents/PlugIns/JackFinder.appex"
+mkdir -p "$APPEX/Contents/MacOS"
+swiftc -O -parse-as-library -application-extension -target arm64-apple-macos11 \
+  "$DIR/FinderExt/JackFinderSync.swift" -framework FinderSync \
+  -Xlinker -e -Xlinker _NSExtensionMain -o "$BUILD/jackfinder-arm64"
+swiftc -O -parse-as-library -application-extension -target x86_64-apple-macos11 \
+  "$DIR/FinderExt/JackFinderSync.swift" -framework FinderSync \
+  -Xlinker -e -Xlinker _NSExtensionMain -o "$BUILD/jackfinder-x86_64"
+lipo -create "$BUILD/jackfinder-arm64" "$BUILD/jackfinder-x86_64" -o "$APPEX/Contents/MacOS/JackFinder"
+cp "$DIR/FinderExt/Info.plist" "$APPEX/Contents/Info.plist"
+# The extension's version tracks the app's — Finder gets confused by mismatched pairs.
+V_SHORT=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$DIR/Info.plist")
+V_BUILD=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$DIR/Info.plist")
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $V_SHORT" -c "Set :CFBundleVersion $V_BUILD" "$APPEX/Contents/Info.plist"
+
 echo "==> Codesign (Sparkle innards first — notary rejects unsigned framework pieces — then the app)"
 SPK="$APPDIR/Contents/Frameworks/Sparkle.framework"
 codesign -f -s "$SIGN_ID" -o runtime --timestamp --preserve-metadata=entitlements "$SPK/Versions/B/XPCServices/Installer.xpc"
@@ -52,6 +68,10 @@ codesign -f -s "$SIGN_ID" -o runtime --timestamp --preserve-metadata=entitlement
 codesign -f -s "$SIGN_ID" -o runtime --timestamp "$SPK/Versions/B/Autoupdate"
 codesign -f -s "$SIGN_ID" -o runtime --timestamp "$SPK/Versions/B/Updater.app"
 codesign -f -s "$SIGN_ID" -o runtime --timestamp "$SPK"
+# The appex signs with its sandbox entitlement (Apple requires sandbox for every extension).
+codesign -f -s "$SIGN_ID" -o runtime --timestamp \
+  --entitlements "$DIR/FinderExt/JackFinder.entitlements" \
+  "$APPDIR/Contents/PlugIns/JackFinder.appex"
 codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$APPDIR"
 codesign --verify --strict --verbose=2 "$APPDIR"
 

@@ -88,7 +88,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // Drop files on the menu bar icon / "Open With… Jack". Coalesce split open calls.
     func application(_ application: NSApplication, open urls: [URL]) {
         didHandleOpen = true
-        pending.append(contentsOf: urls)
+        // jack://convert?p=<base64 path>&p=… — the sandboxed Finder extension can't touch
+        // files, so it ferries the selection over the URL scheme and the app does the work.
+        var files: [URL] = []
+        for u in urls {
+            if u.scheme == "jack", u.host == "convert" {
+                let comps = URLComponents(url: u, resolvingAgainstBaseURL: false)
+                for q in comps?.queryItems ?? [] where q.name == "p" {
+                    if let v = q.value, let data = Data(base64Encoded: v),
+                       let path = String(data: data, encoding: .utf8) {
+                        files.append(URL(fileURLWithPath: path))
+                    }
+                }
+            } else {
+                files.append(u)
+            }
+        }
+        pending.append(contentsOf: files)
         guard !scheduled else { return }
         scheduled = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in

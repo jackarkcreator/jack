@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key><string>en</string>
+	<key>CFBundleDisplayName</key><string>Jack — Convert to PDF</string>
+	<key>CFBundleExecutable</key><string>JackFinder</string>
+	<key>CFBundleIdentifier</key><string>net.thinkopen.jack.finder</string>
+	<key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+	<key>CFBundleName</key><string>JackFinder</string>
+	<key>CFBundlePackageType</key><string>XPC!</string>
+	<key>CFBundleShortVersionString</key><string>0.0.0</string>
+	<key>CFBundleVersion</key><string>0</string>
+	<key>LSMinimumSystemVersion</key><string>11.0</string>
+	<key>NSExtension</key>
+	<dict>
+		<key>NSExtensionAttributes</key><dict/>
+		<key>NSExtensionPointIdentifier</key><string>com.apple.FinderSync</string>
+		<key>NSExtensionPrincipalClass</key><string>JackFinderSync</string>
+	</dict>
+	<key>NSHumanReadableCopyright</key><string>ThinkOpen Inc.</string>
+</dict>
+</plist>
