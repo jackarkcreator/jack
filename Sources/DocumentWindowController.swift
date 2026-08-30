@@ -1924,6 +1924,11 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             me.forceRefresh()
         }
         docUndo.setActionName("Move Text")
+        // 🧨 Tahoe's render cache ghosts a MOVED native annotation exactly like an added one:
+        // the cached page still shows the old position while the annotation draws at the new
+        // one — two copies of the same text on screen, none of them a real duplicate. Same
+        // lesson as adds/deletes: repaint via document-reassign at gesture end.
+        forceRefresh()
         markDirty()
     }
 
