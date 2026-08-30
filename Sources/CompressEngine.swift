@@ -9,14 +9,16 @@ enum CompressEngine {
     static let renderScale: CGFloat = 150.0 / 72.0
     static let jpegQuality: CGFloat = 0.7
 
-    /// Returns (ok, compressedPageCount).
-    static func compress(_ doc: PDFDocument, to url: URL) -> (Bool, Int) {
-        guard let firstPage = doc.page(at: 0) else { return (false, 0) }
+    /// Returns (ok, indices of the pages actually re-rendered). The caller needs the INDICES,
+    /// not a count: an in-place compress must swap only the pages this touched, leaving every
+    /// other page — and its live annotations and form fields — exactly as it was.
+    static func compress(_ doc: PDFDocument, to url: URL) -> (Bool, [Int]) {
+        guard let firstPage = doc.page(at: 0) else { return (false, []) }
         var firstBox = firstPage.bounds(for: .mediaBox)
         guard let consumer = CGDataConsumer(url: url as CFURL),
-              let ctx = CGContext(consumer: consumer, mediaBox: &firstBox, nil) else { return (false, 0) }
+              let ctx = CGContext(consumer: consumer, mediaBox: &firstBox, nil) else { return (false, []) }
 
-        var compressed = 0
+        var compressed: [Int] = []
         for i in 0..<doc.pageCount {
             guard let page = doc.page(at: i) else { continue }
             var box = page.bounds(for: .mediaBox)
@@ -25,7 +27,7 @@ enum CompressEngine {
 
             let hasText = !((page.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             if !hasText, let cg = rasterized(page: page) {
-                compressed += 1
+                compressed.append(i)
                 ctx.saveGState()
                 ctx.interpolationQuality = .high
                 ctx.draw(cg, in: box)

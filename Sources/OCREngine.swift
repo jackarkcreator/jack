@@ -11,16 +11,18 @@ enum OCREngine {
 
     struct Word { let text: String; let box: CGRect }   // box in page coordinates
 
-    /// Write a searchable copy of `doc` to `url`. Returns (ok, ocrPageCount).
+    /// Write a searchable copy of `doc` to `url`. Returns (ok, indices of the pages actually
+    /// recognized) — the caller swaps only those pages back in, so untouched pages keep their
+    /// live annotations and form fields.
     /// `progress` is called on an arbitrary queue with (pageIndex, pageCount).
     static func makeSearchable(_ doc: PDFDocument, to url: URL,
-                               progress: ((Int, Int) -> Void)? = nil) -> (Bool, Int) {
-        guard let firstPage = doc.page(at: 0) else { return (false, 0) }
+                               progress: ((Int, Int) -> Void)? = nil) -> (Bool, [Int]) {
+        guard let firstPage = doc.page(at: 0) else { return (false, []) }
         var firstBox = firstPage.bounds(for: .mediaBox)
         guard let consumer = CGDataConsumer(url: url as CFURL),
-              let ctx = CGContext(consumer: consumer, mediaBox: &firstBox, nil) else { return (false, 0) }
+              let ctx = CGContext(consumer: consumer, mediaBox: &firstBox, nil) else { return (false, []) }
 
-        var ocrCount = 0
+        var ocrCount: [Int] = []
         for i in 0..<doc.pageCount {
             progress?(i, doc.pageCount)
             guard let page = doc.page(at: i) else { continue }
@@ -34,7 +36,7 @@ enum OCREngine {
             // Only OCR pages with no usable text layer.
             let existing = (page.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             if existing.isEmpty, let words = recognize(page: page), !words.isEmpty {
-                ocrCount += 1
+                ocrCount.append(i)
                 drawInvisible(words, into: ctx)
             }
             ctx.endPDFPage()

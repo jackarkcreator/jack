@@ -2467,76 +2467,123 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
 
     // MARK: - Compress
 
+    // v2.5: Compress edits the open document. Only the pages the engine actually re-rendered
+    // are swapped in — pages it passed through keep their live annotations and form fields.
     @objc func compressDocument(_ sender: Any?) {
-        guard let doc = pdfView.document, let window = window else { return }
+        guard let doc = pdfView.document else { return }
+        // The engine runs off-main; PDFKit is not thread-safe, so hand it its own copy.
         guard let data = doc.dataRepresentation(), let workCopy = PDFDocument(data: data) else {
-            infoAlert("Couldn’t prepare document", "The document couldn’t be copied for compression.")
+            infoAlert("Couldn\u{2019}t prepare document", "The document couldn\u{2019}t be copied for compression.")
             return
         }
         let originalSize = data.count
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = exportBaseName + "-compressed.pdf"
-        panel.directoryURL = pdfURL.deletingLastPathComponent()
-        if #available(macOS 11.0, *) { panel.allowedContentTypes = [.pdf] }
-        panel.beginSheetModal(for: window) { resp in
-            guard resp == .OK, let out = panel.url else { return }
-            DispatchQueue.global(qos: .userInitiated).async {
-                let (ok, n) = CompressEngine.compress(workCopy, to: out)
-                let newSize = (try? Data(contentsOf: out).count) ?? 0
-                DispatchQueue.main.async {
-                    guard ok, newSize > 0 else {
-                        infoAlert("Compress failed", "Couldn’t write the compressed PDF.")
-                        return
-                    }
-                    guard newSize < originalSize else {
-                        try? FileManager.default.removeItem(at: out)
-                        infoAlert("Nothing to gain", "This document is already compact — a compressed copy would not be smaller, so nothing was saved.")
-                        return
-                    }
-                    NSWorkspace.shared.activateFileViewerSelecting([out])
-                    NSSound(named: "Glass")?.play()
-                    let fmt = ByteCountFormatter()
-                    let saved = 100 - newSize * 100 / max(1, originalSize)
-                    infoAlert("Compressed",
-                              "\(fmt.string(fromByteCount: Int64(originalSize))) → \(fmt.string(fromByteCount: Int64(newSize))) (\(saved)% smaller). \(n) scanned page\(n == 1 ? "" : "s") downsampled; pages with text were left untouched.")
+        let out = tempWorkURL("compress")
+        DispatchQueue.global(qos: .userInitiated).async {
+            let (ok, changed) = CompressEngine.compress(workCopy, to: out)
+            let producedSize = (try? Data(contentsOf: out).count) ?? 0
+            DispatchQueue.main.async { [weak self] in
+                defer { try? FileManager.default.removeItem(at: out) }
+                guard let self = self else { return }
+                guard ok, producedSize > 0 else {
+                    infoAlert("Compress failed", "Couldn\u{2019}t compress this document. Nothing was changed.")
+                    return
                 }
+                guard producedSize < originalSize, !changed.isEmpty else {
+                    infoAlert("Nothing to gain",
+                              "This document is already compact — compressing it would not make it smaller, so nothing was changed.")
+                    return
+                }
+                guard self.swapTransformedPages(from: out, changed: changed, name: "Compress") else {
+                    infoAlert("Compress failed",
+                              "The compressed pages couldn\u{2019}t be applied — the document was not modified.")
+                    return
+                }
+                NSSound(named: "Glass")?.play()
+                // Report the REAL resulting size, measured after the swap, not the engine's
+                // intermediate — only the changed pages were taken from it.
+                let finalSize = self.pdfView.document?.dataRepresentation()?.count ?? producedSize
+                let fmt = ByteCountFormatter()
+                let saved = 100 - finalSize * 100 / max(1, originalSize)
+                let n = changed.count
+                infoAlert("Compressed",
+                          "\(fmt.string(fromByteCount: Int64(originalSize))) \u{2192} \(fmt.string(fromByteCount: Int64(finalSize))) "
+                          + "(\(saved)% smaller). \(n) scanned page\(n == 1 ? "" : "s") downsampled; pages with text were left untouched."
+                          + "\n\n\u{2318}S to save, \u{2318}Z to undo.")
             }
         }
     }
 
+    /// Swap ONLY the pages an engine transformed into the live document, with page-identity
+    /// undo. Pages the engine passed through are never touched, so their highlights, comments
+    /// and form fields survive an in-place tool. Returns false without modifying anything.
+    private func swapTransformedPages(from producedURL: URL, changed: [Int], name: String) -> Bool {
+        guard let doc = pdfView.document,
+              let produced = PDFDocument(url: producedURL),
+              produced.pageCount == doc.pageCount else { return false }
+        var swaps: [(Int, PDFPage, PDFPage)] = []
+        for i in changed {
+            guard let old = doc.page(at: i), let new = produced.page(at: i) else { return false }
+            swaps.append((i, old, new))
+        }
+        guard !swaps.isEmpty else { return true }
+        for (i, _, new) in swaps {
+            doc.removePage(at: i)
+            doc.insert(new, at: i)
+        }
+        registerPermanentCropUndo(swaps, restoreOld: true, name: name)
+        sidebar.reload()
+        forceRefresh()
+        return true
+    }
+
+    private func tempWorkURL(_ prefix: String) -> URL {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("jack-tools", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("\(prefix)-\(UUID().uuidString).pdf")
+    }
+
     // MARK: - Tools: Make Searchable (OCR), Bates, Watermark
 
+    // v2.5: Make Searchable edits the open document — only the pages that actually had no
+    // text layer are swapped in, so annotated and fillable pages are left alone.
     @objc func makeSearchable(_ sender: Any?) {
         guard let doc = pdfView.document, let window = window else { return }
         // OCR runs off-main; PDFKit isn't thread-safe, so hand the worker its own copy.
         guard let data = doc.dataRepresentation(), let workCopy = PDFDocument(data: data) else {
-            infoAlert("Couldn’t prepare document", "The document couldn’t be copied for recognition.")
+            infoAlert("Couldn\u{2019}t prepare document", "The document couldn\u{2019}t be copied for recognition.")
             return
         }
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = exportBaseName + "-searchable.pdf"
-        panel.directoryURL = pdfURL.deletingLastPathComponent()
-        if #available(macOS 11.0, *) { panel.allowedContentTypes = [.pdf] }
-        panel.beginSheetModal(for: window) { resp in
-            guard resp == .OK, let out = panel.url else { return }
-            let sheet = ProgressSheetController(title: "Recognizing text on this Mac…", total: workCopy.pageCount)
-            window.beginSheet(sheet.window)
-            DispatchQueue.global(qos: .userInitiated).async {
-                let (ok, n) = OCREngine.makeSearchable(workCopy, to: out) { i, total in
-                    DispatchQueue.main.async { sheet.update(done: i + 1, of: total) }
+        let out = tempWorkURL("ocr")
+        let sheet = ProgressSheetController(title: "Recognizing text on this Mac\u{2026}", total: workCopy.pageCount)
+        window.beginSheet(sheet.window)
+        DispatchQueue.global(qos: .userInitiated).async {
+            let (ok, changed) = OCREngine.makeSearchable(workCopy, to: out) { i, total in
+                DispatchQueue.main.async { sheet.update(done: i + 1, of: total) }
+            }
+            DispatchQueue.main.async { [weak self] in
+                defer { try? FileManager.default.removeItem(at: out) }
+                window.endSheet(sheet.window)
+                guard let self = self else { return }
+                guard ok else {
+                    infoAlert("Recognition failed", "Couldn\u{2019}t recognize this document. Nothing was changed.")
+                    return
                 }
-                DispatchQueue.main.async {
-                    window.endSheet(sheet.window)
-                    if ok {
-                        NSWorkspace.shared.activateFileViewerSelecting([out])
-                        NSSound(named: "Glass")?.play()
-                        infoAlert("Made searchable",
-                                  n == 0 ? "Every page already had a text layer — saved an unchanged copy."
-                                         : "\(n) scanned page\(n == 1 ? "" : "s") recognized — entirely on this Mac, nothing was uploaded. Saved as \(out.lastPathComponent).")
-                    } else {
-                        infoAlert("Recognition failed", "Couldn’t write the searchable PDF.")
-                    }
+                guard !changed.isEmpty else {
+                    infoAlert("Already searchable",
+                              "Every page already carries a text layer — nothing needed recognizing, so nothing was changed.")
+                    return
                 }
+                guard self.swapTransformedPages(from: out, changed: changed, name: "Make Searchable") else {
+                    infoAlert("Recognition failed",
+                              "The recognized pages couldn\u{2019}t be applied — the document was not modified.")
+                    return
+                }
+                NSSound(named: "Glass")?.play()
+                let n = changed.count
+                infoAlert("Made searchable",
+                          "\(n) scanned page\(n == 1 ? "" : "s") recognized — entirely on this Mac, nothing was uploaded. "
+                          + "You can now search and select the text."
+                          + "\n\n\u{2318}S to save, \u{2318}Z to undo.")
             }
         }
     }
