@@ -5,3 +5,11 @@ build/
 win/**/bin/
 win/**/obj/
 publish/
+
+# Never let credentials into this public repo
+certs/
+*.p12
+*.p8
+*.cer
+*.pem
+*-sparkle.key
