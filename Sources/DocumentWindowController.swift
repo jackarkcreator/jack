@@ -1266,23 +1266,13 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             return
         }
 
-        // Dissolve the CONTENT, not just the band (Keno): snapshot the region as it looks
-        // now, swap the erased page in beneath it, then fade the old pixels away. Blackout
-        // keeps its hard bar landing — decisive is the legal convention.
-        var dissolve: NSImageView?
-        if erase {
-            let viewRect = pdfView.convert(rect, from: page)
-            band.isHidden = true   // the snapshot must show the page, not the swipe band
-            if let rep = pdfView.bitmapImageRepForCachingDisplay(in: viewRect) {
-                pdfView.cacheDisplay(in: viewRect, to: rep)
-                let img = NSImage(size: viewRect.size)
-                img.addRepresentation(rep)
-                let iv = NSImageView(frame: viewRect)
-                iv.image = img
-                iv.imageScaling = .scaleAxesIndependently
-                pdfView.addSubview(iv)
-                dissolve = iv
-            }
+        // Dissolve the CONTENT, not just the band (Keno): render the region from the PAGE
+        // (cacheDisplay on a PDFView returns blank tiles — probed), swap the erased page in
+        // beneath it, then break the old ink into dust, invisible-ink style. Blackout keeps
+        // its hard bar landing — decisive is the legal convention.
+        var dissolve: (image: NSImage, rect: NSRect)?
+        if erase, let img = CropEngine.snapshotImage(page: page, region: rect) {
+            dissolve = (img, pdfView.convert(rect, from: page))
         }
         withPreservedPosition(anchorIndex: index) {
             doc.removePage(at: index)
@@ -1304,13 +1294,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
 
         // The page underneath is already painted — fading the band is the reveal, not an
         // effect painted over the truth.
-        if let snap = dissolve {
+        if let d = dissolve {
             band.removeFromSuperview()
-            NSAnimationContext.runAnimationGroup({ ctx in
-                ctx.duration = 0.38
-                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                snap.animator().alphaValue = 0
-            }, completionHandler: { snap.removeFromSuperview() })
+            dissolveEffect(image: d.image, over: d.rect)
         } else {
             NSAnimationContext.runAnimationGroup({ ctx in
                 ctx.duration = 0.28
@@ -1321,6 +1307,66 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
                             : "Redacted — a verification certificate saves alongside on \u{2318}S. \u{2318}Z undoes")
     }
 
+
+    // MARK: - Erase dissolve (invisible-ink style: the ink breaks into dust and drifts off)
+
+    private static let dustImage: CGImage? = {
+        let s = 8
+        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: s, pixelsHigh: s,
+                                         bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                                         isPlanar: false, colorSpaceName: .deviceRGB,
+                                         bytesPerRow: 0, bitsPerPixel: 0),
+              let gctx = NSGraphicsContext(bitmapImageRep: rep) else { return nil }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = gctx
+        NSColor(white: 0.3, alpha: 1).setFill()
+        NSBezierPath(ovalIn: NSRect(x: 1, y: 1, width: s - 2, height: s - 2)).fill()
+        NSGraphicsContext.restoreGraphicsState()
+        return rep.cgImage
+    }()
+
+    /// The erased region's old pixels sit in an overlay while the cleaned page is already
+    /// underneath; the overlay fades as a burst of ink-dust drifts off it. Pure reveal —
+    /// by the time the dust settles the truth was there all along.
+    private func dissolveEffect(image: NSImage, over viewRect: NSRect) {
+        let container = NSView(frame: viewRect)
+        container.wantsLayer = true
+        let iv = NSImageView(frame: container.bounds)
+        iv.image = image
+        iv.imageScaling = .scaleAxesIndependently
+        container.addSubview(iv)
+        pdfView.addSubview(container)
+
+        if let dust = Self.dustImage, let layer = container.layer {
+            let emitter = CAEmitterLayer()
+            emitter.frame = container.bounds
+            emitter.emitterShape = .rectangle
+            emitter.emitterPosition = CGPoint(x: container.bounds.midX, y: container.bounds.midY)
+            emitter.emitterSize = container.bounds.size
+            let cell = CAEmitterCell()
+            cell.contents = dust
+            cell.birthRate = Float(max(80, min(1000, viewRect.width * viewRect.height / 24)))
+            cell.lifetime = 0.7
+            cell.lifetimeRange = 0.25
+            cell.velocity = 16
+            cell.velocityRange = 14
+            cell.emissionRange = .pi * 2
+            cell.yAcceleration = 42       // macOS layer space: +y is up — the dust drifts away
+            cell.scale = 0.5
+            cell.scaleRange = 0.3
+            cell.scaleSpeed = -0.4
+            cell.alphaSpeed = -1.6
+            emitter.emitterCells = [cell]
+            layer.addSublayer(emitter)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.28) { emitter.birthRate = 0 }   // burst, not stream
+        }
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.45
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            iv.animator().alphaValue = 0
+        })
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { container.removeFromSuperview() }
+    }
 
     // MARK: - Form field palette (rendered into the Forms mode row)
 
@@ -1368,12 +1414,19 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         (anns + labels).forEach { page.addAnnotation($0) }
         registerAnnotationRemovalUndo((anns + labels).map { (page, $0) }, name: "Add Field")
         forceRefresh()
+        // One-shot, same rhythm as the typewriter: placing a field disarms the palette.
+        pdfView.armedFieldKind = nil
+        formPaletteButtons.forEach { $0.state = .off }
         switch kind {
         case .radioGroup, .dropdown:
             openFieldEditor(named: name)   // options matter — offer the editor right away
         default: break
         }
     }
+
+    // Double-clicking a field or its label opens the editor — right-click still works,
+    // but nobody should have to find a context menu to rename a field.
+    func formFieldEditRequested(name: String) { openFieldEditor(named: name) }
 
     func fieldMoved(_ items: [(PDFAnnotation, CGRect)]) {
         registerFieldMoveUndo(items, name: "Move Field")

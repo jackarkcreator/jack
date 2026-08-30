@@ -7,6 +7,7 @@ protocol StampSelectionDelegate: AnyObject {
     func stampMoved(_ ann: ImageStampAnnotation, from oldBounds: CGRect)
     func noteClicked(_ ann: PDFAnnotation)
     func formFieldPlaced(kind: FormFieldKind, rect: CGRect, page: PDFPage)
+    func formFieldEditRequested(name: String)
     func fieldMoved(_ items: [(PDFAnnotation, CGRect)])
     func imageDropped(_ image: NSImage, at point: CGPoint, on page: PDFPage)
     // Typewriter: click empty page → place an editor; drag moves the text; double-click re-edits.
@@ -110,6 +111,11 @@ final class SigningPDFView: PDFView {
                     set = page.annotations.filter {
                         ($0.type == "Widget" && $0.fieldName == fieldName) || FormFieldEngine.isLabel($0, for: fieldName)
                     }
+                }
+                // Double-click a field or its label: straight to the editor popover.
+                if event.clickCount >= 2, let fieldName {
+                    stampDelegate?.formFieldEditRequested(name: fieldName)
+                    return
                 }
                 if set.isEmpty { set = [hit] }
                 dragSet = set.map { ($0, $0.bounds) }
