@@ -1227,7 +1227,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             formPaletteButtons.append(btn)
             x += w + 6
         }
-        rowHint("click to place · drag to size · right-click a field to edit")
+        rowHint("click a field to use it · drag its label to move · corner resizes · double-click edits")
     }
 
     // Erase is an EDIT, not an export: affected pages are swapped in place (undoable via
@@ -1428,6 +1428,72 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     // but nobody should have to find a context menu to rename a field.
     func formFieldEditRequested(name: String) { openFieldEditor(named: name) }
 
+    func fieldResized(_ widget: PDFAnnotation, from oldBounds: CGRect) {
+        var items: [(PDFAnnotation, CGRect)] = [(widget, oldBounds)]
+        if let page = widget.page, let name = widget.fieldName {
+            // Side captions (checkbox/radio) follow the right edge and stay centered.
+            for a in page.annotations where FormFieldEngine.isLabel(a, for: name) {
+                guard a.bounds.minX >= oldBounds.maxX - 2 else { continue }
+                let old = a.bounds
+                a.bounds = CGRect(x: widget.bounds.maxX + 6,
+                                  y: widget.bounds.midY - old.height / 2,
+                                  width: old.width, height: old.height)
+                items.append((a, old))
+            }
+        }
+        registerFieldMoveUndo(items, name: "Resize Field")
+        forceRefresh()
+        markDirty()
+    }
+
+    // MARK: Date fields — click pops a calendar; the value lands as plain text, so the
+    // field stays an ordinary AcroForm text field in every other reader.
+
+    private var datePopover: NSPopover?
+    private weak var dateWidget: PDFAnnotation?
+    private static let dateFmt: DateFormatter = {
+        let f = DateFormatter(); f.dateFormat = "MM/dd/yyyy"; return f
+    }()
+
+    func dateFieldClicked(_ widget: PDFAnnotation, on page: PDFPage) {
+        let picker = NSDatePicker(frame: NSRect(x: 12, y: 36, width: 139, height: 148))
+        picker.datePickerStyle = .clockAndCalendar
+        picker.datePickerElements = [.yearMonthDay]
+        picker.datePickerMode = .single
+        if let existing = widget.widgetStringValue, let d = Self.dateFmt.date(from: existing) {
+            picker.dateValue = d
+        } else {
+            picker.dateValue = Date()
+        }
+        picker.target = self
+        picker.action = #selector(datePicked(_:))
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 163, height: 196))
+        container.addSubview(picker)
+        let hint = NSTextField(labelWithString: "Click a day to fill the field")
+        hint.font = .systemFont(ofSize: 10)
+        hint.textColor = .secondaryLabelColor
+        hint.frame = NSRect(x: 12, y: 12, width: 150, height: 14)
+        container.addSubview(hint)
+        let vc = NSViewController()
+        vc.view = container
+        let pop = NSPopover()
+        pop.contentViewController = vc
+        pop.behavior = .transient
+        dateWidget = widget
+        datePopover = pop
+        pop.show(relativeTo: pdfView.convert(widget.bounds, from: page), of: pdfView, preferredEdge: .maxY)
+    }
+
+    @objc private func datePicked(_ sender: NSDatePicker) {
+        guard let widget = dateWidget else { return }
+        widget.widgetStringValue = Self.dateFmt.string(from: sender.dateValue)
+        (document as? NSDocument)?.updateChangeCount(.changeDone)
+        forceRefresh()
+        datePopover?.close()
+        datePopover = nil
+        dateWidget = nil
+    }
+
     func fieldMoved(_ items: [(PDFAnnotation, CGRect)]) {
         registerFieldMoveUndo(items, name: "Move Field")
         forceRefresh()
@@ -1625,7 +1691,10 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
                 // Captions carry the name — keep text and the /NM link in step.
                 for (_, a) in groupAnnotations(named: oldName) where FormFieldEngine.isLabel(a) {
                     a.contents = newName
-                    a.userName = FormFieldEngine.labelName(for: newName)
+                    // Preserve marker suffixes (:kind:date) across renames.
+                    let suffix = (a.userName ?? "").replacingOccurrences(
+                        of: FormFieldEngine.labelName(for: oldName), with: "")
+                    a.userName = FormFieldEngine.labelName(for: newName) + suffix
                 }
             }
             docUndo.registerUndo(withTarget: self) { _ in }   // dirty the document for autosave

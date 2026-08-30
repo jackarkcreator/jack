@@ -61,8 +61,11 @@ enum FormFieldEngine {
             configureType(a)          // field type first — its setter clobbers /T
             a.fieldName = name        // name second, always
             a.font = fieldFont
-            a.backgroundColor = NSColor(calibratedRed: 0.94, green: 0.96, blue: 1.0, alpha: 1)
-            let b = PDFBorder(); b.lineWidth = 1; a.border = b
+            // Apple-style field chrome: clean white fill, hairline gray border — not the
+            // 90s inset box (Keno). /MK colors, so other readers keep the look too.
+            a.backgroundColor = .white
+            a.color = NSColor(calibratedWhite: 0.72, alpha: 1)
+            let b = PDFBorder(); b.lineWidth = 0.75; a.border = b
             return a
         }
         switch kind {
@@ -127,23 +130,35 @@ enum FormFieldEngine {
         guard let first = widgets.first else { return [] }
         let nm = labelName(for: name)
         switch kind {
-        case .text, .multiline, .dropdown, .date:
+        case .text, .multiline, .dropdown:
             let b = first.bounds
             return [label(name, at: CGPoint(x: b.minX, y: b.maxY + 3), size: 11, nm: nm)]
-        case .checkbox:
+        case .date:
+            // The :kind:date marker rides in the label link so a reopened document still
+            // knows to offer the calendar (widget /T belongs to the field name).
             let b = first.bounds
-            return [label(name, at: CGPoint(x: b.maxX + 6, y: b.minY - 2), size: 12, nm: nm)]
+            return [label(name, at: CGPoint(x: b.minX, y: b.maxY + 3), size: 11, nm: nm + ":kind:date")]
+        case .checkbox:
+            // Caption vertically centered on the box, not hanging off its baseline.
+            let b = first.bounds
+            return [label(name, at: CGPoint(x: b.maxX + 6, y: b.midY - 8.5), size: 12, nm: nm)]
         case .radioGroup(let options):
             var out: [PDFAnnotation] = []
             let topY = widgets.map { $0.bounds.maxY }.max() ?? first.bounds.maxY
             out.append(label(name, at: CGPoint(x: first.bounds.minX, y: topY + 4), size: 11,
                              weight: .semibold, nm: nm))
             for (i, w) in widgets.enumerated() where i < options.count {
-                out.append(label(options[i], at: CGPoint(x: w.bounds.maxX + 6, y: w.bounds.minY - 2),
+                out.append(label(options[i], at: CGPoint(x: w.bounds.maxX + 6, y: w.bounds.midY - 8.5),
                                  size: 12, nm: "\(nm):opt:\(i)"))
             }
             return out
         }
+    }
+
+    /// A Jack-authored date field: a text widget whose label link carries the date marker.
+    static func isDateField(_ widget: PDFAnnotation, on page: PDFPage) -> Bool {
+        guard widget.widgetFieldType == .text, let name = widget.fieldName else { return false }
+        return page.annotations.contains { ($0.userName ?? "").hasPrefix(labelName(for: name) + ":kind:date") }
     }
 
     /// PDF name-safe export value for a radio option ("Option One" → "Option_One").

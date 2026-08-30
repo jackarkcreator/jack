@@ -8,6 +8,8 @@ protocol StampSelectionDelegate: AnyObject {
     func noteClicked(_ ann: PDFAnnotation)
     func formFieldPlaced(kind: FormFieldKind, rect: CGRect, page: PDFPage)
     func formFieldEditRequested(name: String)
+    func fieldResized(_ widget: PDFAnnotation, from oldBounds: CGRect)
+    func dateFieldClicked(_ widget: PDFAnnotation, on page: PDFPage)
     func fieldMoved(_ items: [(PDFAnnotation, CGRect)])
     func imageDropped(_ image: NSImage, at point: CGPoint, on page: PDFPage)
     // Typewriter: click empty page → place an editor; drag moves the text; double-click re-edits.
@@ -33,6 +35,8 @@ final class SigningPDFView: PDFView {
     var regionAction: ((CGRect, PDFPage) -> Void)?
     var regionColor: NSColor = .systemTeal
     var armedFieldKind: FormFieldKind?
+    private var resizingWidget: PDFAnnotation?
+    private var resizeStart: CGRect = .zero
     var formFieldMenuItems: ((PDFAnnotation) -> [NSMenuItem])?
     var annotateMenuItems: ((PDFPage?, CGPoint) -> [NSMenuItem])?
 
@@ -104,7 +108,8 @@ final class SigningPDFView: PDFView {
                     fieldName = hit.fieldName
                 } else if let nm = hit.userName {
                     let base = String(nm.dropFirst("jack-label:".count))
-                    fieldName = base.components(separatedBy: ":opt:").first
+                    fieldName = base.components(separatedBy: ":opt:").first?
+                        .components(separatedBy: ":kind:").first
                 } else { fieldName = nil }
                 var set: [PDFAnnotation] = []
                 if let fieldName {
@@ -115,6 +120,22 @@ final class SigningPDFView: PDFView {
                 // Double-click a field or its label: straight to the editor popover.
                 if event.clickCount >= 2, let fieldName {
                     stampDelegate?.formFieldEditRequested(name: fieldName)
+                    return
+                }
+                if hit.type == "Widget" {
+                    // The widget is for USING: corner resizes, a date field pops its
+                    // calendar, anything else goes to PDFKit (type, check, choose).
+                    // Moving the whole unit is the LABEL's job.
+                    let corner = CGRect(x: hit.bounds.maxX - 10, y: hit.bounds.minY - 4, width: 14, height: 14)
+                    if corner.contains(p) {
+                        resizingWidget = hit; resizeStart = hit.bounds; dragPage = page
+                        return
+                    }
+                    if FormFieldEngine.isDateField(hit, on: page) {
+                        stampDelegate?.dateFieldClicked(hit, on: page)
+                        return
+                    }
+                    super.mouseDown(with: event)
                     return
                 }
                 if set.isEmpty { set = [hit] }
@@ -191,6 +212,16 @@ final class SigningPDFView: PDFView {
             let p = convert(event.locationInWindow, from: nil)
             band.frame = CGRect(x: min(markOriginView.x, p.x), y: min(markOriginView.y, p.y),
                                 width: abs(p.x - markOriginView.x), height: abs(p.y - markOriginView.y))
+            return
+        }
+        if let w = resizingWidget, let page = dragPage {
+            let p = convert(convert(event.locationInWindow, from: nil), to: page)
+            let isButton = w.widgetControlType == .checkBoxControl || w.widgetControlType == .radioButtonControl
+            var newW = max(16, p.x - resizeStart.minX)
+            var newH = max(14, resizeStart.maxY - p.y)
+            if isButton { let side = max(14, min(max(newW, newH), 40)); newW = side; newH = side }
+            w.bounds = CGRect(x: resizeStart.minX, y: resizeStart.maxY - newH, width: newW, height: newH)
+            needsDisplay = true
             return
         }
         if !dragSet.isEmpty, let page = dragPage {
@@ -283,6 +314,11 @@ final class SigningPDFView: PDFView {
             } else {
                 band.removeFromSuperview()
             }
+            return
+        }
+        if let w = resizingWidget {
+            if w.bounds != resizeStart { stampDelegate?.fieldResized(w, from: resizeStart) }
+            resizingWidget = nil; dragPage = nil
             return
         }
         if !dragSet.isEmpty {
