@@ -889,8 +889,38 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         }
     }
 
+    /// Tool-strip container whose right-aligned controls are re-laid on EVERY resize.
+    ///
+    /// 🧨 The strips were built with fixed frames at whatever `window.frame.width` happened to
+    /// be when the tool was toggled, relying on autoresizing margins from then on. Depending on
+    /// how the titlebar imposes the accessory's width (frame vs constraints, maximize vs drag),
+    /// the right-edge buttons — including Apply — could end up laid out against a stale width
+    /// and drift out of the visible strip on wide or resized windows. Re-anchoring from the
+    /// CURRENT bounds on every resize makes the layout correct no matter which path resized us.
+    private final class ToolStripView: NSView {
+        /// (view, gap): each view's trailing edge sits `gap` points in from the strip's right.
+        var rightAligned: [(view: NSView, gap: CGFloat)] = []
+        func anchorRight(_ view: NSView, gap: CGFloat) {
+            rightAligned.append((view, gap))
+            realign()
+        }
+        private func realign() {
+            for (v, gap) in rightAligned {
+                v.frame.origin.x = bounds.maxX - gap - v.frame.width
+            }
+        }
+        override func resizeSubviews(withOldSize oldSize: NSSize) {
+            super.resizeSubviews(withOldSize: oldSize)
+            realign()
+        }
+        override func layout() {
+            super.layout()
+            realign()
+        }
+    }
+
     private func buildMarkupStrip(width: CGFloat) -> NSView {
-        let strip = NSView(frame: NSRect(x: 0, y: 0, width: width, height: 40))
+        let strip = ToolStripView(frame: NSRect(x: 0, y: 0, width: width, height: 40))
         func b(_ title: String, _ action: Selector, _ x: CGFloat, _ w: CGFloat) -> NSButton {
             let btn = NSButton(title: title, target: self, action: action)
             btn.bezelStyle = .rounded
@@ -930,9 +960,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             hint.textColor = .secondaryLabelColor
             hint.font = .systemFont(ofSize: 11)
             hint.alignment = .right
-            hint.frame = NSRect(x: width - 260, y: 12, width: 244, height: 16)
-            hint.autoresizingMask = [.minXMargin]
+            hint.frame = NSRect(x: 0, y: 12, width: 244, height: 16)
             strip.addSubview(hint)
+            strip.anchorRight(hint, gap: 16)
         }
         return strip
     }
@@ -961,7 +991,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     }
 
     private func buildRedactStrip(width: CGFloat) -> NSView {
-        let strip = NSView(frame: NSRect(x: 0, y: 0, width: width, height: 40))
+        let strip = ToolStripView(frame: NSRect(x: 0, y: 0, width: width, height: 40))
 
         let hint = NSTextField(labelWithString: "Drag over anything to mark it for redaction")
         hint.textColor = .secondaryLabelColor
@@ -990,17 +1020,17 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         let clear = NSButton(title: "Clear Marks", target: self, action: #selector(clearRedactionMarks))
         clear.bezelStyle = .rounded
         clear.controlSize = .small
-        clear.frame = NSRect(x: width - 268, y: 7, width: 100, height: 26)
-        clear.autoresizingMask = [.minXMargin]
+        clear.frame = NSRect(x: 0, y: 7, width: 100, height: 26)
         strip.addSubview(clear)
+        strip.anchorRight(clear, gap: 168)
 
         let apply = NSButton(title: "Apply Redactions…", target: self, action: #selector(applyRedactions))
         apply.bezelStyle = .rounded
         apply.controlSize = .small
         apply.keyEquivalent = "\r"
-        apply.frame = NSRect(x: width - 160, y: 7, width: 148, height: 26)
-        apply.autoresizingMask = [.minXMargin]
+        apply.frame = NSRect(x: 0, y: 7, width: 148, height: 26)
         strip.addSubview(apply)
+        strip.anchorRight(apply, gap: 12)
 
         return strip
     }
@@ -1030,7 +1060,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     }
 
     private func buildEraseStrip(width: CGFloat) -> NSView {
-        let strip = NSView(frame: NSRect(x: 0, y: 0, width: width, height: 40))
+        let strip = ToolStripView(frame: NSRect(x: 0, y: 0, width: width, height: 40))
 
         let hint = NSTextField(labelWithString: "Drag over anything to erase it — logos, addresses, images. Erased means removed, not covered.")
         hint.textColor = .secondaryLabelColor
@@ -1046,17 +1076,17 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         let clear = NSButton(title: "Clear Marks", target: self, action: #selector(clearEraseMarks))
         clear.bezelStyle = .rounded
         clear.controlSize = .small
-        clear.frame = NSRect(x: width - 254, y: 7, width: 100, height: 26)
-        clear.autoresizingMask = [.minXMargin]
+        clear.frame = NSRect(x: 0, y: 7, width: 100, height: 26)
         strip.addSubview(clear)
+        strip.anchorRight(clear, gap: 154)
 
         let apply = NSButton(title: "Apply Erase", target: self, action: #selector(applyErase))
         apply.bezelStyle = .rounded
         apply.controlSize = .small
         apply.keyEquivalent = "\r"
-        apply.frame = NSRect(x: width - 146, y: 7, width: 134, height: 26)
-        apply.autoresizingMask = [.minXMargin]
+        apply.frame = NSRect(x: 0, y: 7, width: 134, height: 26)
         strip.addSubview(apply)
+        strip.anchorRight(apply, gap: 12)
 
         return strip
     }
@@ -1171,7 +1201,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         ("Dropdown", "chevron.down.square"), ("Date", "calendar")]
 
     private func buildFormStrip(width: CGFloat) -> NSView {
-        let strip = NSView(frame: NSRect(x: 0, y: 0, width: width, height: 40))
+        let strip = ToolStripView(frame: NSRect(x: 0, y: 0, width: width, height: 40))
         formPaletteButtons = []
         var x: CGFloat = 12
         for (i, entry) in Self.formPalette.enumerated() {
@@ -1192,9 +1222,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         hint.textColor = .secondaryLabelColor
         hint.font = .systemFont(ofSize: 11)
         hint.alignment = .right
-        hint.frame = NSRect(x: width - 472, y: 12, width: 456, height: 16)
-        hint.autoresizingMask = [.minXMargin]
+        hint.frame = NSRect(x: 0, y: 12, width: 456, height: 16)
         strip.addSubview(hint)
+        strip.anchorRight(hint, gap: 16)
         return strip
     }
 
@@ -1837,12 +1867,37 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     // Dirty state and autosave flow from undo registrations on the document's undo manager.
     private func markEdited() {}
 
+    // Tahoe's PDFView render cache misses annotation adds/removes, so mutations force a
+    // repaint by reassigning the document. That reassignment resets scroll and zoom — and
+    // `go(to: page)` only put the user back at the TOP of the page, so every apply/undo made
+    // the document visibly lurch. Capture the exact destination (by page INDEX — the page
+    // object itself may just have been swapped out) and zoom, and put the reader back where
+    // they were. Editing must never feel like it moved the page.
     private func forceRefresh() {
-        let page = pdfView.currentPage
         let doc = pdfView.document
+        let scale = pdfView.scaleFactor
+        let autoScales = pdfView.autoScales
+        var destIndex: Int?
+        var destPoint = CGPoint.zero
+        if let dest = pdfView.currentDestination, let p = dest.page, let d = doc {
+            let i = d.index(for: p)
+            if i != NSNotFound { destIndex = i; destPoint = dest.point }
+        }
+        let fallbackPage = pdfView.currentPage
+
         pdfView.document = nil
         pdfView.document = doc
-        if let page = page, page.document != nil { pdfView.go(to: page) }
+
+        if autoScales {
+            pdfView.autoScales = true
+        } else {
+            pdfView.scaleFactor = scale
+        }
+        if let i = destIndex, let page = doc?.page(at: i) {
+            pdfView.go(to: PDFDestination(page: page, at: destPoint))
+        } else if let page = fallbackPage, page.document != nil {
+            pdfView.go(to: page)
+        }
         pageChanged()
     }
 
