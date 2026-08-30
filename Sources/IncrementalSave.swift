@@ -19,6 +19,9 @@ import PDFKit
 
 enum IncrementalSave {
 
+    /// Why the last build() returned nil — diagnostic breadcrumb for the save gate.
+    static var lastBailReason = ""
+
     struct Baseline {
         let data: Data
         let pageIDs: [ObjectIdentifier]
@@ -47,30 +50,38 @@ enum IncrementalSave {
     /// nil = not eligible / could not build — caller falls back to the full rewrite.
     static func build(current: PDFDocument, baseline: Baseline) -> Data? {
         // ---- eligibility: only raster-swapped pages differ ----
-        guard current.pageCount == baseline.pageIDs.count else { return nil }
+        guard current.pageCount == baseline.pageIDs.count else { lastBailReason = "pageCount \(current.pageCount) != baseline \(baseline.pageIDs.count)"; return nil }
         var swapped: [Int] = []
         for i in 0..<current.pageCount {
-            guard let page = current.page(at: i) else { return nil }
+            guard let page = current.page(at: i) else { lastBailReason = "page \(i) nil"; return nil }
             if ObjectIdentifier(page) == baseline.pageIDs[i] {
                 // untouched pages must be truly untouched — an added highlight or typewriter
                 // note needs the v2.8 annotation emitter, not silence. Same for a crop or
                 // rotation on the original page object.
-                guard Set(page.annotations.map(ObjectIdentifier.init)) == baseline.annotationIDs[i],
-                      page.bounds(for: .cropBox) == baseline.cropBoxes[i],
-                      page.rotation == baseline.rotations[i] else { return nil }
+                guard Set(page.annotations.map(ObjectIdentifier.init)) == baseline.annotationIDs[i] else {
+                    lastBailReason = "page \(i + 1): annotations changed on an untouched page (\(page.annotations.count) now, kinds: \(Set(page.annotations.map { $0.type ?? "?" })))"
+                    return nil
+                }
+                guard page.bounds(for: .cropBox) == baseline.cropBoxes[i] else { lastBailReason = "page \(i + 1): cropBox changed"; return nil }
+                guard page.rotation == baseline.rotations[i] else { lastBailReason = "page \(i + 1): rotation changed"; return nil }
             } else {
                 // swapped page: must be one of ours — rasterized (no text layer), carrying
                 // at most FreeText annotations (retype).
-                guard (page.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                      page.annotations.allSatisfy({ $0.type == "FreeText" }) else { return nil }
+                guard (page.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    lastBailReason = "page \(i + 1): swapped page still has text"; return nil
+                }
+                guard page.annotations.allSatisfy({ $0.type == "FreeText" }) else {
+                    lastBailReason = "page \(i + 1): swapped page carries non-FreeText annotations: \(Set(page.annotations.map { $0.type ?? "?" }))"
+                    return nil
+                }
                 swapped.append(i)
             }
         }
         guard !swapped.isEmpty else { return baseline.data }   // nothing changed → original bytes
 
         // ---- parse the original: classic xref only ----
-        guard let parsed = Parsed(data: baseline.data) else { return nil }
-        guard parsed.pageObjectNumbers.count == baseline.pageIDs.count else { return nil }
+        guard let parsed = Parsed(data: baseline.data) else { lastBailReason = "parser rejected baseline bytes"; return nil }
+        guard parsed.pageObjectNumbers.count == baseline.pageIDs.count else { lastBailReason = "tree walk found \(parsed.pageObjectNumbers.count) pages, want \(baseline.pageIDs.count)"; return nil }
 
         var out = baseline.data
         if out.last != 0x0A { out.append(0x0A) }

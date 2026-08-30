@@ -101,13 +101,36 @@ final class JackDocument: NSDocument {
         // worst case is exactly yesterday's behavior. Widget-bearing docs always fall back:
         // typed form values change annotation STATE without changing the annotation set,
         // and the incremental path would silently drop them.
-        if let live = pdf, let baseline = incrementalBaseline,
-           !FormFieldEngine.hasWidgets(live),
-           let candidate = IncrementalSave.build(current: live, baseline: baseline),
-           IncrementalSave.verify(candidate: candidate, current: live, baseline: baseline).isEmpty {
-            droppedTextLayer = false
-            incrementalBaseline = IncrementalSave.baseline(for: live, data: candidate)
-            return candidate
+        func diag(_ msg: String) {
+            let line = "[\(Date())] \(msg)\n"
+            if let h = FileHandle(forWritingAtPath: "/tmp/jack-save-diag.log") {
+                h.seekToEndOfFile(); h.write(Data(line.utf8)); h.closeFile()
+            } else {
+                try? line.write(toFile: "/tmp/jack-save-diag.log", atomically: true, encoding: .utf8)
+            }
+        }
+        if let live = pdf {
+            if incrementalBaseline == nil {
+                diag("gate: NO BASELINE (doc not opened via read(from:)?)")
+            } else if FormFieldEngine.hasWidgets(live) {
+                diag("gate: widgets present → fallback by design")
+            } else if let baseline = incrementalBaseline {
+                IncrementalSave.lastBailReason = ""
+                if let candidate = IncrementalSave.build(current: live, baseline: baseline) {
+                    let issues = IncrementalSave.verify(candidate: candidate, current: live, baseline: baseline)
+                    if issues.isEmpty {
+                        diag("gate: INCREMENTAL OK (\(candidate.count) bytes)")
+                        droppedTextLayer = false
+                        incrementalBaseline = IncrementalSave.baseline(for: live, data: candidate)
+                        return candidate
+                    } else {
+                        diag("gate: verify FAILED — \(issues.joined(separator: " | "))")
+                    }
+                } else {
+                    diag("gate: build nil — \(IncrementalSave.lastBailReason)")
+                }
+            }
+            diag("gate: FALLBACK path runs")
         }
 
         guard let live = pdf,
