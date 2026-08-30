@@ -271,7 +271,11 @@ final class SigningPDFView: PDFView {
             let p = convert(convert(event.locationInWindow, from: nil), to: page)
             let dx = p.x - resizeGrab.x
             let dy = p.y - resizeGrab.y
-            let isButton = w.widgetControlType == .checkBoxControl || w.widgetControlType == .radioButtonControl
+            // 🧨 widgetControlType is only meaningful for BUTTON fields — on a choice/text
+            // widget it returns a default that matches .checkBoxControl, which square-clamped
+            // dropdowns (Keno: "only goes to square, can't go back"). Guard the field type.
+            let isButton = w.widgetFieldType == .button &&
+                (w.widgetControlType == .checkBoxControl || w.widgetControlType == .radioButtonControl)
             var newW = max(12, resizeStart.width + dx)
             var newH = max(12, resizeStart.height - dy)
             if isButton {

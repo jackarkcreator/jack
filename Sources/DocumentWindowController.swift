@@ -2719,17 +2719,24 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         // The reassign rebuilds PDFView's tiles ASYNCHRONOUSLY — the view blanks (white)
         // until they land, a visible flash on dark pages. Cover the visible page area with
         // its real post-mutation pixels (page render — the proven path) while tiles settle.
-        var cover: NSImageView?
+        var cover: NSView?
         if let doc, let i = destIndex, let page = doc.page(at: min(max(0, i), max(0, doc.pageCount - 1))) {
             let pageVisible = pdfView.convert(pdfView.bounds, to: page)
                 .intersection(page.bounds(for: .cropBox))
             if pageVisible.width > 4, pageVisible.height > 4,
                let img = CropEngine.snapshotImage(page: page, region: pageVisible) {
+                // Cover the WHOLE view (background + page pixels): a page-only cover let a
+                // sliver of transiently mispositioned content peek out at the edges — the
+                // "small bar at the top" Keno saw after a redact.
+                let container = NSView(frame: pdfView.bounds)
+                container.wantsLayer = true
+                container.layer?.backgroundColor = NSColor.underPageBackgroundColor.cgColor
                 let iv = NSImageView(frame: pdfView.convert(pageVisible, from: page))
                 iv.image = img
                 iv.imageScaling = .scaleAxesIndependently
-                pdfView.addSubview(iv)
-                cover = iv
+                container.addSubview(iv)
+                pdfView.addSubview(container)
+                cover = container
             }
         }
         pdfView.document = nil
