@@ -49,6 +49,8 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
 
     private let sidebar = PageSidebarController()
     private var searchField: NSSearchField?
+    private weak var saveButton: NSButton?
+    private var subtitleBase = ""
     private weak var selected: ImageStampAnnotation?
     private var sheet: SignatureSheetController?
 
@@ -195,6 +197,10 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         // Typing into AcroForm fields bypasses our undo path — count it so autosave captures it.
         NotificationCenter.default.addObserver(self, selector: #selector(annotationHit(_:)),
                                                name: .PDFViewAnnotationHit, object: pdfView)
+        // v2.5: nothing is written until the user saves, so the Save button and the subtitle
+        // are the only signals that work is pending — keep them honest.
+        NotificationCenter.default.addObserver(self, selector: #selector(dirtyChanged),
+                                               name: .jackDocumentDirtyChanged, object: document)
         sidebar.reload()
         pageChanged()
     }
@@ -239,8 +245,22 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     }
 
     private func setSubtitle(_ s: String) {
-        let edited = (document as? NSDocument)?.isDocumentEdited == true ? " — Edited" : ""
-        subtitleLabel.stringValue = s + edited
+        subtitleBase = s
+        let doc = document as? JackDocument
+        let dirty = doc?.isDocumentEdited == true
+        // While edits are pending on someone else's PDF, say plainly that their file is safe.
+        let suffix: String
+        if dirty {
+            suffix = doc?.protectsOriginal == true ? " — Edited · original unchanged" : " — Edited"
+        } else {
+            suffix = ""
+        }
+        subtitleLabel.stringValue = s + suffix
+    }
+
+    @objc private func dirtyChanged() {
+        setSubtitle(subtitleBase)
+        saveButton?.isEnabled = (document as? NSDocument)?.isDocumentEdited == true
     }
 
     // NSDocument re-syncs the title on rename/move/duplicate — keep our control in step.
@@ -268,14 +288,15 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         static let highlight = NSToolbarItem.Identifier("jack.highlight")
         static let lock = NSToolbarItem.Identifier("jack.lock")
         static let print = NSToolbarItem.Identifier("jack.print")
-        static let save = NSToolbarItem.Identifier("jack.save")
+        static let save = NSToolbarItem.Identifier("jack.save")       // Export a flattened copy
+        static let saveDoc = NSToolbarItem.Identifier("jack.saveDoc") // Save the document itself
         static let search = NSToolbarItem.Identifier("jack.search")
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         var ids: [NSToolbarItem.Identifier] =
         [ItemID.sidebar, .space, ItemID.undo, ItemID.redo, .flexibleSpace, ItemID.zoomOut, ItemID.zoomIn, .space,
-         ItemID.highlight, ItemID.markup, ItemID.form, ItemID.erase, ItemID.redact, ItemID.clean, ItemID.lock, ItemID.tools, ItemID.print, ItemID.share, .flexibleSpace, ItemID.search, ItemID.save]
+         ItemID.highlight, ItemID.markup, ItemID.form, ItemID.erase, ItemID.redact, ItemID.clean, ItemID.lock, ItemID.tools, ItemID.print, ItemID.share, .flexibleSpace, ItemID.search, ItemID.saveDoc, ItemID.save]
         if AskEngine.isAvailable, let i = ids.firstIndex(of: ItemID.share) {
             ids.insert(ItemID.ask, at: i + 1)
         }
@@ -429,13 +450,26 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             item.label = "Markup"
             item.toolTip = "Fill & Sign"
             return item
+        case ItemID.saveDoc:
+            // v2.5: the document is only written when this is used. It lights up when there
+            // is something to write, and is the one control that touches the user's file.
+            let item = NSToolbarItem(itemIdentifier: id)
+            let b = NSButton(title: "Save", target: self, action: #selector(saveDocumentAction(_:)))
+            b.bezelStyle = .texturedRounded
+            b.keyEquivalent = ""
+            b.isEnabled = (document as? NSDocument)?.isDocumentEdited == true
+            saveButton = b
+            item.view = b
+            item.label = "Save"
+            item.toolTip = "Save your changes (⌘S) — the first save of someone else's PDF makes a copy"
+            return item
         case ItemID.save:
             let item = NSToolbarItem(itemIdentifier: id)
             let b = NSButton(title: "Export…", target: self, action: #selector(exportFlattened(_:)))
             b.bezelStyle = .texturedRounded
             item.view = b
             item.label = "Export"
-            item.toolTip = "Export a flattened copy (edits save into the file automatically)"
+            item.toolTip = "Export a flattened copy — annotations and signatures burned in"
             return item
         case ItemID.search:
             if #available(macOS 11.0, *) {
@@ -455,6 +489,10 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     }
 
     // MARK: - View actions
+
+    // Routed through NSDocument so the toolbar button and ⌘S share one code path
+    // (including the first-save-makes-a-copy rule in JackDocument.saveDocument).
+    @objc func saveDocumentAction(_ sender: Any?) { (document as? NSDocument)?.save(sender) }
 
     @objc func toggleSidebar(_ sender: Any?) { sidebarVisible.toggle(); layoutViews() }
     @objc func undoEdit(_ sender: Any?) { docUndo.undo() }

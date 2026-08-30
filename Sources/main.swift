@@ -99,6 +99,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // v2.5: autosave-in-place is off, so a crash would otherwise lose the session's edits.
+        // Autosave-elsewhere writes a scratch copy under ~/Library/Autosave Information and
+        // NEVER the user's original; macOS offers it back on the next launch.
+        NSDocumentController.shared.autosavingDelay = 30
         setupStatusItem()
         setupPopover()
         configureLoginOnFirstRun()
