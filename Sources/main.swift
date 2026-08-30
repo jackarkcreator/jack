@@ -128,6 +128,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // Stay resident in the menu bar after document windows close.
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
+    // Launching or re-activating Jack must never spawn a blank Untitled document —
+    // ⌘N is the only way to ask for one. Activating with nothing open shows the launcher.
+    func applicationShouldOpenUntitledFile(_ sender: NSApplication) -> Bool { false }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag { showPopover() }
+        return false
+    }
+
     private func route(_ urls: [URL]) {
         // A dropped FOLDER means batch processing.
         if let folder = urls.first(where: { (try? $0.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true }) {
