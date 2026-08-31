@@ -12,6 +12,11 @@ final class PageOrganizerWindowController: NSWindowController, NSCollectionViewD
 
     private var sourcePages: [PDFPage]
     private var trayPages: [PDFPage] = []
+    /// Physical truth (Keno, 2026-08-30): a page moved into the New PDF leaves its source
+    /// slot EMPTY — nothing reflows, nothing renumbers. Removing it from the New PDF puts
+    /// it back, and an empty slot can't be moved twice.
+    private var takenSource: Set<Int> = []
+    private var trayOrigins: [Int] = []      // trayPages[i] came from sourcePages[trayOrigins[i]]
     private var thumbCache: [ObjectIdentifier: NSImage] = [:]
 
     private let sourceCV = NSCollectionView()
@@ -217,14 +222,20 @@ final class PageOrganizerWindowController: NSWindowController, NSCollectionViewD
 
     func collectionView(_ cv: NSCollectionView, itemForRepresentedObjectAt indexPath: IndexPath) -> NSCollectionViewItem {
         let item = cv.makeItem(withIdentifier: PageThumbnailItem.id, for: indexPath) as! PageThumbnailItem
-        let page = pages(cv)[indexPath.item]
-        item.configure(thumbnail(for: page), label: "\(indexPath.item + 1)")
+        if cv === sourceCV, takenSource.contains(indexPath.item) {
+            item.configureTaken(label: "\(indexPath.item + 1)")
+        } else {
+            let page = pages(cv)[indexPath.item]
+            item.configure(thumbnail(for: page), label: "\(indexPath.item + 1)")
+        }
         return item
     }
 
     // MARK: drag & drop
 
-    func collectionView(_ cv: NSCollectionView, canDragItemsAt indexPaths: Set<IndexPath>, with event: NSEvent) -> Bool { true }
+    func collectionView(_ cv: NSCollectionView, canDragItemsAt indexPaths: Set<IndexPath>, with event: NSEvent) -> Bool {
+        cv !== sourceCV || indexPaths.allSatisfy { !takenSource.contains($0.item) }
+    }
 
     func collectionView(_ cv: NSCollectionView, pasteboardWriterForItemAt indexPath: IndexPath) -> NSPasteboardWriting? {
         let item = NSPasteboardItem()
@@ -251,20 +262,29 @@ final class PageOrganizerWindowController: NSWindowController, NSCollectionViewD
         guard cv === trayCV else { return false }
         var target = indexPath.item
         if (draggingInfo.draggingSource as? NSCollectionView) === sourceCV {
-            // Copy source pages into the New PDF.
-            let add = sourceDrag.compactMap { sourcePages[$0].copy() as? PDFPage }
+            // MOVE source pages into the New PDF — their slots stay behind, empty.
+            let fresh = sourceDrag.filter { !takenSource.contains($0) }
+            let add = fresh.compactMap { sourcePages[$0].copy() as? PDFPage }
             guard !add.isEmpty else { return false }
             target = min(max(0, target), trayPages.count)
             trayPages.insert(contentsOf: add, at: target)
+            trayOrigins.insert(contentsOf: fresh, at: target)
+            fresh.forEach { takenSource.insert($0) }
             sourceDrag = []
+            reloadSource()
             reloadTray(select: target..<(target + add.count))
         } else {
-            // Reorder within the New PDF.
+            // Reorder within the New PDF (origins travel with their pages).
             guard !trayDrag.isEmpty else { return false }
             let moving = trayDrag.map { trayPages[$0] }
-            for i in trayDrag.sorted(by: >) { trayPages.remove(at: i); if i < target { target -= 1 } }
+            let movingOrigins = trayDrag.map { trayOrigins[$0] }
+            for i in trayDrag.sorted(by: >) {
+                trayPages.remove(at: i); trayOrigins.remove(at: i)
+                if i < target { target -= 1 }
+            }
             target = min(max(0, target), trayPages.count)
             trayPages.insert(contentsOf: moving, at: target)
+            trayOrigins.insert(contentsOf: movingOrigins, at: target)
             trayDrag = []
             reloadTray(select: target..<(target + moving.count))
         }
@@ -305,18 +325,24 @@ final class PageOrganizerWindowController: NSWindowController, NSCollectionViewD
     }
 
     @objc private func addSelected() {
-        let sel = selected(sourceCV)
-        guard !sel.isEmpty else { infoAlert("Select pages", "Select source pages to add to your New PDF."); return }
-        let add = sel.compactMap { sourcePages[$0].copy() as? PDFPage }
-        let start = trayPages.count
-        trayPages.append(contentsOf: add)
-        reloadTray(select: start..<(start + add.count))
+        let sel = selected(sourceCV).filter { !takenSource.contains($0) }
+        guard !sel.isEmpty else { infoAlert("Select pages", "Select source pages to add to your New PDF — empty slots have already been moved."); return }
+        take(sel)
     }
 
     @objc private func addAll() {
-        let add = sourcePages.compactMap { $0.copy() as? PDFPage }
+        take((0..<sourcePages.count).filter { !takenSource.contains($0) })
+    }
+
+    /// Move source pages (by index) into the New PDF, leaving their slots empty.
+    private func take(_ indices: [Int]) {
+        let add = indices.compactMap { sourcePages[$0].copy() as? PDFPage }
+        guard !add.isEmpty else { return }
         let start = trayPages.count
         trayPages.append(contentsOf: add)
+        trayOrigins.append(contentsOf: indices)
+        indices.forEach { takenSource.insert($0) }
+        reloadSource()
         reloadTray(select: start..<(start + add.count))
     }
 
@@ -330,13 +356,19 @@ final class PageOrganizerWindowController: NSWindowController, NSCollectionViewD
     @objc private func trayRemove() {
         let sel = selected(trayCV)
         guard !sel.isEmpty else { return }
-        for i in sel.sorted(by: >) { trayPages.remove(at: i) }
+        // Removing from the New PDF puts the page BACK — its source slot refills.
+        for i in sel.sorted(by: >) {
+            takenSource.remove(trayOrigins[i])
+            trayPages.remove(at: i)
+            trayOrigins.remove(at: i)
+        }
+        reloadSource()
         reloadTray()
     }
 
     @objc private func saveSelectedAs() {
-        let sel = selected(sourceCV)
-        guard !sel.isEmpty else { infoAlert("Select pages first", "Choose source pages to save as a new PDF."); return }
+        let sel = selected(sourceCV).filter { !takenSource.contains($0) }
+        guard !sel.isEmpty else { infoAlert("Select pages first", "Choose source pages to save as a new PDF — empty slots have already been moved."); return }
         let doc = PDFDocument()
         for (n, i) in sel.enumerated() { if let c = sourcePages[i].copy() as? PDFPage { doc.insert(c, at: n) } }
         save(doc, suggested: "Extracted.pdf")

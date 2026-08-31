@@ -6,6 +6,7 @@ final class PageThumbnailItem: NSCollectionViewItem {
 
     private let thumb = NSImageView()
     private let label = NSTextField(labelWithString: "")
+    private let dash = CAShapeLayer()   // the empty-slot outline (taken mode)
 
     override func loadView() {
         let v = NSView(frame: NSRect(x: 0, y: 0, width: 150, height: 196))
@@ -33,7 +34,30 @@ final class PageThumbnailItem: NSCollectionViewItem {
 
     func configure(_ image: NSImage?, label text: String) {
         thumb.image = image
+        thumb.layer?.backgroundColor = NSColor.white.cgColor
+        thumb.layer?.borderWidth = 1
+        thumb.layer?.borderColor = NSColor.separatorColor.cgColor
+        dash.removeFromSuperlayer()
         label.stringValue = text
+        label.textColor = .secondaryLabelColor
+    }
+
+    /// The organizer's physical-truth mode: a page moved into the New PDF leaves its slot
+    /// EMPTY — a dashed outline where it used to sit, number intact, nothing renumbers.
+    func configureTaken(label text: String) {
+        thumb.image = nil
+        thumb.layer?.backgroundColor = NSColor.clear.cgColor
+        thumb.layer?.borderWidth = 0
+        dash.frame = thumb.bounds
+        dash.path = CGPath(roundedRect: thumb.bounds.insetBy(dx: 1, dy: 1),
+                           cornerWidth: 6, cornerHeight: 6, transform: nil)
+        dash.fillColor = NSColor.clear.cgColor
+        dash.strokeColor = NSColor.tertiaryLabelColor.cgColor
+        dash.lineWidth = 1.5
+        dash.lineDashPattern = [6, 5]
+        if dash.superlayer == nil { thumb.layer?.addSublayer(dash) }
+        label.stringValue = text
+        label.textColor = .tertiaryLabelColor
     }
 
     override var isSelected: Bool { didSet { updateRing() } }
