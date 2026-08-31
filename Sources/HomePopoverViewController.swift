@@ -51,7 +51,10 @@ final class HomePopoverViewController: NSViewController {
     var onQuit: (() -> Void)?
     var onUpdate: (() -> Void)?
     var onToggleLogin: ((Bool) -> Void)?
+    var onToggleShelf: ((Bool) -> Void)?
     var loginEnabled = false { didSet { loginCheck?.state = loginEnabled ? .on : .off } }
+    var shelfEnabled = true { didSet { shelfCheck?.state = shelfEnabled ? .on : .off } }
+    private var shelfCheck: NSButton?
     var defaultEnabled = false {
         didSet {
             defaultCheck?.state = defaultEnabled ? .on : .off
@@ -72,7 +75,7 @@ final class HomePopoverViewController: NSViewController {
     }
 
     private static let width: CGFloat = 312
-    private static let height: CGFloat = 352
+    private static let height: CGFloat = 376
 
     private let dropOverlay = NSVisualEffectView()
 
@@ -117,13 +120,13 @@ final class HomePopoverViewController: NSViewController {
         v.addSubview(recentsRow)
         refreshRecents()
 
-        let sep = NSBox(frame: NSRect(x: 16, y: 96, width: Self.width - 32, height: 1))
+        let sep = NSBox(frame: NSRect(x: 16, y: 120, width: Self.width - 32, height: 1))
         sep.boxType = .separator
         v.addSubview(sep)
 
         let def = NSButton(checkboxWithTitle: "★ Make Jack my default PDF app", target: self, action: #selector(makeDefault))
         def.font = .systemFont(ofSize: 11)
-        def.frame = NSRect(x: 16, y: 68, width: Self.width - 32, height: 20)
+        def.frame = NSRect(x: 16, y: 92, width: Self.width - 32, height: 20)
         def.state = defaultEnabled ? .on : .off
         if defaultEnabled { def.title = "Jack is your default PDF app" }
         v.addSubview(def)
@@ -131,10 +134,17 @@ final class HomePopoverViewController: NSViewController {
 
         let chk = NSButton(checkboxWithTitle: "Open Jack at login", target: self, action: #selector(toggleLogin))
         chk.font = .systemFont(ofSize: 11)
-        chk.frame = NSRect(x: 16, y: 44, width: Self.width - 32, height: 20)
+        chk.frame = NSRect(x: 16, y: 68, width: Self.width - 32, height: 20)
         chk.state = loginEnabled ? .on : .off
         v.addSubview(chk)
         loginCheck = chk
+
+        let shelf = NSButton(checkboxWithTitle: "Show the shelf when dragging files", target: self, action: #selector(toggleShelf))
+        shelf.font = .systemFont(ofSize: 11)
+        shelf.frame = NSRect(x: 16, y: 44, width: Self.width - 32, height: 20)
+        shelf.state = shelfEnabled ? .on : .off
+        v.addSubview(shelf)
+        shelfCheck = shelf
 
         let quit = NSButton(title: "Quit Jack", target: self, action: #selector(quit))
         quit.bezelStyle = .rounded
@@ -229,6 +239,7 @@ final class HomePopoverViewController: NSViewController {
         if let path = sender.toolTip { onOpenRecent?(URL(fileURLWithPath: path)) }
     }
     @objc private func toggleLogin() { onToggleLogin?(loginCheck?.state == .on) }
+    @objc private func toggleShelf() { onToggleShelf?(shelfCheck?.state == .on) }
     @objc private func quit() { onQuit?() }
     @objc private func openUpdate() {
         if let onUpdate = onUpdate { onUpdate() }                 // Sparkle flow (installs in place)

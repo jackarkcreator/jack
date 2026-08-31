@@ -80,6 +80,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private var statusItem: NSStatusItem!
+    private var dropShelf: DropShelf?
     private let popover = NSPopover()
     private let popoverVC = HomePopoverViewController()
     // Sparkle: auto-checks daily per SUScheduledCheckInterval; downloads, installs, relaunches.
@@ -123,6 +124,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setupPopover()
         NSApp.servicesProvider = self
         NSUpdateDynamicServices()
+        // The Drop Shelf: a corner target that exists only while a file drag is in flight.
+        dropShelf = DropShelf(onDrop: { [weak self] urls in self?.route(urls) })
         configureLoginOnFirstRun()
         enforceDefaultIfWanted()
         MainMenu.install(newAction: #selector(newDocumentAction),
@@ -259,6 +262,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popoverVC.onQuit = { NSApp.terminate(nil) }
         popoverVC.onUpdate = { [weak self] in self?.popover.performClose(nil); self?.updater.checkForUpdates(nil) }
         popoverVC.onToggleLogin = { [weak self] on in self?.setLogin(on) }
+        popoverVC.onToggleShelf = { [weak self] on in
+            UserDefaults.standard.set(on, forKey: DropShelf.prefKey)
+            if !on { self?.dropShelf?.hide() }
+        }
         popover.contentViewController = popoverVC
         popover.behavior = .transient
     }
@@ -271,6 +278,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let button = statusItem.button else { return }
         if popover.isShown { return }
         popoverVC.loginEnabled = isLoginEnabled()
+        popoverVC.shelfEnabled = DropShelf.enabled
         popoverVC.defaultEnabled = AppDelegate.isDefaultPDFApp()
         popoverVC.refreshRecents()
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
