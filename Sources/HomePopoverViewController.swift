@@ -45,7 +45,6 @@ final class HomePopoverViewController: NSViewController {
     var onSign: (() -> Void)?
     var onOrganize: (() -> Void)?
     var onBatch: (() -> Void)?
-    var onOpenRecent: ((URL) -> Void)?
     var onFilesDropped: (([URL]) -> Void)?
     var onMakeDefault: (() -> Void)?
     var onQuit: (() -> Void)?
@@ -63,8 +62,6 @@ final class HomePopoverViewController: NSViewController {
     }
     private var defaultCheck: NSButton?
     private var loginCheck: NSButton?
-    private var recentButtons: [NSButton] = []
-    private let recentsRow = NSView()
     private let updateButton = NSButton(title: "↓ Update", target: nil, action: nil)
     private var updateURL: URL?
 
@@ -114,11 +111,6 @@ final class HomePopoverViewController: NSViewController {
                              width: cardW, height: cardH)
             v.addSubview(b)
         }
-
-        // Recents — the two most recent documents, clickable; refreshed on every show.
-        recentsRow.frame = NSRect(x: 18, y: Self.height - 325, width: Self.width - 36, height: 20)
-        v.addSubview(recentsRow)
-        refreshRecents()
 
         let sep = NSBox(frame: NSRect(x: 16, y: 120, width: Self.width - 32, height: 1))
         sep.boxType = .separator
@@ -191,39 +183,6 @@ final class HomePopoverViewController: NSViewController {
         self.view = v
     }
 
-    func refreshRecents() {
-        guard isViewLoaded else { return }
-        recentsRow.subviews.forEach { $0.removeFromSuperview() }
-        recentButtons = []
-        let recents = RecentDocuments.list().prefix(2)
-        var rx: CGFloat = 0
-        let rLabel = NSTextField(labelWithString: "Recent:")
-        rLabel.font = .systemFont(ofSize: 11)
-        rLabel.textColor = .secondaryLabelColor
-        rLabel.frame = NSRect(x: rx, y: 3, width: 46, height: 15)
-        recentsRow.addSubview(rLabel)
-        rx += 48
-        if recents.isEmpty {
-            let none = NSTextField(labelWithString: "nothing yet")
-            none.font = .systemFont(ofSize: 11)
-            none.textColor = .tertiaryLabelColor
-            none.frame = NSRect(x: rx, y: 3, width: 120, height: 15)
-            recentsRow.addSubview(none)
-        }
-        for url in recents {
-            let b = NSButton(title: url.deletingPathExtension().lastPathComponent, target: self, action: #selector(openRecent(_:)))
-            b.isBordered = false
-            b.font = .systemFont(ofSize: 11)
-            b.contentTintColor = .controlAccentColor
-            let w = min(110, b.intrinsicContentSize.width)
-            b.frame = NSRect(x: rx, y: 0, width: w, height: 20)
-            b.toolTip = url.path
-            recentButtons.append(b)
-            recentsRow.addSubview(b)
-            rx += w + 8
-        }
-    }
-
     @objc private func newPDF() { onNew?() }
     @objc private func openPDF() { onOpen?() }
     @objc private func makeDefault() {
@@ -235,9 +194,6 @@ final class HomePopoverViewController: NSViewController {
     @objc private func sign() { onSign?() }
     @objc private func organize() { onOrganize?() }
     @objc private func batch() { onBatch?() }
-    @objc private func openRecent(_ sender: NSButton) {
-        if let path = sender.toolTip { onOpenRecent?(URL(fileURLWithPath: path)) }
-    }
     @objc private func toggleLogin() { onToggleLogin?(loginCheck?.state == .on) }
     @objc private func toggleShelf() { onToggleShelf?(shelfCheck?.state == .on) }
     @objc private func quit() { onQuit?() }

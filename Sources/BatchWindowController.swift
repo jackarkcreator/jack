@@ -3,7 +3,7 @@
 import AppKit
 import PDFKit
 
-final class BatchWindowController: NSWindowController, NSWindowDelegate {
+final class BatchWindowController: NSWindowController, NSWindowDelegate, NSToolbarDelegate {
     private let folder: URL
     private let files: [URL]
 
@@ -30,10 +30,20 @@ final class BatchWindowController: NSWindowController, NSWindowDelegate {
         let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 500, height: 430),
                            styleMask: [.titled, .closable, .miniaturizable],
                            backing: .buffered, defer: false)
-        win.title = "Batch — \(folder.lastPathComponent)"
+        win.title = "Batch Process"
+        if #available(macOS 11.0, *) {
+            win.subtitle = "\(files.count) PDF\(files.count == 1 ? "" : "s") in \u{201C}\(folder.lastPathComponent)\u{201D}"
+        }
         win.center()
         super.init(window: win)
         win.delegate = self
+        // v2.8 grammar: unified toolbar, shared symbol pipeline, Run as the prominent action.
+        let toolbar = NSToolbar(identifier: "JackBatchToolbar")
+        toolbar.delegate = self
+        toolbar.displayMode = .iconOnly
+        toolbar.allowsUserCustomization = false
+        win.toolbar = toolbar
+        if #available(macOS 11.0, *) { win.toolbarStyle = .unified }
         buildUI()
         AppDelegate.batchers.append(self)
         AppDelegate.updateActivationPolicy()
@@ -48,60 +58,100 @@ final class BatchWindowController: NSWindowController, NSWindowDelegate {
         }
     }
 
+    // MARK: toolbar (Run is the window's Save-equivalent: titled, right, return key)
+
+    private enum ItemID {
+        static let reveal = NSToolbarItem.Identifier("batch.reveal")
+        static let run = NSToolbarItem.Identifier("batch.run")
+    }
+
+    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        [ItemID.reveal, .flexibleSpace, ItemID.run]
+    }
+    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        toolbarDefaultItemIdentifiers(toolbar)
+    }
+
+    func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier id: NSToolbarItem.Identifier,
+                 willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
+        switch id {
+        case ItemID.reveal:
+            let item = NSToolbarItem(itemIdentifier: id)
+            item.image = DocumentWindowController.toolbarSymbol(["folder"], "Show in Finder")
+            item.label = "Show in Finder"
+            item.toolTip = "Reveal this folder in Finder"
+            item.target = self
+            item.action = #selector(revealFolder)
+            item.isBordered = true
+            return item
+        case ItemID.run:
+            let item = NSToolbarItem(itemIdentifier: id)
+            runButton.title = "Run on \(files.count) file\(files.count == 1 ? "" : "s")"
+            runButton.bezelStyle = .texturedRounded
+            runButton.keyEquivalent = "\r"
+            runButton.target = self
+            runButton.action = #selector(run)
+            runButton.isEnabled = !files.isEmpty
+            item.view = runButton
+            item.label = "Run"
+            item.toolTip = "Run the operation on every PDF in the folder"
+            return item
+        default: return nil
+        }
+    }
+
+    @objc private func revealFolder() { NSWorkspace.shared.activateFileViewerSelecting([folder]) }
+
     private func buildUI() {
         guard let v = window?.contentView else { return }
         let W: CGFloat = 500, H: CGFloat = 430
 
-        let header = NSTextField(labelWithString: "\(files.count) PDF\(files.count == 1 ? "" : "s") in “\(folder.lastPathComponent)”")
-        header.font = .systemFont(ofSize: 14, weight: .semibold)
-        header.frame = NSRect(x: 20, y: H - 40, width: W - 40, height: 20)
-        v.addSubview(header)
-
-        let outLabel = NSTextField(labelWithString: "Output: \(folder.lastPathComponent)/\(BatchEngine.outputFolderName) — originals are never touched")
-        outLabel.font = .systemFont(ofSize: 11)
-        outLabel.textColor = .secondaryLabelColor
-        outLabel.frame = NSRect(x: 20, y: H - 60, width: W - 40, height: 16)
-        v.addSubview(outLabel)
-
-        let opLabel = NSTextField(labelWithString: "Operation:")
-        opLabel.frame = NSRect(x: 20, y: H - 96, width: 80, height: 18)
+        let opLabel = NSTextField(labelWithString: "OPERATION")
+        opLabel.font = .systemFont(ofSize: 11, weight: .semibold)
+        opLabel.textColor = .tertiaryLabelColor
+        opLabel.frame = NSRect(x: 21, y: H - 34, width: 120, height: 14)
         v.addSubview(opLabel)
-        opPopup.frame = NSRect(x: 100, y: H - 101, width: 240, height: 26)
+
+        opPopup.frame = NSRect(x: 20, y: H - 66, width: 240, height: 26)
+        opPopup.controlSize = .small
+        opPopup.font = .systemFont(ofSize: 12)
         opPopup.addItems(withTitles: ["Make Searchable (OCR)", "Bates Numbering", "Watermark", "Compress"])
         opPopup.target = self
         opPopup.action = #selector(opChanged)
         v.addSubview(opPopup)
 
-        optionsBox.frame = NSRect(x: 20, y: H - 150, width: W - 40, height: 40)
+        optionsBox.frame = NSRect(x: 20, y: H - 112, width: W - 40, height: 40)
         v.addSubview(optionsBox)
         buildOptions()
 
-        runButton.title = "Run on \(files.count) file\(files.count == 1 ? "" : "s")"
-        runButton.bezelStyle = .rounded
-        runButton.keyEquivalent = "\r"
-        runButton.target = self
-        runButton.action = #selector(run)
-        runButton.frame = NSRect(x: W - 180, y: H - 194, width: 160, height: 30)
-        runButton.isEnabled = !files.isEmpty
-        v.addSubview(runButton)
+        let outLabel = NSTextField(labelWithString: "Output: \(folder.lastPathComponent)/\(BatchEngine.outputFolderName) — originals are never touched")
+        outLabel.font = .systemFont(ofSize: 11)
+        outLabel.textColor = .secondaryLabelColor
+        outLabel.frame = NSRect(x: 20, y: H - 136, width: W - 40, height: 16)
+        v.addSubview(outLabel)
 
         progressBar.isIndeterminate = false
         progressBar.minValue = 0
         progressBar.maxValue = Double(max(1, files.count))
-        progressBar.frame = NSRect(x: 20, y: H - 218, width: W - 40, height: 14)
+        progressBar.frame = NSRect(x: 20, y: H - 162, width: W - 40, height: 14)
         v.addSubview(progressBar)
 
         statusLabel.font = .systemFont(ofSize: 11)
         statusLabel.textColor = .secondaryLabelColor
-        statusLabel.frame = NSRect(x: 20, y: H - 238, width: W - 40, height: 16)
+        statusLabel.frame = NSRect(x: 20, y: H - 182, width: W - 40, height: 16)
         v.addSubview(statusLabel)
 
-        let scroll = NSScrollView(frame: NSRect(x: 20, y: 16, width: W - 40, height: H - 264))
+        let scroll = NSScrollView(frame: NSRect(x: 20, y: 16, width: W - 40, height: H - 208))
         scroll.hasVerticalScroller = true
-        scroll.borderType = .bezelBorder
+        scroll.borderType = .noBorder
+        scroll.wantsLayer = true
+        scroll.layer?.cornerRadius = 8
+        scroll.layer?.borderWidth = 1
+        scroll.layer?.borderColor = NSColor.separatorColor.cgColor
         results.frame = scroll.bounds
         results.isEditable = false
         results.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        results.textContainerInset = NSSize(width: 8, height: 8)
         results.autoresizingMask = [.width]
         scroll.documentView = results
         v.addSubview(scroll)

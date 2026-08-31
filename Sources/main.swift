@@ -257,7 +257,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popoverVC.onSign = { [weak self] in self?.popover.performClose(nil); self?.pickSign() }
         popoverVC.onOrganize = { [weak self] in self?.popover.performClose(nil); self?.pickOrganize() }
         popoverVC.onBatch = { [weak self] in self?.popover.performClose(nil); self?.pickBatchFolder() }
-        popoverVC.onOpenRecent = { [weak self] url in self?.popover.performClose(nil); self?.route([url]) }
         popoverVC.onFilesDropped = { [weak self] urls in self?.popover.performClose(nil); self?.route(urls) }
         popoverVC.onQuit = { NSApp.terminate(nil) }
         popoverVC.onUpdate = { [weak self] in self?.popover.performClose(nil); self?.updater.checkForUpdates(nil) }
@@ -280,7 +279,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popoverVC.loginEnabled = isLoginEnabled()
         popoverVC.shelfEnabled = DropShelf.enabled
         popoverVC.defaultEnabled = AppDelegate.isDefaultPDFApp()
-        popoverVC.refreshRecents()
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         // Spring-loaded opens (mid-drag) must not steal focus from the drag source.
         if activating { NSApp.activate(ignoringOtherApps: true) }
