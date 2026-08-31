@@ -6,7 +6,7 @@
 import AppKit
 import PDFKit
 
-final class PageOrganizerWindowController: NSWindowController, NSCollectionViewDataSource, NSCollectionViewDelegate, NSWindowDelegate {
+final class PageOrganizerWindowController: NSWindowController, NSCollectionViewDataSource, NSCollectionViewDelegate, NSWindowDelegate, NSToolbarDelegate {
     private static let pageType = NSPasteboard.PasteboardType("net.thinkopen.jack.page")
     var onCancel: (() -> Void)?
 
@@ -24,10 +24,17 @@ final class PageOrganizerWindowController: NSWindowController, NSCollectionViewD
         let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1120, height: 760),
                            styleMask: [.titled, .closable, .miniaturizable, .resizable],
                            backing: .buffered, defer: false)
-        win.title = "Jack — Organize Pages"
+        win.title = "Organize Pages"
         win.center()
         super.init(window: win)
         win.delegate = self
+        // The v2.8 grammar: unified toolbar, same symbol pipeline as the document window.
+        let toolbar = NSToolbar(identifier: "JackOrganizerToolbar")
+        toolbar.delegate = self
+        toolbar.displayMode = .iconOnly
+        toolbar.allowsUserCustomization = false
+        win.toolbar = toolbar
+        if #available(macOS 11.0, *) { win.toolbarStyle = .unified }
         build()
     }
 
@@ -41,37 +48,84 @@ final class PageOrganizerWindowController: NSWindowController, NSCollectionViewD
     }
     required init?(coder: NSCoder) { fatalError() }
 
+    // MARK: toolbar (v2.8 grammar — same symbol pipeline as the document window)
+
+    private enum ItemID {
+        static let home = NSToolbarItem.Identifier("org.home")
+        static let addFiles = NSToolbarItem.Identifier("org.addFiles")
+        static let save = NSToolbarItem.Identifier("org.save")
+    }
+
+    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        [ItemID.home, ItemID.addFiles, .flexibleSpace, ItemID.save]
+    }
+    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        toolbarDefaultItemIdentifiers(toolbar)
+    }
+
+    func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier id: NSToolbarItem.Identifier,
+                 willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
+        switch id {
+        case ItemID.home:
+            let item = NSToolbarItem(itemIdentifier: id)
+            item.image = DocumentWindowController.toolbarSymbol(["house"], "Home")
+            item.label = "Home"
+            item.toolTip = "Back to Jack's launcher"
+            item.target = self
+            item.action = #selector(backHome)
+            item.isBordered = true
+            return item
+        case ItemID.addFiles:
+            let item = NSToolbarItem(itemIdentifier: id)
+            item.image = DocumentWindowController.toolbarSymbol(["plus"], "Add Files")
+            item.label = "Add Files"
+            item.toolTip = "Add PDFs and photos to the source pages"
+            item.target = self
+            item.action = #selector(addFiles)
+            item.isBordered = true
+            return item
+        case ItemID.save:
+            let item = NSToolbarItem(itemIdentifier: id)
+            let b = NSButton(title: "Save New PDF…", target: self, action: #selector(saveTray))
+            b.bezelStyle = .texturedRounded
+            b.keyEquivalent = "s"
+            item.view = b
+            item.label = "Save New PDF"
+            item.toolTip = "Save the pages you've assembled (⌘S)"
+            return item
+        default: return nil
+        }
+    }
+
     // MARK: layout
+
+    private let trayEmptyHint = NSTextField(wrappingLabelWithString:
+        "Drag pages here to build your PDF — or use ← Add Selected")
 
     private func build() {
         guard let content = window?.contentView else { return }
         let fullW = content.bounds.width
-        let H = content.bounds.height
-        let barH: CGFloat = 44
-        let cH = H - barH                 // height available to the panes
+        let cH = content.bounds.height
         let sidebarW: CGFloat = 320
 
-        // Top bar with the back-to-home button
-        let topBar = NSView(frame: NSRect(x: 0, y: H - barH, width: fullW, height: barH))
-        topBar.autoresizingMask = [.width, .minYMargin]
-        topBar.wantsLayer = true
-        topBar.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
-        content.addSubview(topBar)
-        topBar.addSubview(button("← Home", #selector(backHome), NSRect(x: 12, y: 8, width: 96, height: 28), []))
-
-        // Left pane — New PDF
+        // Left pane — New PDF (the output, built live)
         let left = NSView(frame: NSRect(x: 0, y: 0, width: sidebarW, height: cH))
         left.autoresizingMask = [.height]
         content.addSubview(left)
 
-        addHeader("New PDF", to: left, width: 288)
-        left.addSubview(button("Rotate", #selector(trayRotate), NSRect(x: 16, y: cH - 70, width: 90, height: 28), [.minYMargin]))
-        left.addSubview(button("Remove", #selector(trayRemove), NSRect(x: 112, y: cH - 70, width: 90, height: 28), [.minYMargin]))
-        let saveTray = button("Save New PDF…", #selector(saveTray), NSRect(x: 16, y: 16, width: 288, height: 32), [.width])
-        saveTray.keyEquivalent = "s"
-        left.addSubview(saveTray)
+        addHeader("NEW PDF", to: left)
+        left.addSubview(chip("Rotate", "rotate.right", #selector(trayRotate),
+                             NSRect(x: 16, y: cH - 64, width: 84, height: 26)))
+        left.addSubview(chip("Remove", "trash", #selector(trayRemove),
+                             NSRect(x: 106, y: cH - 64, width: 92, height: 26)))
         left.addSubview(scroll(trayCV, layout(itemW: 138, itemH: 184),
-                               frame: NSRect(x: 12, y: 56, width: 296, height: cH - 78 - 56)))
+                               frame: NSRect(x: 12, y: 12, width: 296, height: cH - 76 - 12)))
+        trayEmptyHint.font = .systemFont(ofSize: 12)
+        trayEmptyHint.textColor = .tertiaryLabelColor
+        trayEmptyHint.alignment = .center
+        trayEmptyHint.frame = NSRect(x: 24, y: cH / 2 - 24, width: sidebarW - 48, height: 40)
+        trayEmptyHint.autoresizingMask = [.minYMargin, .maxYMargin]
+        left.addSubview(trayEmptyHint)
 
         // Divider
         let divider = NSBox(frame: NSRect(x: sidebarW, y: 0, width: 1, height: cH))
@@ -84,29 +138,45 @@ final class PageOrganizerWindowController: NSWindowController, NSCollectionViewD
         main.autoresizingMask = [.width, .height]
         content.addSubview(main)
 
-        addHeader("Source pages", to: main, width: 400)
+        addHeader("SOURCE PAGES", to: main)
         var x: CGFloat = 16
-        for (title, sel, w) in [("Add Files…", #selector(addFiles), CGFloat(104)),
-                                ("Add Selected →", #selector(addSelected), 132),
-                                ("Add All →", #selector(addAll), 96),
-                                ("Save Selected As…", #selector(saveSelectedAs), 150)] {
-            main.addSubview(button(title, sel, NSRect(x: x, y: cH - 70, width: w, height: 28), [.minYMargin]))
+        // The New PDF pane is on the LEFT — the arrows finally point where pages go.
+        for (title, symbol, sel, w) in [("Add Selected", "arrow.left", #selector(addSelected), CGFloat(122)),
+                                        ("Add All", "arrow.left.to.line", #selector(addAll), 96),
+                                        ("Save Selected As…", "square.and.arrow.down", #selector(saveSelectedAs), 168)] {
+            main.addSubview(chip(title, symbol, sel, NSRect(x: x, y: cH - 64, width: w, height: 26)))
             x += w + 8
         }
         main.addSubview(scroll(sourceCV, layout(itemW: 150, itemH: 196),
-                               frame: NSRect(x: 12, y: 16, width: main.bounds.width - 24, height: cH - 78 - 16),
+                               frame: NSRect(x: 12, y: 12, width: main.bounds.width - 24, height: cH - 76 - 12),
                                flexible: true))
 
         configure(sourceCV, isTray: false)
         configure(trayCV, isTray: true)
+        syncTrayHint()
     }
 
-    private func addHeader(_ text: String, to view: NSView, width: CGFloat) {
+    private func syncTrayHint() { trayEmptyHint.isHidden = !trayPages.isEmpty }
+
+    private func addHeader(_ text: String, to view: NSView) {
         let label = NSTextField(labelWithString: text)
-        label.font = .systemFont(ofSize: 15, weight: .semibold)
-        label.frame = NSRect(x: 16, y: view.bounds.height - 34, width: width, height: 22)
-        label.autoresizingMask = [.width, .minYMargin]
+        label.font = .systemFont(ofSize: 11, weight: .semibold)
+        label.textColor = .tertiaryLabelColor
+        label.frame = NSRect(x: 17, y: view.bounds.height - 32, width: 200, height: 14)
+        label.autoresizingMask = [.minYMargin]
         view.addSubview(label)
+    }
+
+    /// The mode-row chip, verbatim from the document window's grammar.
+    private func chip(_ title: String, _ symbol: String, _ action: Selector, _ frame: NSRect) -> NSButton {
+        let b = NSButton(title: title, target: self, action: action)
+        b.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
+        b.imagePosition = .imageLeading
+        b.bezelStyle = .rounded
+        b.controlSize = .small
+        b.frame = frame
+        b.autoresizingMask = [.minYMargin]
+        return b
     }
 
     private func layout(itemW: CGFloat, itemH: CGFloat) -> NSCollectionViewFlowLayout {
@@ -216,14 +286,7 @@ final class PageOrganizerWindowController: NSWindowController, NSCollectionViewD
     private func reloadTray(select range: Range<Int>? = nil) {
         trayCV.reloadData()
         if let r = range { trayCV.selectionIndexPaths = Set(r.map { IndexPath(item: $0, section: 0) }) }
-    }
-
-    private func button(_ title: String, _ action: Selector, _ frame: NSRect, _ mask: NSView.AutoresizingMask) -> NSButton {
-        let b = NSButton(title: title, target: self, action: action)
-        b.bezelStyle = .rounded
-        b.frame = frame
-        b.autoresizingMask = mask
-        return b
+        syncTrayHint()
     }
 
     // MARK: actions
