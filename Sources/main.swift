@@ -242,6 +242,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         overlay.autoresizingMask = [.width, .height]
         overlay.onClick = { [weak self] in self?.togglePopover() }
         overlay.onDrop = { [weak self] urls in self?.popover.performClose(nil); self?.route(urls) }
+        overlay.onDragHover = { [weak self] in self?.showPopover(activating: false) }
         button.addSubview(overlay)
     }
 
@@ -254,6 +255,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popoverVC.onOrganize = { [weak self] in self?.popover.performClose(nil); self?.pickOrganize() }
         popoverVC.onBatch = { [weak self] in self?.popover.performClose(nil); self?.pickBatchFolder() }
         popoverVC.onOpenRecent = { [weak self] url in self?.popover.performClose(nil); self?.route([url]) }
+        popoverVC.onFilesDropped = { [weak self] urls in self?.popover.performClose(nil); self?.route(urls) }
         popoverVC.onQuit = { NSApp.terminate(nil) }
         popoverVC.onUpdate = { [weak self] in self?.popover.performClose(nil); self?.updater.checkForUpdates(nil) }
         popoverVC.onToggleLogin = { [weak self] on in self?.setLogin(on) }
@@ -265,13 +267,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if popover.isShown { popover.performClose(nil) } else { showPopover() }
     }
 
-    private func showPopover() {
+    private func showPopover(activating: Bool = true) {
         guard let button = statusItem.button else { return }
+        if popover.isShown { return }
         popoverVC.loginEnabled = isLoginEnabled()
         popoverVC.defaultEnabled = AppDelegate.isDefaultPDFApp()
         popoverVC.refreshRecents()
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-        NSApp.activate(ignoringOtherApps: true)
+        // Spring-loaded opens (mid-drag) must not steal focus from the drag source.
+        if activating { NSApp.activate(ignoringOtherApps: true) }
         checkForUpdate()
     }
 

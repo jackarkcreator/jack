@@ -2,6 +2,42 @@
 // v2.8 ratified mock: half the old height, drop-target hint up top, same six actions.
 import AppKit
 
+/// The popover's root: the ENTIRE surface accepts file drops (the header promises
+/// "drop anywhere" — as of v2.9.5 it's true). While a drag hovers, a big accent drop
+/// state takes over so the action is unmistakable.
+final class DropSurfaceView: NSView {
+    var onDrop: (([URL]) -> Void)?
+    var onDragState: ((Bool) -> Void)?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        registerForDraggedTypes([.fileURL])
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func urls(_ sender: NSDraggingInfo) -> [URL] {
+        (sender.draggingPasteboard.readObjects(forClasses: [NSURL.self],
+            options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? [])
+            .filter { isPDFURL($0) || isImageURL($0) || ConvertEngine.isConvertible($0)
+                || ConvertEngine.isRefused($0)
+                || ((try? $0.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true) }
+    }
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard !urls(sender).isEmpty else { return [] }
+        onDragState?(true)
+        return .copy
+    }
+    override func draggingExited(_ sender: NSDraggingInfo?) { onDragState?(false) }
+    override func draggingEnded(_ sender: NSDraggingInfo) { onDragState?(false) }
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        onDragState?(false)
+        let u = urls(sender)
+        guard !u.isEmpty else { return false }
+        onDrop?(u)
+        return true
+    }
+}
+
 final class HomePopoverViewController: NSViewController {
     var onNew: (() -> Void)?
     var onOpen: (() -> Void)?
@@ -10,6 +46,7 @@ final class HomePopoverViewController: NSViewController {
     var onOrganize: (() -> Void)?
     var onBatch: (() -> Void)?
     var onOpenRecent: ((URL) -> Void)?
+    var onFilesDropped: (([URL]) -> Void)?
     var onMakeDefault: (() -> Void)?
     var onQuit: (() -> Void)?
     var onUpdate: (() -> Void)?
@@ -37,8 +74,12 @@ final class HomePopoverViewController: NSViewController {
     private static let width: CGFloat = 312
     private static let height: CGFloat = 352
 
+    private let dropOverlay = NSView()
+
     override func loadView() {
-        let v = NSView(frame: NSRect(x: 0, y: 0, width: Self.width, height: Self.height))
+        let v = DropSurfaceView(frame: NSRect(x: 0, y: 0, width: Self.width, height: Self.height))
+        v.onDrop = { [weak self] urls in self?.onFilesDropped?(urls) }
+        v.onDragState = { [weak self] active in self?.dropOverlay.isHidden = !active }
 
         let header = NSTextField(labelWithString: "Drop files anywhere to start")
         header.font = .systemFont(ofSize: 13, weight: .semibold)
@@ -109,6 +150,29 @@ final class HomePopoverViewController: NSViewController {
         updateButton.isHidden = true
         updateButton.contentTintColor = .controlAccentColor
         v.addSubview(updateButton)
+
+        // The drag-hover state: one huge unmistakable target over everything.
+        dropOverlay.frame = v.bounds.insetBy(dx: 8, dy: 8)
+        dropOverlay.wantsLayer = true
+        dropOverlay.layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.12).cgColor
+        dropOverlay.layer?.cornerRadius = 12
+        dropOverlay.layer?.borderWidth = 2
+        dropOverlay.layer?.borderColor = NSColor.controlAccentColor.cgColor
+        let dropTitle = NSTextField(labelWithString: "Drop to convert or combine")
+        dropTitle.font = .systemFont(ofSize: 16, weight: .semibold)
+        dropTitle.alignment = .center
+        dropTitle.frame = NSRect(x: 0, y: dropOverlay.bounds.midY + 2,
+                                 width: dropOverlay.bounds.width, height: 22)
+        dropOverlay.addSubview(dropTitle)
+        let dropSub = NSTextField(labelWithString: "Photos combine into one PDF · documents convert · folders batch")
+        dropSub.font = .systemFont(ofSize: 11)
+        dropSub.textColor = .secondaryLabelColor
+        dropSub.alignment = .center
+        dropSub.frame = NSRect(x: 8, y: dropOverlay.bounds.midY - 22,
+                               width: dropOverlay.bounds.width - 16, height: 16)
+        dropOverlay.addSubview(dropSub)
+        dropOverlay.isHidden = true
+        v.addSubview(dropOverlay)
 
         self.view = v
     }

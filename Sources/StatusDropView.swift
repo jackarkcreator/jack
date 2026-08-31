@@ -4,6 +4,9 @@ import AppKit
 final class StatusDropView: NSView {
     var onClick: (() -> Void)?
     var onDrop: (([URL]) -> Void)?
+    /// Spring-loading (the Finder-folder gesture): a drag hovering the tiny icon opens the
+    /// popover, whose WHOLE surface is the drop zone — the 20px target becomes 300pt.
+    var onDragHover: (() -> Void)?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -19,7 +22,9 @@ final class StatusDropView: NSView {
             .filter { isPDFURL($0) || isImageURL($0) || ConvertEngine.isConvertible($0) || ConvertEngine.isRefused($0) }
     }
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        urls(sender).isEmpty ? [] : .copy
+        guard !urls(sender).isEmpty else { return [] }
+        onDragHover?()
+        return .copy
     }
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
         let u = urls(sender)
