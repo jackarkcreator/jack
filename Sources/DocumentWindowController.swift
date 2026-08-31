@@ -2792,15 +2792,22 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         var covered = 0
         for viewPage in pages {
             var idx = doc.index(for: viewPage)
-            if idx == NSNotFound {   // the mutation swapped this page object out
+            // 🧨 A swapped-out page (redact/erase) can't anchor GEOMETRY either — PDFView
+            // cannot resolve coordinates for a page no longer in the document, which is
+            // exactly how the 2.9.2 rewrite regressed the blackout/erase flash. Both the
+            // pixels AND the placement must come from the document's fresh page.
+            var geomPage = viewPage
+            if idx == NSNotFound {
                 idx = min(max(0, destIndex ?? lastKnownPageIndex), doc.pageCount - 1)
+                guard let fresh = doc.page(at: idx) else { continue }
+                geomPage = fresh
             }
             guard let fresh = doc.page(at: idx) else { continue }
-            let pageVisible = pdfView.convert(pdfView.bounds, to: viewPage)
-                .intersection(viewPage.bounds(for: .cropBox))
+            let pageVisible = pdfView.convert(pdfView.bounds, to: geomPage)
+                .intersection(geomPage.bounds(for: .cropBox))
             guard pageVisible.width > 4, pageVisible.height > 4,
                   let img = CropEngine.snapshotImage(page: fresh, region: pageVisible) else { continue }
-            let iv = NSImageView(frame: pdfView.convert(pageVisible, from: viewPage))
+            let iv = NSImageView(frame: pdfView.convert(pageVisible, from: geomPage))
             iv.image = img
             iv.imageScaling = .scaleAxesIndependently
             container.addSubview(iv)
@@ -2811,7 +2818,8 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             // anchor page rather than let the flash through naked. A best-effort placement
             // for 300ms beats a white blink every time.
             let idx = min(max(0, destIndex ?? lastKnownPageIndex), doc.pageCount - 1)
-            if let page = pdfView.currentPage ?? doc.page(at: idx),
+            // Document first — pdfView.currentPage can be a stale swapped-out object here.
+            if let page = doc.page(at: idx) ?? pdfView.currentPage,
                let img = CropEngine.snapshotImage(page: page, region: page.bounds(for: .cropBox)) {
                 var frame = pdfView.convert(page.bounds(for: .cropBox), from: page)
                 if !frame.intersects(container.bounds) || frame.isEmpty || frame.isInfinite {
