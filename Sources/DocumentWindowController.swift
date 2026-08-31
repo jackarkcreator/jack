@@ -1343,6 +1343,8 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         // effect painted over the truth.
         if let d = dissolve {
             band.removeFromSuperview()
+            // The refresh cover was added during the swap and sits on top — the dissolve
+            // dust must play ABOVE it or its first 300ms are invisible.
             dissolveEffect(image: d.image, over: d.rect)
         } else {
             NSAnimationContext.runAnimationGroup({ ctx in
@@ -2736,26 +2738,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         // The reassign rebuilds PDFView's tiles ASYNCHRONOUSLY — the view blanks (white)
         // until they land, a visible flash on dark pages. Cover the visible page area with
         // its real post-mutation pixels (page render — the proven path) while tiles settle.
-        var cover: NSView?
-        if let doc, let i = destIndex, let page = doc.page(at: min(max(0, i), max(0, doc.pageCount - 1))) {
-            let pageVisible = pdfView.convert(pdfView.bounds, to: page)
-                .intersection(page.bounds(for: .cropBox))
-            if pageVisible.width > 4, pageVisible.height > 4,
-               let img = CropEngine.snapshotImage(page: page, region: pageVisible) {
-                // Cover the WHOLE view (background + page pixels): a page-only cover let a
-                // sliver of transiently mispositioned content peek out at the edges — the
-                // "small bar at the top" Keno saw after a redact.
-                let container = NSView(frame: pdfView.bounds)
-                container.wantsLayer = true
-                container.layer?.backgroundColor = NSColor.underPageBackgroundColor.cgColor
-                let iv = NSImageView(frame: pdfView.convert(pageVisible, from: page))
-                iv.image = img
-                iv.imageScaling = .scaleAxesIndependently
-                container.addSubview(iv)
-                pdfView.addSubview(container)
-                cover = container
-            }
-        }
+        let cover = makeRefreshCover(doc: doc, destIndex: destIndex)
         pdfView.document = nil
         pdfView.document = doc
         let restore: () -> Void = { [weak self] in
@@ -2780,6 +2763,71 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     }
 
     private func forceRefresh() { withPreservedPosition {} }
+
+    /// Full-view cover shown while the document reassign rebuilds PDFView's tiles (async —
+    /// the view blanks until they land). Three laws learned the hard way:
+    /// • The margin color must resolve against the view's EFFECTIVE appearance — a dynamic
+    ///   NSColor→cgColor outside a draw pass resolves Aqua, which painted dark-mode margins
+    ///   light grey: the "white/grey overlay" Keno saw on every markup apply.
+    /// • EVERY visible page gets real pixels, not just the anchor — a page boundary on
+    ///   screen otherwise flashes bare background where the neighbor page sits.
+    /// • Page GEOMETRY comes from the view's (possibly just-swapped-out) page objects, but
+    ///   CONTENT renders from the document's current page at that index — the cover must
+    ///   show the post-mutation truth.
+    private func makeRefreshCover(doc: PDFDocument?, destIndex: Int?) -> NSView? {
+        guard let doc, doc.pageCount > 0 else { return nil }
+        let container = NSView(frame: pdfView.bounds)
+        container.wantsLayer = true
+        var bg = NSColor.windowBackgroundColor.cgColor
+        pdfView.effectiveAppearance.performAsCurrentDrawingAppearance {
+            bg = NSColor.underPageBackgroundColor.cgColor
+        }
+        container.layer?.backgroundColor = bg
+        // visiblePages can come back empty (offscreen, mid-layout) — the anchor page is
+        // always a valid stand-in; a cover that silently vanishes brings the flash back.
+        var pages = pdfView.visiblePages
+        if pages.isEmpty, let anchor = pdfView.currentPage ?? doc.page(at: min(max(0, destIndex ?? 0), doc.pageCount - 1)) {
+            pages = [anchor]
+        }
+        var covered = 0
+        for viewPage in pages {
+            var idx = doc.index(for: viewPage)
+            if idx == NSNotFound {   // the mutation swapped this page object out
+                idx = min(max(0, destIndex ?? lastKnownPageIndex), doc.pageCount - 1)
+            }
+            guard let fresh = doc.page(at: idx) else { continue }
+            let pageVisible = pdfView.convert(pdfView.bounds, to: viewPage)
+                .intersection(viewPage.bounds(for: .cropBox))
+            guard pageVisible.width > 4, pageVisible.height > 4,
+                  let img = CropEngine.snapshotImage(page: fresh, region: pageVisible) else { continue }
+            let iv = NSImageView(frame: pdfView.convert(pageVisible, from: viewPage))
+            iv.image = img
+            iv.imageScaling = .scaleAxesIndependently
+            container.addSubview(iv)
+            covered += 1
+        }
+        if covered == 0 {
+            // Geometry can be unknowable (mid-layout, offscreen restore): render the whole
+            // anchor page rather than let the flash through naked. A best-effort placement
+            // for 300ms beats a white blink every time.
+            let idx = min(max(0, destIndex ?? lastKnownPageIndex), doc.pageCount - 1)
+            if let page = pdfView.currentPage ?? doc.page(at: idx),
+               let img = CropEngine.snapshotImage(page: page, region: page.bounds(for: .cropBox)) {
+                var frame = pdfView.convert(page.bounds(for: .cropBox), from: page)
+                if !frame.intersects(container.bounds) || frame.isEmpty || frame.isInfinite {
+                    frame = container.bounds.insetBy(dx: 20, dy: 20)
+                }
+                let iv = NSImageView(frame: frame)
+                iv.image = img
+                iv.imageScaling = .scaleProportionallyUpOrDown
+                container.addSubview(iv)
+                covered = 1
+            }
+        }
+        guard covered > 0 else { return nil }
+        pdfView.addSubview(container)
+        return container
+    }
 
     // MARK: - Save (flatten stamps + form values, keep the original file untouched)
 
