@@ -6,10 +6,20 @@
 import AppKit
 import PDFKit
 
+/// A labeled pile on the desk: one dropped document (or a run of photos).
+struct PageGroup {
+    let name: String
+    let pages: [PDFPage]
+}
+
 final class PageOrganizerWindowController: NSWindowController, NSCollectionViewDataSource, NSCollectionViewDelegate, NSWindowDelegate, NSToolbarDelegate {
     private static let pageType = NSPasteboard.PasteboardType("net.thinkopen.jack.page")
     var onCancel: (() -> Void)?
 
+    /// The desk metaphor completed (Keno, 2026-08-30): every source document is its own
+    /// labeled pile — a section with the filename as header, page numbers restarting per
+    /// document, so "page 9" always means page 9 OF THAT PDF.
+    private var groups: [(name: String, range: Range<Int>)] = []
     private var sourcePages: [PDFPage]
     private var trayPages: [PDFPage] = []
     /// Physical truth (Keno, 2026-08-30): a page moved into the New PDF leaves its source
@@ -24,8 +34,20 @@ final class PageOrganizerWindowController: NSWindowController, NSCollectionViewD
     private var sourceDrag: [Int] = []
     private var trayDrag: [Int] = []
 
-    init(pages: [PDFPage]) {
-        self.sourcePages = pages
+    convenience init(pages: [PDFPage]) {
+        self.init(groups: [PageGroup(name: "Pages", pages: pages)])
+    }
+
+    init(groups pageGroups: [PageGroup]) {
+        var flat: [PDFPage] = []
+        var built: [(String, Range<Int>)] = []
+        for g in pageGroups {
+            let start = flat.count
+            flat.append(contentsOf: g.pages)
+            built.append((g.name, start..<flat.count))
+        }
+        self.groups = built
+        self.sourcePages = flat
         let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1120, height: 760),
                            styleMask: [.titled, .closable, .miniaturizable, .resizable],
                            backing: .buffered, defer: false)
@@ -152,9 +174,14 @@ final class PageOrganizerWindowController: NSWindowController, NSCollectionViewD
             main.addSubview(chip(title, symbol, sel, NSRect(x: x, y: cH - 64, width: w, height: 26)))
             x += w + 8
         }
-        main.addSubview(scroll(sourceCV, layout(itemW: 150, itemH: 196),
+        let srcLayout = layout(itemW: 150, itemH: 196)
+        srcLayout.headerReferenceSize = NSSize(width: 0, height: 38)   // one labeled pile per document
+        main.addSubview(scroll(sourceCV, srcLayout,
                                frame: NSRect(x: 12, y: 12, width: main.bounds.width - 24, height: cH - 76 - 12),
                                flexible: true))
+        sourceCV.register(OrganizerSectionHeader.self,
+                          forSupplementaryViewOfKind: NSCollectionView.elementKindSectionHeader,
+                          withIdentifier: OrganizerSectionHeader.id)
 
         configure(sourceCV, isTray: false)
         configure(trayCV, isTray: true)
@@ -216,37 +243,57 @@ final class PageOrganizerWindowController: NSWindowController, NSCollectionViewD
 
     // MARK: data source
 
-    private func pages(_ cv: NSCollectionView) -> [PDFPage] { cv === trayCV ? trayPages : sourcePages }
+    private func flatIndex(_ ip: IndexPath) -> Int { groups[ip.section].range.lowerBound + ip.item }
 
-    func collectionView(_ cv: NSCollectionView, numberOfItemsInSection section: Int) -> Int { pages(cv).count }
+    func numberOfSections(in cv: NSCollectionView) -> Int { cv === sourceCV ? max(1, groups.count) : 1 }
+
+    func collectionView(_ cv: NSCollectionView, numberOfItemsInSection section: Int) -> Int {
+        cv === trayCV ? trayPages.count : (groups.isEmpty ? 0 : groups[section].range.count)
+    }
 
     func collectionView(_ cv: NSCollectionView, itemForRepresentedObjectAt indexPath: IndexPath) -> NSCollectionViewItem {
         let item = cv.makeItem(withIdentifier: PageThumbnailItem.id, for: indexPath) as! PageThumbnailItem
-        if cv === sourceCV, takenSource.contains(indexPath.item) {
-            item.configureTaken(label: "\(indexPath.item + 1)")
+        if cv === sourceCV {
+            let flat = flatIndex(indexPath)
+            // Page numbers restart per pile — "9" means page 9 OF THAT document.
+            if takenSource.contains(flat) {
+                item.configureTaken(label: "\(indexPath.item + 1)")
+            } else {
+                item.configure(thumbnail(for: sourcePages[flat]), label: "\(indexPath.item + 1)")
+            }
         } else {
-            let page = pages(cv)[indexPath.item]
-            item.configure(thumbnail(for: page), label: "\(indexPath.item + 1)")
+            item.configure(thumbnail(for: trayPages[indexPath.item]), label: "\(indexPath.item + 1)")
         }
         return item
+    }
+
+    func collectionView(_ cv: NSCollectionView, viewForSupplementaryElementOfKind kind: NSCollectionView.SupplementaryElementKind,
+                        at indexPath: IndexPath) -> NSView {
+        let header = cv.makeSupplementaryView(ofKind: kind, withIdentifier: OrganizerSectionHeader.id,
+                                              for: indexPath) as! OrganizerSectionHeader
+        if cv === sourceCV, indexPath.section < groups.count {
+            let g = groups[indexPath.section]
+            header.configure(name: g.name, count: g.range.count)
+        }
+        return header
     }
 
     // MARK: drag & drop
 
     func collectionView(_ cv: NSCollectionView, canDragItemsAt indexPaths: Set<IndexPath>, with event: NSEvent) -> Bool {
-        cv !== sourceCV || indexPaths.allSatisfy { !takenSource.contains($0.item) }
+        cv !== sourceCV || indexPaths.allSatisfy { !takenSource.contains(flatIndex($0)) }
     }
 
     func collectionView(_ cv: NSCollectionView, pasteboardWriterForItemAt indexPath: IndexPath) -> NSPasteboardWriting? {
         let item = NSPasteboardItem()
-        item.setString(String(indexPath.item), forType: Self.pageType)
+        item.setString(String(cv === sourceCV ? flatIndex(indexPath) : indexPath.item), forType: Self.pageType)
         return item
     }
 
     func collectionView(_ cv: NSCollectionView, draggingSession session: NSDraggingSession,
                         willBeginAt screenPoint: NSPoint, forItemsAt indexPaths: Set<IndexPath>) {
-        let idx = indexPaths.map { $0.item }.sorted()
-        if cv === trayCV { trayDrag = idx } else { sourceDrag = idx }
+        if cv === trayCV { trayDrag = indexPaths.map { $0.item }.sorted() }
+        else { sourceDrag = indexPaths.map { flatIndex($0) }.sorted() }
     }
 
     func collectionView(_ cv: NSCollectionView, validateDrop draggingInfo: NSDraggingInfo,
@@ -291,6 +338,12 @@ final class PageOrganizerWindowController: NSWindowController, NSCollectionViewD
         return true
     }
 
+    private func appendGroup(name: String, pages: [PDFPage]) {
+        let start = sourcePages.count
+        sourcePages.append(contentsOf: pages)
+        groups.append((name, start..<sourcePages.count))
+    }
+
     // MARK: helpers
 
     private func thumbnail(for page: PDFPage) -> NSImage {
@@ -301,7 +354,10 @@ final class PageOrganizerWindowController: NSWindowController, NSCollectionViewD
         return t
     }
 
-    private func selected(_ cv: NSCollectionView) -> [Int] { cv.selectionIndexPaths.map { $0.item }.sorted() }
+    private func selected(_ cv: NSCollectionView) -> [Int] {
+        cv === sourceCV ? cv.selectionIndexPaths.map { flatIndex($0) }.sorted()
+                        : cv.selectionIndexPaths.map { $0.item }.sorted()
+    }
     private func reloadSource() { sourceCV.reloadData() }
     private func reloadTray(select range: Range<Int>? = nil) {
         trayCV.reloadData()
@@ -318,9 +374,26 @@ final class PageOrganizerWindowController: NSWindowController, NSCollectionViewD
         panel.message = "Add PDFs and photos"; panel.prompt = "Add"
         if #available(macOS 11.0, *) { panel.allowedContentTypes = [.pdf, .image] }
         guard panel.runModal() == .OK else { return }
-        let added = loadPages(from: panel.urls)
-        guard !added.isEmpty else { return }
-        sourcePages.append(contentsOf: added)
+        var any = false
+        var photoRun: [PDFPage] = []
+        func flushPhotos() {
+            guard !photoRun.isEmpty else { return }
+            appendGroup(name: photoRun.count == 1 ? "Photo" : "Photos", pages: photoRun)
+            photoRun = []; any = true
+        }
+        for url in panel.urls {
+            let pages = loadPages(from: [url])
+            guard !pages.isEmpty else { continue }
+            if isPDFURL(url) {
+                flushPhotos()
+                appendGroup(name: url.deletingPathExtension().lastPathComponent, pages: pages)
+                any = true
+            } else {
+                photoRun.append(contentsOf: pages)
+            }
+        }
+        flushPhotos()
+        guard any else { return }
         reloadSource()
     }
 
@@ -395,5 +468,40 @@ final class PageOrganizerWindowController: NSWindowController, NSCollectionViewD
                 infoAlert("Save failed", "Couldn’t write the PDF.")
             }
         }
+    }
+}
+
+
+/// The pile label: filename, page count, and a hairline running to the edge — quiet,
+/// like a pencil note on the desk.
+final class OrganizerSectionHeader: NSView, NSCollectionViewElement {
+    static let id = NSUserInterfaceItemIdentifier("OrganizerSectionHeader")
+    private let label = NSTextField(labelWithString: "")
+    private let line = NSBox()
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        label.font = .systemFont(ofSize: 12, weight: .semibold)
+        label.textColor = .secondaryLabelColor
+        label.lineBreakMode = .byTruncatingMiddle
+        addSubview(label)
+        line.boxType = .separator
+        addSubview(line)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    func configure(name: String, count: Int) {
+        label.stringValue = "\(name) · \(count) page\(count == 1 ? "" : "s")"
+        needsLayout = true
+    }
+
+    override func layout() {
+        super.layout()
+        label.sizeToFit()
+        let w = min(label.frame.width, bounds.width - 40)
+        label.frame = NSRect(x: 12, y: (bounds.height - label.frame.height) / 2 - 2,
+                             width: w, height: label.frame.height)
+        line.frame = NSRect(x: label.frame.maxX + 10, y: bounds.midY - 2.5,
+                            width: max(0, bounds.width - label.frame.maxX - 22), height: 1)
     }
 }

@@ -453,12 +453,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func openOrganizer(_ urls: [URL]) {
-        let pages = loadPages(from: urls)
-        guard !pages.isEmpty else {
+        // One labeled pile per document; runs of photos share a "Photos" pile.
+        var pageGroups: [PageGroup] = []
+        var photoRun: [PDFPage] = []
+        func flushPhotos() {
+            guard !photoRun.isEmpty else { return }
+            pageGroups.append(PageGroup(name: photoRun.count == 1 ? "Photo" : "Photos", pages: photoRun))
+            photoRun = []
+        }
+        for url in urls {
+            let pages = loadPages(from: [url])
+            guard !pages.isEmpty else { continue }
+            if isPDFURL(url) {
+                flushPhotos()
+                pageGroups.append(PageGroup(name: url.deletingPathExtension().lastPathComponent, pages: pages))
+            } else {
+                photoRun.append(contentsOf: pages)
+            }
+        }
+        flushPhotos()
+        guard !pageGroups.isEmpty else {
             infoAlert("Nothing to organize", "None of the selected files could be read as PDFs or images.")
             return
         }
-        let wc = PageOrganizerWindowController(pages: pages)
+        let wc = PageOrganizerWindowController(groups: pageGroups)
         wc.onCancel = { [weak self, weak wc] in wc?.close(); self?.showPopover() }
         AppDelegate.organizers.append(wc)
         AppDelegate.updateActivationPolicy()
