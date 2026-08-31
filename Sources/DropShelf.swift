@@ -38,18 +38,23 @@ final class DropShelf {
         let pb = NSPasteboard(name: .drag)
         if pb.changeCount != lastChange {
             lastChange = pb.changeCount
+            jackdrag("shelf change: enabled=\(Self.enabled) buttons=\(NSEvent.pressedMouseButtons) fileURL=\(pb.availableType(from: [.fileURL]) != nil) types=\(pb.types?.map { $0.rawValue } ?? [])")
             // 🧨 READING a live drag's pasteboard can disturb the drag session itself —
             // Jack's own page drags (Organize, sidebar) were springing back once the
             // watcher glanced at them. availableType is a declared-types peek that
             // resolves nothing: drags carrying no files are never touched at all.
             guard Self.enabled, NSEvent.pressedMouseButtons != 0,
                   pb.availableType(from: [.fileURL]) != nil else { return }
-            // 🧨 NEVER read DATA from a drag in flight — readObjects on the live drag
-            // pasteboard was killing the user's drag sessions mid-air ("pulls them back
-            // as I'm dragging"; the flight recorder showed the drag dying before ANY
-            // drop target was consulted). Declared per-item TYPES are pure metadata.
-            let itemTypes = (pb.pasteboardItems ?? []).map { $0.types.map { $0.rawValue } }
-            if let content = Self.classify(itemTypes: itemTypes) {
+            // 🧨 Real Finder drags declare ONLY public.file-url + com.apple.finder.node —
+            // no content UTIs — so classification MUST read the URLs (proven by tick
+            // probe, 2026-08-30). Reading the drag pasteboard is safe; the organizer
+            // spring-back was the gap-indicator exception, never this read. The guard
+            // above keeps Jack's own internal page drags untouched.
+            let urls = (pb.readObjects(forClasses: [NSURL.self],
+                options: [.urlReadingFileURLsOnly: true]) as? [URL]) ?? []
+            jackdrag("shelf tick: \(urls.count) urls")
+            if let content = Self.classify(urls) {
+                jackdrag("shelf classify -> \(content.action)")
                 // Appear ~0.25s into the drag — ephemeral drags never see it (mock timing).
                 pendingShow?.cancel()
                 let work = DispatchWorkItem { [weak self] in
@@ -67,64 +72,6 @@ final class DropShelf {
 
     struct Content { let action: String; let detail: String }
 
-    /// Classify from declared UTIs alone — no pasteboard data is ever resolved in flight.
-    static func classify(itemTypes: [[String]]) -> Content? {
-        guard !itemTypes.isEmpty else { return nil }
-        func kind(_ types: [String]) -> Character? {
-            for t in types {
-                if t == "public.folder" { return "F" }
-                if t == "com.adobe.pdf" { return "p" }
-                if t == "org.openxmlformats.wordprocessingml.document" || t == "com.microsoft.word.doc"
-                    || t == "public.rtf" || t == "com.apple.rtfd"
-                    || t == "public.plain-text" || t == "public.utf8-plain-text" { return "d" }
-                if t == "org.openxmlformats.spreadsheetml.sheet" || t == "com.microsoft.excel.xls"
-                    || t == "org.openxmlformats.presentationml.presentation" || t == "com.microsoft.powerpoint.ppt"
-                    || t == "com.apple.iwork.numbers.numbers" || t == "com.apple.iwork.keynote.key"
-                    || t == "com.apple.iwork.pages.pages" { return "x" }
-                if let ut = UTType(t), ut.conforms(to: .image) { return "i" }
-            }
-            return nil
-        }
-        let kinds = itemTypes.compactMap(kind)
-        guard !kinds.isEmpty else { return nil }
-        let folders = kinds.filter { $0 == "F" }.count
-        let photos = kinds.filter { $0 == "i" }.count
-        let pdfs = kinds.filter { $0 == "p" }.count
-        let docs = kinds.filter { $0 == "d" }.count
-        let refused = kinds.filter { $0 == "x" }.count
-        if folders > 0 {
-            return Content(action: "Batch process this folder",
-                           detail: "OCR · Bates · watermark · compress")
-        }
-        if refused > 0, photos == 0, pdfs == 0, docs == 0 {
-            return Content(action: "Can\u{2019}t convert spreadsheets",
-                           detail: "They keep their layout best exported from the app that made them")
-        }
-        if docs > 0, photos == 0, pdfs == 0 {
-            return docs == 1
-                ? Content(action: "Convert to PDF", detail: "saved beside the original")
-                : Content(action: "Convert \(docs) documents to PDF", detail: "each saved beside its original")
-        }
-        if pdfs == 1, photos == 0, docs == 0 {
-            return Content(action: "Open in Jack", detail: "1 PDF")
-        }
-        if photos > 0, pdfs == 0, docs == 0 {
-            return photos == 1
-                ? Content(action: "Turn 1 photo into a PDF", detail: "Saved to Desktop · opens in Jack")
-                : Content(action: "Combine \(photos) photos into one PDF", detail: "Saved to Desktop · opens in Jack")
-        }
-        if pdfs > 0 || photos > 0 {
-            var parts: [String] = []
-            if pdfs > 0 { parts.append("\(pdfs) PDF\(pdfs == 1 ? "" : "s")") }
-            if photos > 0 { parts.append("\(photos) photo\(photos == 1 ? "" : "s")") }
-            return Content(action: "Organize \(pdfs + photos) items into one PDF",
-                           detail: parts.joined(separator: " + ") + ", in order")
-        }
-        if docs > 0 {
-            return Content(action: "Convert \(docs) documents to PDF", detail: "each saved beside its original")
-        }
-        return nil
-    }
 
     static func classify(_ urls: [URL]) -> Content? {
         guard !urls.isEmpty else { return nil }
