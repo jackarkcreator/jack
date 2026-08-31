@@ -2719,7 +2719,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     /// (auto-fit, notification handlers) that can move the view after our synchronous restore
     /// returns. `anchorIndex` is the page the user actually edited: if the captured
     /// destination is unusable, the view stays on that page — never "some other page".
-    private func withPreservedPosition(anchorIndex: Int? = nil, _ mutate: () -> Void) {
+    func withPreservedPosition(anchorIndex: Int? = nil, _ mutate: () -> Void) {   // internal for the position kill-tests
         let scale = pdfView.scaleFactor
         let autoScales = pdfView.autoScales
         var destIndex: Int?
@@ -2732,13 +2732,17 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             destIndex = anchorIndex ?? lastKnownPageIndex
         }
 
+        // Capture the cover PLAN while the view is still stable — every PDFView query made
+        // mid-mutation has been caught lying (visiblePages, currentDestination, convert).
+        let coverPlan = makeCoverPlan()
+
         mutate()
 
         let doc = pdfView.document
-        // The reassign rebuilds PDFView's tiles ASYNCHRONOUSLY — the view blanks (white)
-        // until they land, a visible flash on dark pages. Cover the visible page area with
-        // its real post-mutation pixels (page render — the proven path) while tiles settle.
-        let cover = makeRefreshCover(doc: doc, destIndex: destIndex)
+        // The reassign rebuilds PDFView's tiles ASYNCHRONOUSLY — the view blanks until they
+        // land. Cover with POST-mutation page pixels laid into PRE-mutation geometry
+        // (page swaps preserve the page size, so the captured frames stay valid).
+        let cover = buildRefreshCover(plan: coverPlan, doc: doc, destIndex: destIndex)
         pdfView.document = nil
         pdfView.document = doc
         let restore: () -> Void = { [weak self] in
@@ -2751,6 +2755,25 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         restore()
         DispatchQueue.main.async(execute: restore)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: restore)
+        // Live PDFKit queues relayouts LATER than 120ms; the cover hides the view until
+        // ~320ms, so a late layout used to rest the view wrong and the fade revealed it
+        // as a jump. Hold the position through the cover window, DRIFT-GATED: a view
+        // already where it belongs is never touched.
+        let settle: (Double) -> Void = { [weak self] delay in
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                guard let self, let doc = self.pdfView.document, let i = destIndex else { return }
+                let idx = min(i, max(0, doc.pageCount - 1))
+                guard doc.page(at: idx) != nil else { return }
+                if let cur = self.pdfView.currentDestination, let curPage = cur.page,
+                   doc.index(for: curPage) == idx,
+                   abs(cur.point.x - destPoint.x) < 0.75,
+                   abs(cur.point.y - destPoint.y) < 0.75 {
+                    return
+                }
+                restore()
+            }
+        }
+        settle(0.2); settle(0.3); settle(0.45)
         if let cover {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.32) {
                 NSAnimationContext.runAnimationGroup({ ctx in
@@ -2764,17 +2787,34 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
 
     private func forceRefresh() { withPreservedPosition {} }
 
+    /// Which page slices are on screen, measured from the STABLE pre-mutation view by pure
+    /// geometry — never the view's page bookkeeping (visiblePages/currentDestination were
+    /// both probed reporting the wrong page). (index, region in page coords, view frame)
+    private func makeCoverPlan() -> [(Int, CGRect, CGRect)] {
+        guard let doc = pdfView.document, doc.pageCount > 0 else { return [] }
+        var plan: [(Int, CGRect, CGRect)] = []
+        let limit = min(doc.pageCount, 400)   // visible pages are contiguous; cap huge docs
+        for i in 0..<limit {
+            guard let p = doc.page(at: i) else { continue }
+            let vis = pdfView.convert(pdfView.bounds, to: p).intersection(p.bounds(for: .cropBox))
+            if vis.width > 4, vis.height > 4 {
+                let frame = pdfView.convert(vis, from: p)
+                if !frame.isEmpty, !frame.isInfinite, frame.intersects(pdfView.bounds) {
+                    plan.append((i, vis, frame))
+                }
+            } else if !plan.isEmpty {
+                break   // past the visible run
+            }
+        }
+        return plan
+    }
+
     /// Full-view cover shown while the document reassign rebuilds PDFView's tiles (async —
-    /// the view blanks until they land). Three laws learned the hard way:
-    /// • The margin color must resolve against the view's EFFECTIVE appearance — a dynamic
-    ///   NSColor→cgColor outside a draw pass resolves Aqua, which painted dark-mode margins
-    ///   light grey: the "white/grey overlay" Keno saw on every markup apply.
-    /// • EVERY visible page gets real pixels, not just the anchor — a page boundary on
-    ///   screen otherwise flashes bare background where the neighbor page sits.
-    /// • Page GEOMETRY comes from the view's (possibly just-swapped-out) page objects, but
-    ///   CONTENT renders from the document's current page at that index — the cover must
-    ///   show the post-mutation truth.
-    private func makeRefreshCover(doc: PDFDocument?, destIndex: Int?) -> NSView? {
+    /// the view blanks until they land). Content = the DOCUMENT's page at each planned
+    /// index (post-mutation truth); placement = the plan's pre-mutation frames. Margins
+    /// resolve against the view's effective appearance (a dynamic NSColor→cgColor outside
+    /// a draw pass resolves Aqua — the light-grey flash on dark chrome).
+    private func buildRefreshCover(plan: [(Int, CGRect, CGRect)], doc: PDFDocument?, destIndex: Int?) -> NSView? {
         guard let doc, doc.pageCount > 0 else { return nil }
         let container = NSView(frame: pdfView.bounds)
         container.wantsLayer = true
@@ -2783,43 +2823,21 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             bg = NSColor.underPageBackgroundColor.cgColor
         }
         container.layer?.backgroundColor = bg
-        // visiblePages can come back empty (offscreen, mid-layout) — the anchor page is
-        // always a valid stand-in; a cover that silently vanishes brings the flash back.
-        var pages = pdfView.visiblePages
-        if pages.isEmpty, let anchor = pdfView.currentPage ?? doc.page(at: min(max(0, destIndex ?? 0), doc.pageCount - 1)) {
-            pages = [anchor]
-        }
         var covered = 0
-        for viewPage in pages {
-            var idx = doc.index(for: viewPage)
-            // 🧨 A swapped-out page (redact/erase) can't anchor GEOMETRY either — PDFView
-            // cannot resolve coordinates for a page no longer in the document, which is
-            // exactly how the 2.9.2 rewrite regressed the blackout/erase flash. Both the
-            // pixels AND the placement must come from the document's fresh page.
-            var geomPage = viewPage
-            if idx == NSNotFound {
-                idx = min(max(0, destIndex ?? lastKnownPageIndex), doc.pageCount - 1)
-                guard let fresh = doc.page(at: idx) else { continue }
-                geomPage = fresh
-            }
-            guard let fresh = doc.page(at: idx) else { continue }
-            let pageVisible = pdfView.convert(pdfView.bounds, to: geomPage)
-                .intersection(geomPage.bounds(for: .cropBox))
-            guard pageVisible.width > 4, pageVisible.height > 4,
-                  let img = CropEngine.snapshotImage(page: fresh, region: pageVisible) else { continue }
-            let iv = NSImageView(frame: pdfView.convert(pageVisible, from: geomPage))
+        for (idx, region, frame) in plan {
+            guard idx < doc.pageCount, let page = doc.page(at: idx),
+                  let img = CropEngine.snapshotImage(page: page, region: region) else { continue }
+            let iv = NSImageView(frame: frame)
             iv.image = img
             iv.imageScaling = .scaleAxesIndependently
             container.addSubview(iv)
             covered += 1
         }
         if covered == 0 {
-            // Geometry can be unknowable (mid-layout, offscreen restore): render the whole
-            // anchor page rather than let the flash through naked. A best-effort placement
-            // for 300ms beats a white blink every time.
-            let idx = min(max(0, destIndex ?? lastKnownPageIndex), doc.pageCount - 1)
-            // Document first — pdfView.currentPage can be a stale swapped-out object here.
-            if let page = doc.page(at: idx) ?? pdfView.currentPage,
+            // Geometry was unknowable (offscreen restore, mid-layout): whole anchor page,
+            // best-effort placement — beats letting the blank through naked.
+            let anchor = min(max(0, destIndex ?? lastKnownPageIndex), doc.pageCount - 1)
+            if let page = doc.page(at: anchor),
                let img = CropEngine.snapshotImage(page: page, region: page.bounds(for: .cropBox)) {
                 var frame = pdfView.convert(page.bounds(for: .cropBox), from: page)
                 if !frame.intersects(container.bounds) || frame.isEmpty || frame.isInfinite {
@@ -2836,6 +2854,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         pdfView.addSubview(container)
         return container
     }
+
 
     // MARK: - Save (flatten stamps + form values, keep the original file untouched)
 
