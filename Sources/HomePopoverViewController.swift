@@ -74,7 +74,7 @@ final class HomePopoverViewController: NSViewController {
     private static let width: CGFloat = 312
     private static let height: CGFloat = 352
 
-    private let dropOverlay = NSView()
+    private let dropOverlay = NSVisualEffectView()
 
     override func loadView() {
         let v = DropSurfaceView(frame: NSRect(x: 0, y: 0, width: Self.width, height: Self.height))
@@ -151,13 +151,17 @@ final class HomePopoverViewController: NSViewController {
         updateButton.contentTintColor = .controlAccentColor
         v.addSubview(updateButton)
 
-        // The drag-hover state: one huge unmistakable target over everything.
-        dropOverlay.frame = v.bounds.insetBy(dx: 8, dy: 8)
+        // The drag-hover state OWNS the moment: frosted glass blurs the whole grid away —
+        // the only readable thing is what happens when you let go (Keno's call).
+        dropOverlay.frame = v.bounds
+        dropOverlay.material = .popover
+        dropOverlay.blendingMode = .withinWindow
+        dropOverlay.state = .active
         dropOverlay.wantsLayer = true
-        dropOverlay.layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.12).cgColor
         dropOverlay.layer?.cornerRadius = 12
         dropOverlay.layer?.borderWidth = 2
         dropOverlay.layer?.borderColor = NSColor.controlAccentColor.cgColor
+        dropOverlay.layer?.masksToBounds = true
         let dropTitle = NSTextField(labelWithString: "Drop to convert or combine")
         dropTitle.font = .systemFont(ofSize: 16, weight: .semibold)
         dropTitle.alignment = .center
