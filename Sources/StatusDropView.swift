@@ -22,12 +22,15 @@ final class StatusDropView: NSView {
             .filter { isPDFURL($0) || isImageURL($0) || ConvertEngine.isConvertible($0) || ConvertEngine.isRefused($0) }
     }
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        guard !urls(sender).isEmpty else { return [] }
+        let u = urls(sender)
+        jackdrag("statusItem entered: \(u.count) acceptable urls")
+        guard !u.isEmpty else { return [] }
         onDragHover?()
         return .copy
     }
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
         let u = urls(sender)
+        jackdrag("statusItem PERFORM: \(u.count) urls")
         guard !u.isEmpty else { return false }
         onDrop?(u)
         return true

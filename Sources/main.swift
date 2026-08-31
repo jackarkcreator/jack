@@ -134,6 +134,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                          updateAction: #selector(checkUpdatesAction),
                          target: self)
         checkForUpdate()
+        // Dev-only test hook: `Jack --organize a.pdf b.pdf` opens the organizer directly.
+        if let flag = CommandLine.arguments.firstIndex(of: "--organize"),
+           !Bundle.main.bundlePath.hasPrefix("/Applications") {
+            let files = CommandLine.arguments.dropFirst(flag + 1).map { URL(fileURLWithPath: $0) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                self?.openOrganizer(files)
+            }
+            return
+        }
         // Dev/CLI launches pass files as argv; AppKit only auto-delivers SOME types that
         // way (PDF yes, docx no — probed). LaunchServices launches use open-urls, so this
         // fallback fires only when nothing was delivered.
@@ -238,8 +247,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         guard let button = statusItem.button else { return }
         if let img = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: "Jack") {
-            img.isTemplate = true
-            button.image = img
+            // Dev builds (anything not running from /Applications) wear AMBER in the menu
+            // bar, so a dev instance can never masquerade as the real Jack again.
+            if Bundle.main.bundlePath.hasPrefix("/Applications") {
+                img.isTemplate = true
+                button.image = img
+            } else {
+                let size = img.size
+                let tinted = NSImage(size: size, flipped: false) { rect in
+                    img.draw(in: rect)
+                    NSColor(calibratedRed: 0.96, green: 0.65, blue: 0.14, alpha: 1).set()
+                    rect.fill(using: .sourceAtop)
+                    return true
+                }
+                tinted.isTemplate = false
+                button.image = tinted
+                button.toolTip = "Jack (dev build)"
+            }
         }
         let overlay = StatusDropView(frame: button.bounds)
         overlay.autoresizingMask = [.width, .height]

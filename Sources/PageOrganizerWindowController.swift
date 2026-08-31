@@ -12,8 +12,50 @@ struct PageGroup {
     let pages: [PDFPage]
 }
 
+/// Drag flight recorder — dev builds only (fleet copies never write a byte).
+/// This file-based log is what finally caught the gap-indicator drag-cancel exception;
+/// `log show` never surfaces this app's NSLog output, so keep THIS as the probe.
+let jackdragEnabled = !Bundle.main.bundlePath.hasPrefix("/Applications")
+func jackdrag(_ msg: String) {
+    guard jackdragEnabled else { return }
+    let line = "\(Date()) \(msg)\n"
+    let url = URL(fileURLWithPath: "/tmp/jackdrag.log")
+    if let h = try? FileHandle(forWritingTo: url) { h.seekToEndOfFile(); h.write(line.data(using: .utf8)!); try? h.close() }
+    else { try? line.write(to: url, atomically: true, encoding: .utf8) }
+}
+
+/// 🧨 ROOT CAUSE of the "second drag springs back" bug (proven by flight recorder +
+/// live repro, 2026-08-30): NSCollectionView sizes itself to its CONTENT. A tray with
+/// one page is one row tall — the whole empty pane below it is scroll-view dead space
+/// that never receives validateDrop, so drops there end with operation=0 (spring-back).
+/// An empty tray "worked" only because an empty document view fills its clip view.
+/// Fix: the collection view always fills the visible pane, so the entire column is a
+/// live drop target regardless of how many pages it holds.
+final class FullHeightCollectionView: NSCollectionView {
+    override func setFrameSize(_ newSize: NSSize) {
+        var size = newSize
+        if let clip = superview as? NSClipView { size.height = max(size.height, clip.bounds.height) }
+        super.setFrameSize(size)
+    }
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        let r = super.draggingEntered(sender); jackdrag("DEST entered -> \(r.rawValue)"); return r
+    }
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        let r = super.draggingUpdated(sender); jackdrag("DEST updated -> \(r.rawValue)"); return r
+    }
+    override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let r = super.prepareForDragOperation(sender); jackdrag("DEST prepare -> \(r)"); return r
+    }
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let r = super.performDragOperation(sender); jackdrag("DEST perform -> \(r)"); return r
+    }
+    override func draggingExited(_ sender: NSDraggingInfo?) { jackdrag("DEST exited"); super.draggingExited(sender) }
+    override func draggingEnded(_ sender: NSDraggingInfo) { jackdrag("DEST dragEnded"); super.draggingEnded(sender) }
+}
+
 final class PageOrganizerWindowController: NSWindowController, NSCollectionViewDataSource, NSCollectionViewDelegate, NSWindowDelegate, NSToolbarDelegate {
     private static let pageType = NSPasteboard.PasteboardType("net.thinkopen.jack.page")
+    private static let gapID = NSUserInterfaceItemIdentifier("OrganizerGapIndicator")
     var onCancel: (() -> Void)?
 
     /// The desk metaphor completed (Keno, 2026-08-30): every source document is its own
@@ -29,8 +71,8 @@ final class PageOrganizerWindowController: NSWindowController, NSCollectionViewD
     private var trayOrigins: [Int] = []      // trayPages[i] came from sourcePages[trayOrigins[i]]
     private var thumbCache: [ObjectIdentifier: NSImage] = [:]
 
-    private let sourceCV = NSCollectionView()
-    private let trayCV = NSCollectionView()
+    private let sourceCV = FullHeightCollectionView()
+    private let trayCV = FullHeightCollectionView()
     private var sourceDrag: [Int] = []
     private var trayDrag: [Int] = []
 
@@ -237,6 +279,13 @@ final class PageOrganizerWindowController: NSWindowController, NSCollectionViewD
         cv.allowsEmptySelection = true
         cv.backgroundColors = [isTray ? NSColor.windowBackgroundColor : NSColor.underPageBackgroundColor]
         cv.register(PageThumbnailItem.self, forItemWithIdentifier: PageThumbnailItem.id)
+        // 🧨 THE spring-back root cause: hovering a drop between existing items makes
+        // NSCollectionView request an inter-item GAP INDICATOR supplementary view. If the
+        // data source dequeues the section header for that kind (unregistered), AppKit
+        // throws NSInternalInconsistencyException and CANCELS THE WHOLE DRAG SESSION
+        // ("pulls them back as I'm dragging"). Register a plain view for the gap kind.
+        cv.register(NSView.self, forSupplementaryViewOfKind: NSCollectionView.elementKindInterItemGapIndicator,
+                    withIdentifier: Self.gapID)
         cv.registerForDraggedTypes([Self.pageType])
         cv.setDraggingSourceOperationMask(isTray ? .move : .copy, forLocal: true)
     }
@@ -269,6 +318,9 @@ final class PageOrganizerWindowController: NSWindowController, NSCollectionViewD
 
     func collectionView(_ cv: NSCollectionView, viewForSupplementaryElementOfKind kind: NSCollectionView.SupplementaryElementKind,
                         at indexPath: IndexPath) -> NSView {
+        guard kind == NSCollectionView.elementKindSectionHeader else {
+            return cv.makeSupplementaryView(ofKind: kind, withIdentifier: Self.gapID, for: indexPath)
+        }
         let header = cv.makeSupplementaryView(ofKind: kind, withIdentifier: OrganizerSectionHeader.id,
                                               for: indexPath) as! OrganizerSectionHeader
         if cv === sourceCV, indexPath.section < groups.count {
@@ -281,7 +333,10 @@ final class PageOrganizerWindowController: NSWindowController, NSCollectionViewD
     // MARK: drag & drop
 
     func collectionView(_ cv: NSCollectionView, canDragItemsAt indexPaths: Set<IndexPath>, with event: NSEvent) -> Bool {
-        cv !== sourceCV || indexPaths.allSatisfy { !takenSource.contains(flatIndex($0)) }
+        let ok = cv !== sourceCV || indexPaths.allSatisfy { !takenSource.contains(flatIndex($0)) }
+        let flats = cv === sourceCV ? indexPaths.map { String(flatIndex($0)) }.joined(separator: ",") : "-"
+        jackdrag("canDrag \(cv === sourceCV ? "source" : "tray") ips=\(indexPaths.map { "s\($0.section)i\($0.item)" }.sorted().joined(separator: " ")) flats=\(flats) taken=\(takenSource.sorted()) -> \(ok ? "YES" : "NO") trayRegTypes=\(trayCV.registeredDraggedTypes.map { $0.rawValue })")
+        return ok
     }
 
     func collectionView(_ cv: NSCollectionView, pasteboardWriterForItemAt indexPath: IndexPath) -> NSPasteboardWriting? {
@@ -294,32 +349,78 @@ final class PageOrganizerWindowController: NSWindowController, NSCollectionViewD
                         willBeginAt screenPoint: NSPoint, forItemsAt indexPaths: Set<IndexPath>) {
         if cv === trayCV { trayDrag = indexPaths.map { $0.item }.sorted() }
         else { sourceDrag = indexPaths.map { flatIndex($0) }.sorted() }
+        jackdrag("willBegin \(cv === trayCV ? "tray" : "source") sourceDrag=\(sourceDrag) trayDrag=\(trayDrag)")
+    }
+
+    func collectionView(_ cv: NSCollectionView, draggingSession session: NSDraggingSession,
+                        endedAt screenPoint: NSPoint, dragOperation operation: NSDragOperation) {
+        jackdrag("dragENDED \(cv === trayCV ? "tray" : "source") operation=\(operation.rawValue) (0 = refused/cancelled)")
     }
 
     func collectionView(_ cv: NSCollectionView, validateDrop draggingInfo: NSDraggingInfo,
                         proposedIndexPath: AutoreleasingUnsafeMutablePointer<NSIndexPath>,
                         dropOperation: UnsafeMutablePointer<NSCollectionView.DropOperation>) -> NSDragOperation {
-        guard cv === trayCV else { return [] }   // only the New PDF pane accepts drops
+        guard cv === trayCV else {
+            jackdrag("validateDrop over SOURCE pane -> refused")
+            return []
+        }
+        if dropOperation.pointee == .on { dropOperation.pointee = .before }
+        let srcIsSource = (draggingInfo.draggingSource as? NSCollectionView) === sourceCV
+        jackdrag("validateDrop tray: draggingSource=\(String(describing: type(of: draggingInfo.draggingSource ?? "nil"))) -> \(srcIsSource ? "copy" : "move")")
+        return srcIsSource ? .copy : .move
+    }
+
+    // 🧨 AppKit landmine (proven live, 2026-08-30): for GAP drops between existing items
+    // NSCollectionView calls the LEGACY Int-index delegate pair, not the IndexPath pair.
+    // With only the modern methods implemented, a drop into a non-empty tray validated
+    // fine but acceptDrop never fired — session ended operation=0, page sprang back.
+    // An empty tray has no gaps, which is why exactly one page ever landed.
+    // Both variants must exist, forwarding to the same logic.
+    func collectionView(_ cv: NSCollectionView, validateDrop draggingInfo: NSDraggingInfo,
+                        proposedIndex proposedDropIndex: UnsafeMutablePointer<Int>,
+                        dropOperation: UnsafeMutablePointer<NSCollectionView.DropOperation>) -> NSDragOperation {
+        jackdrag("validateDrop LEGACY index=\(proposedDropIndex.pointee)")
+        guard cv === trayCV else { return [] }
         if dropOperation.pointee == .on { dropOperation.pointee = .before }
         return (draggingInfo.draggingSource as? NSCollectionView) === sourceCV ? .copy : .move
     }
 
     func collectionView(_ cv: NSCollectionView, acceptDrop draggingInfo: NSDraggingInfo,
+                        index: Int, dropOperation: NSCollectionView.DropOperation) -> Bool {
+        jackdrag("acceptDrop LEGACY index=\(index)")
+        return acceptOnTray(cv, draggingInfo: draggingInfo, targetItem: index)
+    }
+
+    func collectionView(_ cv: NSCollectionView, acceptDrop draggingInfo: NSDraggingInfo,
                         indexPath: IndexPath, dropOperation: NSCollectionView.DropOperation) -> Bool {
-        guard cv === trayCV else { return false }
-        var target = indexPath.item
+        jackdrag("acceptDrop MODERN target=\(indexPath.item)")
+        return acceptOnTray(cv, draggingInfo: draggingInfo, targetItem: indexPath.item)
+    }
+
+    private func acceptOnTray(_ cv: NSCollectionView, draggingInfo: NSDraggingInfo, targetItem: Int) -> Bool {
+        jackdrag("acceptOnTray target=\(targetItem) sourceDrag=\(sourceDrag) trayDrag=\(trayDrag) taken=\(takenSource.sorted())")
+        guard cv === trayCV else { jackdrag("acceptOnTray: not tray -> FALSE"); return false }
+        var target = targetItem
         if (draggingInfo.draggingSource as? NSCollectionView) === sourceCV {
             // MOVE source pages into the New PDF — their slots stay behind, empty.
             let fresh = sourceDrag.filter { !takenSource.contains($0) }
             let add = fresh.compactMap { sourcePages[$0].copy() as? PDFPage }
-            guard !add.isEmpty else { return false }
+            jackdrag("acceptDrop source-branch fresh=\(fresh) copies=\(add.count)")
+            guard !add.isEmpty else { jackdrag("acceptDrop: EMPTY add -> FALSE (spring-back)"); return false }
             target = min(max(0, target), trayPages.count)
             trayPages.insert(contentsOf: add, at: target)
             trayOrigins.insert(contentsOf: fresh, at: target)
             fresh.forEach { takenSource.insert($0) }
             sourceDrag = []
-            reloadSource()
-            reloadTray(select: target..<(target + add.count))
+            // 🧨 Reloading while NSCollectionView is still concluding the drop corrupts its
+            // internal drag-session state — after which NO view in the window receives
+            // draggingEntered ever again (proven by destination probes, 2026-08-30).
+            // Mutate now, reload only after the drop machinery has fully unwound.
+            let sel = target..<(target + add.count)
+            DispatchQueue.main.async { [weak self] in
+                self?.reloadSource()
+                self?.reloadTray(select: sel)
+            }
         } else {
             // Reorder within the New PDF (origins travel with their pages).
             guard !trayDrag.isEmpty else { return false }
@@ -333,7 +434,8 @@ final class PageOrganizerWindowController: NSWindowController, NSCollectionViewD
             trayPages.insert(contentsOf: moving, at: target)
             trayOrigins.insert(contentsOf: movingOrigins, at: target)
             trayDrag = []
-            reloadTray(select: target..<(target + moving.count))
+            let sel = target..<(target + moving.count)
+            DispatchQueue.main.async { [weak self] in self?.reloadTray(select: sel) }
         }
         return true
     }
@@ -358,9 +460,15 @@ final class PageOrganizerWindowController: NSWindowController, NSCollectionViewD
         cv === sourceCV ? cv.selectionIndexPaths.map { flatIndex($0) }.sorted()
                         : cv.selectionIndexPaths.map { $0.item }.sorted()
     }
-    private func reloadSource() { sourceCV.reloadData() }
+    // 🧨 reloadData() on NSCollectionView drops its dragged-type registration — the pane
+    // silently stops being a drop target. Re-register after every reload.
+    private func reloadSource() {
+        sourceCV.reloadData()
+        sourceCV.registerForDraggedTypes([Self.pageType])
+    }
     private func reloadTray(select range: Range<Int>? = nil) {
         trayCV.reloadData()
+        trayCV.registerForDraggedTypes([Self.pageType])
         if let r = range { trayCV.selectionIndexPaths = Set(r.map { IndexPath(item: $0, section: 0) }) }
         syncTrayHint()
     }
