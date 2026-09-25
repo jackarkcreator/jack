@@ -118,7 +118,7 @@ enum FormFieldEngine {
 
     private static func label(_ text: String, at origin: CGPoint, size: CGFloat, weight: NSFont.Weight = .regular,
                               width: CGFloat = 220, nm: String) -> PDFAnnotation {
-        let a = PDFAnnotation(bounds: CGRect(x: origin.x, y: origin.y, width: width, height: size + 5),
+        let a = JackFreeText(bounds: CGRect(x: origin.x, y: origin.y, width: width, height: size + 5),
                               forType: .freeText, withProperties: nil)
         a.contents = text
         a.font = NSFont.systemFont(ofSize: size, weight: weight)

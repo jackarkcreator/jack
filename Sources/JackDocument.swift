@@ -31,6 +31,10 @@ final class JackDocument: NSDocument, PDFDocumentDelegate {
     // draws in the view, thumbnails, and flattens. Set as the PDFDocument's delegate
     // BEFORE any page is touched — PDFKit creates page objects lazily.
     func classForPage() -> AnyClass { JackPage.self }
+    // FreeText renders through the page path so it stays crisp at zoom (JackFreeText.swift).
+    func `class`(forAnnotationType annotationType: String) -> AnyClass {
+        annotationType == "FreeText" || annotationType == "/FreeText" ? JackFreeText.self : PDFAnnotation.self
+    }
 
     var pdf: PDFDocument?
 

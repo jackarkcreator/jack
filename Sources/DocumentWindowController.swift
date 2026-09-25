@@ -2484,7 +2484,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         // for FreeText's internal inset so it does, instead of drifting right and down.
         let inset = RetypeMetrics.inkInset(for: font)
         let placed = bounds.offsetBy(dx: -inset.left, dy: inset.top)
-        let ann = PDFAnnotation(bounds: placed, forType: .freeText, withProperties: nil)
+        let ann = JackFreeText(bounds: placed, forType: .freeText, withProperties: nil)
         ann.contents = text
         ann.font = font
         ann.fontColor = color

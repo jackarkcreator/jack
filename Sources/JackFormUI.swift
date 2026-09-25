@@ -211,7 +211,17 @@ enum JackFormUI {
 /// the view, in thumbnails, and in flattens — but placeholders only during live display.
 final class JackPage: PDFPage {
     override func draw(with box: PDFDisplayBox, to context: CGContext) {
-        super.draw(with: box, to: context)
+        let drawn = PageDrawScope.run { super.draw(with: box, to: context) }
+        // Typed text super didn't draw (PDFView's tiles exclude annotations) is drawn HERE, in
+        // the resolution-matched page path — see JackFreeText.swift.
+        let pending = annotations.compactMap { $0 as? JackFreeText }
+            .filter { $0.shouldDisplay && !$0.liveDrag && !drawn.contains(ObjectIdentifier($0)) }
+        if !pending.isEmpty {
+            context.saveGState()
+            transform(context, for: box)
+            _ = PageDrawScope.run { pending.forEach { $0.draw(with: box, in: context) } }
+            context.restoreGState()
+        }
         guard JackFormUI.enabled else { return }   // widgets stay PDFKit-native when Forms is off
         for a in annotations where JackFormUI.isSupported(a) {
             JackFormUI.drawChrome(for: a, in: context)

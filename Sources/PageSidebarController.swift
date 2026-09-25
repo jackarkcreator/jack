@@ -68,7 +68,7 @@ final class PageSidebarController: NSObject, NSCollectionViewDataSource, NSColle
     func collectionView(_ collectionView: NSCollectionView, itemForRepresentedObjectAt indexPath: IndexPath) -> NSCollectionViewItem {
         let item = collectionView.makeItem(withIdentifier: PageThumbnailItem.id, for: indexPath)
         guard let tile = item as? PageThumbnailItem, let page = document?.page(at: indexPath.item) else { return item }
-        tile.configure(page.thumbnail(of: NSSize(width: 120, height: 156), for: .mediaBox), label: "\(indexPath.item + 1)")
+        tile.configure(page.jackThumbnail(fitting: NSSize(width: 120, height: 156)), label: "\(indexPath.item + 1)")
         return tile
     }
 

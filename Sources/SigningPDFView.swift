@@ -315,6 +315,9 @@ final class SigningPDFView: PDFView {
         }
         if let free = draggingFree, let page = dragPage {
             let p = convert(convert(event.locationInWindow, from: nil), to: page)
+            // The page tiles can't follow a live drag — hand the text to PDFView's layer
+            // until mouse-up (JackFreeText.liveDrag); freeTextMoved repaints crisp.
+            (free as? JackFreeText)?.liveDrag = true
             free.bounds = free.bounds.offsetBy(dx: p.x - last.x, dy: p.y - last.y)
             last = p
             needsDisplay = true
@@ -396,6 +399,7 @@ final class SigningPDFView: PDFView {
             if ann.bounds != dragStartBounds { stampDelegate?.stampMoved(ann, from: dragStartBounds) }
             dragging = nil; dragPage = nil
         } else if let free = draggingFree {
+            (free as? JackFreeText)?.liveDrag = false
             if free.bounds != freeStartBounds { stampDelegate?.freeTextMoved(free, from: freeStartBounds) }
             draggingFree = nil; dragPage = nil
         } else {
