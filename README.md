@@ -27,8 +27,11 @@ signed `.exe` — ideal for PDQ fleet deployment. Built + signed in CI on every 
 
 ## Release flow
 1. `./build.sh && ./notarize.sh`, zip `Jack.app`.
-2. `gh release create vX.Y.Z Jack-mac-*.zip` — this tags the commit.
-3. The tag triggers CI, which builds + signs `Jack-win-x64.exe` and attaches it to the same release.
+2. `./dmg.sh` → signed + notarized + stapled `build/Jack-mac.dmg` (the file clients download).
+3. `gh release create vX.Y.Z Jack-mac-*.zip build/Jack-mac.dmg` — this tags the commit.
+   The zip feeds Sparkle auto-update; the DMG is the client install link:
+   `https://github.com/jackarkcreator/jack/releases/latest/download/Jack-mac.dmg`
+4. The tag triggers CI, which builds + signs `Jack-win-x64.exe` and attaches it to the same release.
 
 ## Brand
 Navy `#0A2540` · Teal `#0E6E6E`→`#14B8A6` · Amber `#F5A623` · Page white. © ThinkOpen Inc.
