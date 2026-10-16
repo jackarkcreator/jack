@@ -246,7 +246,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func setupStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         guard let button = statusItem.button else { return }
-        if let img = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: "Jack") {
+        // v3: Paper Jack in the menu bar (template glyph matching the app icon).
+        if let img = Optional(Chrome.menuBarGlyph()) {
             // Dev builds (anything not running from /Applications) wear AMBER in the menu
             // bar, so a dev instance can never masquerade as the real Jack again.
             if Bundle.main.bundlePath.hasPrefix("/Applications") {

@@ -532,3 +532,52 @@ final class PagePill: NSView {
         content.frame = bounds
     }
 }
+
+// MARK: - Menu-bar glyph
+
+extension Chrome {
+    /// Paper Jack for the menu bar: the app icon's sheet (folded top-right corner) and face,
+    /// as an 18 pt TEMPLATE image so macOS tints it like every other menu-bar item. Drawn in
+    /// vector at any scale, so it stays crisp on every display.
+    static func menuBarGlyph() -> NSImage {
+        let img = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { _ in
+            NSColor.black.set()
+            // Sheet: rounded corners, top-right folded away.
+            let sheet = NSBezierPath()
+            sheet.move(to: NSPoint(x: 5.5, y: 1.75))
+            sheet.line(to: NSPoint(x: 12.5, y: 1.75))
+            sheet.curve(to: NSPoint(x: 14.25, y: 3.5), controlPoint1: NSPoint(x: 13.6, y: 1.75), controlPoint2: NSPoint(x: 14.25, y: 2.4))
+            sheet.line(to: NSPoint(x: 14.25, y: 12.25))
+            sheet.line(to: NSPoint(x: 10.25, y: 16.25))
+            sheet.line(to: NSPoint(x: 5.5, y: 16.25))
+            sheet.curve(to: NSPoint(x: 3.75, y: 14.5), controlPoint1: NSPoint(x: 4.4, y: 16.25), controlPoint2: NSPoint(x: 3.75, y: 15.6))
+            sheet.line(to: NSPoint(x: 3.75, y: 3.5))
+            sheet.curve(to: NSPoint(x: 5.5, y: 1.75), controlPoint1: NSPoint(x: 3.75, y: 2.4), controlPoint2: NSPoint(x: 4.4, y: 1.75))
+            sheet.close()
+            sheet.lineWidth = 1.4
+            sheet.lineJoinStyle = .round
+            sheet.stroke()
+            // The fold: a small solid flap.
+            let flap = NSBezierPath()
+            flap.move(to: NSPoint(x: 10.25, y: 16.25))
+            flap.line(to: NSPoint(x: 10.25, y: 13.25))
+            flap.curve(to: NSPoint(x: 11.25, y: 12.25), controlPoint1: NSPoint(x: 10.25, y: 12.7), controlPoint2: NSPoint(x: 10.7, y: 12.25))
+            flap.line(to: NSPoint(x: 14.25, y: 12.25))
+            flap.close()
+            flap.fill()
+            // Face: two eyes and a small smile.
+            NSBezierPath(ovalIn: NSRect(x: 6.35, y: 8.0, width: 1.7, height: 2.4)).fill()
+            NSBezierPath(ovalIn: NSRect(x: 9.95, y: 8.0, width: 1.7, height: 2.4)).fill()
+            let smile = NSBezierPath()
+            smile.move(to: NSPoint(x: 6.6, y: 6.0))
+            smile.curve(to: NSPoint(x: 11.4, y: 6.0), controlPoint1: NSPoint(x: 7.6, y: 4.2), controlPoint2: NSPoint(x: 10.4, y: 4.2))
+            smile.lineWidth = 1.3
+            smile.lineCapStyle = .round
+            smile.stroke()
+            return true
+        }
+        img.isTemplate = true
+        img.accessibilityDescription = "Jack"
+        return img
+    }
+}
