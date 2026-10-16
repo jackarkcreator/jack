@@ -55,12 +55,34 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             window?.orderBack(nil)
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
                 guard let self, let window = self.window else { return }
-                self.setMode(showcase == "markup" || showcase == "note" ? .markup : showcase == "redact" ? .redact : .read)
-                if showcase == "note", let page = self.pdfView.document?.page(at: 0) {
+                self.setMode(["markup", "note", "stamp", "stampdrag"].contains(showcase) ? .markup : showcase == "redact" ? .redact : .read)
+                if ["note", "stamp", "stampdrag"].contains(showcase), let page = self.pdfView.document?.page(at: 0) {
                     page.addAnnotation(CommentBadgeAnnotation(bounds: CGRect(x: 120, y: 520, width: 18, height: 18), text: "Showcase"))
+                    // "stamp": a typed-style signature beside the badge, built like the Sign sheet's.
+                    var stamp: ImageStampAnnotation?
+                    if showcase != "note", let img = self.renderText("Jack Signature", size: 72, pad: 20) {
+                        let w: CGFloat = 200, h = w * img.size.height / max(1, img.size.width)
+                        stamp = ImageStampAnnotation(image: img, bounds: CGRect(x: 145, y: 512, width: w, height: h))
+                        page.addAnnotation(stamp!)
+                    }
                     self.applyZoomPolicy(.fixed, fixed: 2)
                     self.pdfView.go(to: PDFDestination(page: page, at: CGPoint(x: 60, y: 600)))
                     self.forceRefresh()
+                    // "stampdrag": a real drag through SigningPDFView, held mid-gesture (no mouse-up),
+                    // so the capture shows whether a stale copy is left at the start position.
+                    if showcase == "stampdrag", let stamp {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                            func ev(_ t: NSEvent.EventType, _ pp: CGPoint) -> NSEvent? {
+                                NSEvent.mouseEvent(with: t, location: self.pdfView.convert(self.pdfView.convert(pp, from: page), to: nil),
+                                                   modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                                   windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)
+                            }
+                            let c = CGPoint(x: stamp.bounds.midX, y: stamp.bounds.midY)
+                            if let d = ev(.leftMouseDown, c) { self.pdfView.mouseDown(with: d) }
+                            if let m = ev(.leftMouseDragged, CGPoint(x: c.x + 20, y: c.y - 40)) { self.pdfView.mouseDragged(with: m) }
+                            if let m = ev(.leftMouseDragged, CGPoint(x: c.x + 30, y: c.y - 70)) { self.pdfView.mouseDragged(with: m) }
+                        }
+                    }
                 }
                 if showcase != "read", let word = (self.pdfView.document?.page(at: 0)?.string ?? "")
                     .components(separatedBy: .whitespacesAndNewlines).first(where: { $0.count >= 4 }),
@@ -2245,9 +2267,8 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         let origin = CGPoint(x: min(max(point.x - width / 2, box.minX), box.maxX - width),
                              y: min(max(point.y - height / 2, box.minY), box.maxY - height))
         let ann = ImageStampAnnotation(image: image, bounds: CGRect(origin: origin, size: CGSize(width: width, height: height)))
-        addStamp(ann, to: page)
+        addStamp(ann, to: page)   // repaints
         didSelect(ann)
-        forceRefresh()
         flashSubtitle("Image placed — drag to move, ⌘Z to undo")
     }
 
@@ -2929,7 +2950,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         docUndo.registerUndo(withTarget: self) { $0.removeStampUndoable(ann) }
         docUndo.setActionName("Add Mark")
         markEdited()
-        pdfView.needsDisplay = true
+        forceRefresh()   // page-drawn (ImageStampAnnotation): cached tiles need the repaint
     }
 
     private func removeStampUndoable(_ ann: ImageStampAnnotation) {
@@ -2961,14 +2982,17 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             ann.bounds = oldBounds
             me.registerBoundsUndo(ann, current, name: name)
             if me.selected === ann { me.sizeSlider.doubleValue = Double(oldBounds.width) }
-            me.pdfView.needsDisplay = true
+            me.forceRefresh()
         }
         docUndo.setActionName(name)
         markEdited()
     }
 
+    /// Drag ended (SigningPDFView clears liveDrag first). Repaint even when the stamp landed
+    /// where it started: tiles drawn mid-drag skipped it.
     func stampMoved(_ ann: ImageStampAnnotation, from oldBounds: CGRect) {
-        registerBoundsUndo(ann, oldBounds, name: "Move Mark")
+        if ann.bounds != oldBounds { registerBoundsUndo(ann, oldBounds, name: "Move Mark") }
+        forceRefresh()
     }
 
     private func hasFormFields(_ doc: PDFDocument) -> Bool {
@@ -3006,13 +3030,17 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         let newH = newW / max(0.01, ann.aspect)
         let cx = ann.bounds.midX, cy = ann.bounds.midY
         ann.bounds = CGRect(x: cx - newW / 2, y: cy - newH / 2, width: newW, height: newH)
+        // Live: the layer copy tracks the slider; the crisp page copy repaints at gesture end.
+        let type = NSApp.currentEvent?.type
+        ann.liveDrag = type == .leftMouseDown || type == .leftMouseDragged
         pdfView.needsDisplay = true
-        if NSApp.currentEvent?.type == .leftMouseUp {   // gesture ended
+        if type == .leftMouseUp {   // gesture ended
             if let start = sliderStartBounds, start != ann.bounds {
                 registerBoundsUndo(ann, start, name: "Resize Mark")
             }
             sliderStartBounds = nil
         }
+        if !ann.liveDrag { forceRefresh() }
     }
 
     @objc private func removeSelected() {
@@ -4392,6 +4420,62 @@ extension DocumentWindowController {
                 self.docUndo.undo()
                 check("undo returns the badge", badge.bounds == start, "now \(badge.bounds.origin)")
                 page.removeAnnotation(badge)
+                self.forceRefresh()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { stampChecks() }
+            }
+        }
+        // Image stamp (v3.0.2, page-drawn): page draws paint it, the saved file keeps it, and a
+        // real drag hands it to the layer only while live.
+        func stampChecks() {
+            guard let doc = pdfView.document, let page = doc.page(at: 0),
+                  let img = renderText("Jack Signature", size: 72, pad: 20) else { return continueArmedChecks() }
+            let w: CGFloat = 160, start = CGRect(x: 120, y: 260, width: w, height: w * img.size.height / max(1, img.size.width))
+            func pixels(_ pg: PDFPage, _ r: CGRect) -> [UInt8] {
+                let sc: CGFloat = 2, W = Int(r.width * sc), H = Int(r.height * sc)
+                guard let ctx = CGContext(data: nil, width: W, height: H, bitsPerComponent: 8, bytesPerRow: W * 4,
+                                          space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return [] }
+                ctx.setFillColor(.white); ctx.fill(CGRect(x: 0, y: 0, width: W, height: H))
+                ctx.scaleBy(x: sc, y: sc); ctx.translateBy(x: -r.minX, y: -r.minY)
+                pg.draw(with: .mediaBox, to: ctx)
+                guard let d = ctx.data else { return [] }
+                return Array(UnsafeBufferPointer(start: d.assumingMemoryBound(to: UInt8.self), count: W * H * 4))
+            }
+            func changed(_ a: [UInt8], _ b: [UInt8]) -> Int {
+                guard a.count == b.count else { return -1 }
+                return stride(from: 0, to: a.count, by: 4).filter { i in (0..<3).contains { abs(Int(a[i + $0]) - Int(b[i + $0])) > 40 } }.count
+            }
+            let bare = pixels(page, start)
+            let stamp = ImageStampAnnotation(image: img, bounds: start)
+            page.addAnnotation(stamp)
+            let inked = changed(bare, pixels(page, start))
+            check("page draw paints an image stamp", inked > 500, "changed px=\(inked)")
+            let saved = JackDocument.buildPersistedDocument(from: doc)?.page(at: 0)
+            let savedInk = saved.map { changed(bare, pixels($0, start)) } ?? -1
+            check("saved copy burns the stamp in", savedInk > 500, "changed px=\(savedInk)")
+
+            pdfView.go(to: PDFDestination(page: page, at: CGPoint(x: 0, y: 400)))
+            window.layoutIfNeeded()
+            func mev(_ t: NSEvent.EventType, _ pp: CGPoint) -> NSEvent? {
+                NSEvent.mouseEvent(with: t, location: pdfView.convert(pdfView.convert(pp, from: page), to: nil), modifierFlags: [],
+                                   timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                                   context: nil, eventNumber: 0, clickCount: 1, pressure: t == .leftMouseUp ? 0 : 1)
+            }
+            let c = CGPoint(x: start.midX, y: start.midY)
+            if let d = mev(.leftMouseDown, c) { pdfView.mouseDown(with: d) }
+            if let m = mev(.leftMouseDragged, CGPoint(x: c.x + 20, y: c.y - 10)) { pdfView.mouseDragged(with: m) }
+            let liveMid = stamp.liveDrag
+            if let m = mev(.leftMouseDragged, CGPoint(x: c.x + 40, y: c.y - 30)) { pdfView.mouseDragged(with: m) }
+            if let u = mev(.leftMouseUp, CGPoint(x: c.x + 40, y: c.y - 30)) { pdfView.mouseUp(with: u) }
+            let moved = stamp.bounds
+            check("drag moves an image stamp", liveMid && !stamp.liveDrag
+                    && abs(moved.minX - (start.minX + 40)) < 1.5 && abs(moved.minY - (start.minY - 30)) < 1.5,
+                  "liveMid=\(liveMid) from \(start.origin) to \(moved.origin)")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                self.docUndo.undo()
+                check("undo returns the stamp", stamp.bounds == start, "now \(stamp.bounds.origin)")
+                self.didSelect(nil)
+                page.removeAnnotation(stamp)
                 self.forceRefresh()
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { continueArmedChecks() }
             }

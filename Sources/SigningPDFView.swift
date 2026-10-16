@@ -373,6 +373,8 @@ final class SigningPDFView: PDFView {
         }
         guard let ann = dragging, let page = dragPage else { super.mouseDragged(with: event); return }
         let p = convert(convert(event.locationInWindow, from: nil), to: page)
+        // Same hand-off as typed text: the layer follows the pointer; stampMoved repaints crisp.
+        ann.liveDrag = true
         var b = ann.bounds
         b.origin.x += p.x - last.x
         b.origin.y += p.y - last.y
@@ -455,7 +457,9 @@ final class SigningPDFView: PDFView {
             return
         }
         if let ann = dragging {
-            if ann.bounds != dragStartBounds { stampDelegate?.stampMoved(ann, from: dragStartBounds) }
+            let wasLive = ann.liveDrag
+            ann.liveDrag = false
+            if wasLive { stampDelegate?.stampMoved(ann, from: dragStartBounds) }
             dragging = nil; dragPage = nil
         } else if let free = draggingFree {
             (free as? JackFreeText)?.liveDrag = false
