@@ -33,13 +33,9 @@ cp -R "$DIR/Frameworks/Sparkle.framework" "$APPDIR/Contents/Frameworks/"
 
 echo "==> Render icon"
 swiftc -O "$DIR/Sources/makeicon.swift" -o "$BUILD/makeicon"
-"$BUILD/makeicon" "$BUILD/jack-1024.png"
 ICONSET="$BUILD/jack.iconset"; rm -rf "$ICONSET"; mkdir -p "$ICONSET"
-for s in 16 32 128 256 512; do
-  d=$((s * 2))
-  sips -z "$s" "$s" "$BUILD/jack-1024.png" --out "$ICONSET/icon_${s}x${s}.png"     >/dev/null
-  sips -z "$d" "$d" "$BUILD/jack-1024.png" --out "$ICONSET/icon_${s}x${s}@2x.png"  >/dev/null
-done
+# Every size is drawn natively (16/32 px are pixel-snapped), never downscaled from 1024.
+"$BUILD/makeicon" "$ICONSET"
 iconutil -c icns "$ICONSET" -o "$APPDIR/Contents/Resources/jack.icns"
 
 echo "==> Install Info.plist"
