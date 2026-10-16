@@ -3,6 +3,15 @@
     <channel>
         <title>Jack</title>
         <item>
+            <title>3.0.0</title>
+            <pubDate>Fri, 16 Oct 2026 12:49:38 -0700</pubDate>
+            <link>https://github.com/jackarkcreator/jack</link>
+            <sparkle:version>64</sparkle:version>
+            <sparkle:shortVersionString>3.0.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>11.0</sparkle:minimumSystemVersion>
+            <enclosure url="https://github.com/jackarkcreator/jack/releases/download/v3.0.0/Jack-mac-universal-v3.0.0.zip" length="3530235" type="application/octet-stream" sparkle:edSignature="z7q7lMcjVTM8fyM5eIv4bnHfub+L27J5KS7ZDqbLZwg9rmURo5ODGgclxpY33682pQ0bI/1NOQYKHiA65TCjCA=="/>
+        </item>
+        <item>
             <title>2.9.15</title>
             <pubDate>Fri, 16 Oct 2026 10:20:12 -0700</pubDate>
             <link>https://github.com/jackarkcreator/jack</link>
@@ -19,15 +28,6 @@
             <sparkle:shortVersionString>2.9.14</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>11.0</sparkle:minimumSystemVersion>
             <enclosure url="https://github.com/jackarkcreator/jack/releases/download/v2.9.14/Jack-mac-universal-v2.9.14.zip" length="3276403" type="application/octet-stream" sparkle:edSignature="/i0wXbgP5WGLRTOXlNsoGXpBA/uxmTWdzLdO9vYSLL8ZrCfS3nGNNH5XGr/wyfoOcR3ZwgIL/4TnCjt5Py8vDQ=="/>
-        </item>
-        <item>
-            <title>2.9.13</title>
-            <pubDate>Sun, 30 Aug 2026 23:20:09 -0700</pubDate>
-            <link>https://github.com/jackarkcreator/jack</link>
-            <sparkle:version>61</sparkle:version>
-            <sparkle:shortVersionString>2.9.13</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>11.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://github.com/jackarkcreator/jack/releases/download/v2.9.13/Jack-mac-universal-v2.9.13.zip" length="3303201" type="application/octet-stream" sparkle:edSignature="yTCK5ffLbc/inZ/SU/FN7U7ar6CPzDejR4yVyPUWjH6Q6tcj/ZBoV2nQf91YNAinndVflXUJfXT9Fh0w0hnlDw=="/>
         </item>
     </channel>
 </rss>
