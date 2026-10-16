@@ -1,10 +1,14 @@
 // The in-app comment marker: a small amber circle with a white speech-bubble glyph,
-// vector-drawn (crisp at any zoom). Carries the note text in `contents`. Exported saves
+// vector-drawn. v3.0.1: drawn by the PAGE (JackPage.draw), not PDFView's 1x annotation layer,
+// which scaled it up and made it look pixelated — same fix as typed text (JackFreeText.swift). Carries the note text in `contents`. Exported saves
 // convert it to a standard PDF note annotation so other readers show their own icon.
 import AppKit
 import PDFKit
 
-final class CommentBadgeAnnotation: PDFAnnotation {
+final class CommentBadgeAnnotation: PDFAnnotation, PageDrawnAnnotation {
+    /// Set while the user drags the badge (the layer copy follows the pointer until mouse-up).
+    var liveDrag = false
+
     init(bounds: CGRect, text: String) {
         super.init(bounds: bounds, forType: .stamp, withProperties: nil)
         contents = text
@@ -14,6 +18,9 @@ final class CommentBadgeAnnotation: PDFAnnotation {
     required init?(coder: NSCoder) { fatalError() }
 
     override func draw(with box: PDFDisplayBox, in ctx: CGContext) {
+        if page is JackPage, !liveDrag, !PageDrawScope.isActive,
+           CGContextKind.isLayerBackingStore(ctx) { return }
+        PageDrawScope.noteDrawn(self)
         let r = bounds.insetBy(dx: 0.5, dy: 0.5)
         ctx.saveGState()
 

@@ -55,7 +55,13 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             window?.orderBack(nil)
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
                 guard let self, let window = self.window else { return }
-                self.setMode(showcase == "markup" ? .markup : showcase == "redact" ? .redact : .read)
+                self.setMode(showcase == "markup" || showcase == "note" ? .markup : showcase == "redact" ? .redact : .read)
+                if showcase == "note", let page = self.pdfView.document?.page(at: 0) {
+                    page.addAnnotation(CommentBadgeAnnotation(bounds: CGRect(x: 120, y: 520, width: 18, height: 18), text: "Showcase"))
+                    self.applyZoomPolicy(.fixed, fixed: 2)
+                    self.pdfView.go(to: PDFDestination(page: page, at: CGPoint(x: 60, y: 600)))
+                    self.forceRefresh()
+                }
                 if showcase != "read", let word = (self.pdfView.document?.page(at: 0)?.string ?? "")
                     .components(separatedBy: .whitespacesAndNewlines).first(where: { $0.count >= 4 }),
                    let sel = self.pdfView.document?.findString(word, withOptions: []).first {
@@ -461,7 +467,25 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
 
     @objc private func scaleChanged() { updateHUD(); layoutFieldAdornment() }
 
+    /// v3.0.1: armed Highlight/Underline/Strike mark a selection once it stops changing AND the
+    /// mouse is up. Driven by selection changes, not mouse-up: macOS 26 PDFKit selects text in
+    /// its own page view, so a drag's mouse-up never reliably reaches SigningPDFView (that's
+    /// why drag-to-highlight did nothing in 3.0.0).
+    private var armedMarkTimer: Timer?
+    private func scheduleArmedMark() {
+        guard mode == .markup, [.highlight, .underline, .strike].contains(markupTool), hasLiveSelection else { return }
+        armedMarkTimer?.invalidate()
+        armedMarkTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [weak self] t in
+            guard let self else { t.invalidate(); return }
+            if NSEvent.pressedMouseButtons & 1 != 0 { return }   // still dragging
+            t.invalidate()
+            self.armedMarkTimer = nil
+            self.applyArmedMarkToSelection()
+        }
+    }
+
     @objc private func selectionChanged() {
+        defer { scheduleArmedMark() }
         if let s = pdfView.currentSelection,
            !(s.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             lastSelection = s
@@ -2825,6 +2849,18 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         }
     }
 
+    func noteMoved(_ ann: PDFAnnotation, from oldBounds: CGRect) {
+        docUndo.registerUndo(withTarget: self) { me in
+            let now = ann.bounds
+            ann.bounds = oldBounds
+            me.noteMoved(ann, from: now)
+            me.forceRefresh()
+        }
+        docUndo.setActionName("Move Note")
+        forceRefresh()   // Tahoe's render cache ghosts moved annotations — repaint at gesture end
+        markDirty()
+    }
+
     func freeTextMoved(_ ann: PDFAnnotation, from oldBounds: CGRect) {
         docUndo.registerUndo(withTarget: self) { me in
             let now = ann.bounds
@@ -4283,6 +4319,11 @@ extension DocumentWindowController {
             if !ok { failures += 1 }
             log += "\(ok ? "ok  " : "FAIL") \(name): \(detail)\n"
         }
+        func key(_ chars: String, _ code: UInt16) -> NSEvent? {
+            NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                             windowNumber: window.windowNumber, context: nil, characters: chars,
+                             charactersIgnoringModifiers: chars, isARepeat: false, keyCode: code)
+        }
         func behaviorChecks() {
             applyZoomPolicy(.actual)
             let a = pdfView.scaleFactor
@@ -4294,16 +4335,69 @@ extension DocumentWindowController {
             check("fit page", pdfView.scaleFactor <= (fitWidthScale() ?? 9) + 0.001, "scale=\(pdfView.scaleFactor)")
             applyZoomPolicy(.automatic)
 
-            func key(_ chars: String, _ code: UInt16) -> NSEvent? {
-                NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
-                                 windowNumber: window.windowNumber, context: nil, characters: chars,
-                                 charactersIgnoringModifiers: chars, isARepeat: false, keyCode: code)
-            }
             setMode(.markup)
             if let h = key("h", 4) { _ = handleToolKey(h) }
             check("key H arms Highlight", markupTool == .highlight && markupTiles[.highlight]?.isArmed == true,
                   "tool=\(markupTool) armed=\(markupTiles[.highlight]?.isArmed ?? false)")
 
+            // The path a user's drag takes: a selection appears while Highlight is armed and the
+            // mouse is up — nothing calls the marking code directly. (A synthetic drag can't make
+            // PDFKit select text in a hidden window; the selection-changed path is what we own.)
+            let selWord = (pdfView.document?.page(at: 0)?.string ?? "")
+                .components(separatedBy: .whitespacesAndNewlines).filter { $0.count >= 5 && $0.allSatisfy(\.isLetter) }.dropFirst().first
+            guard let selWord, let ds = pdfView.document?.findString(selWord, withOptions: []).first else {
+                check("selection while armed gets marked", false, "no word in fixture")
+                return continueArmedChecks()
+            }
+            let selBefore = markCount()
+            pdfView.setCurrentSelection(ds, animate: false)
+            NotificationCenter.default.post(name: .PDFViewSelectionChanged, object: pdfView)   // as PDFKit does after a drag
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                if let tick = NSEvent.otherEvent(with: .applicationDefined, location: .zero, modifierFlags: [], timestamp: 0,
+                                                 windowNumber: window.windowNumber, context: nil, subtype: 0, data1: 0, data2: 0) {
+                    NSApp.postEvent(tick, atStart: false)
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    let got = self.markCount()
+                    check("selection while armed gets marked", got == selBefore + 1 && !self.hasLiveSelection,
+                          "word=\(selWord) marks \(selBefore)->\(got)")
+                    if got > selBefore { self.docUndo.undo() }
+                    badgeChecks()
+                }
+            }
+        }
+        // Comment badge: a real drag through SigningPDFView moves it; undo puts it back.
+        func badgeChecks() {
+            guard let page = pdfView.document?.page(at: 0) else { return continueArmedChecks() }
+            let start = CGRect(x: 100, y: 300, width: 18, height: 18)
+            let badge = CommentBadgeAnnotation(bounds: start, text: "self-test")
+            page.addAnnotation(badge)
+            pdfView.go(to: PDFDestination(page: page, at: CGPoint(x: 0, y: 400)))
+            window.layoutIfNeeded()
+            func wpt(_ pp: CGPoint) -> NSPoint { pdfView.convert(pdfView.convert(pp, from: page), to: nil) }
+            func mev(_ t: NSEvent.EventType, _ pp: CGPoint) -> NSEvent? {
+                NSEvent.mouseEvent(with: t, location: wpt(pp), modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                   windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1,
+                                   pressure: t == .leftMouseUp ? 0 : 1)
+            }
+            let c = CGPoint(x: start.midX, y: start.midY)
+            if let d = mev(.leftMouseDown, c) { pdfView.mouseDown(with: d) }
+            if let m = mev(.leftMouseDragged, CGPoint(x: c.x + 20, y: c.y - 10)) { pdfView.mouseDragged(with: m) }
+            if let m = mev(.leftMouseDragged, CGPoint(x: c.x + 40, y: c.y - 30)) { pdfView.mouseDragged(with: m) }
+            if let u = mev(.leftMouseUp, CGPoint(x: c.x + 40, y: c.y - 30)) { pdfView.mouseUp(with: u) }
+            let moved = badge.bounds
+            let movedOK = abs(moved.minX - (start.minX + 40)) < 1.5 && abs(moved.minY - (start.minY - 30)) < 1.5 && !badge.liveDrag
+            check("drag moves a comment badge", movedOK, "from \(start.origin) to \(moved.origin)")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                self.docUndo.undo()
+                check("undo returns the badge", badge.bounds == start, "now \(badge.bounds.origin)")
+                page.removeAnnotation(badge)
+                self.forceRefresh()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { continueArmedChecks() }
+            }
+        }
+        func continueArmedChecks() {
+            if markupTool != .highlight { armMarkupTool(.highlight) }
             let before = markCount()
             let word = (pdfView.document?.page(at: 0)?.string ?? "")
                 .components(separatedBy: .whitespacesAndNewlines).first { $0.count >= 4 && $0.allSatisfy(\.isLetter) }

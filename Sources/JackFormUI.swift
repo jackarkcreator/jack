@@ -214,8 +214,11 @@ final class JackPage: PDFPage {
         let drawn = PageDrawScope.run { super.draw(with: box, to: context) }
         // Typed text super didn't draw (PDFView's tiles exclude annotations) is drawn HERE, in
         // the resolution-matched page path — see JackFreeText.swift.
-        let pending = annotations.compactMap { $0 as? JackFreeText }
-            .filter { $0.shouldDisplay && !$0.liveDrag && !drawn.contains(ObjectIdentifier($0)) }
+        // Typed text and comment badges both draw here (see PageDrawnAnnotation).
+        let pending = annotations.filter { a in
+            guard let pd = a as? PageDrawnAnnotation else { return false }
+            return a.shouldDisplay && !pd.liveDrag && !drawn.contains(ObjectIdentifier(a))
+        }
         if !pending.isEmpty {
             context.saveGState()
             transform(context, for: box)

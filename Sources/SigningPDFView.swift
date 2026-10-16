@@ -30,6 +30,19 @@ protocol StampSelectionDelegate: AnyObject {
     func regionSwiped(_ rect: CGRect, on page: PDFPage, band: NSView, erase: Bool)
     /// v3 Note tool: a click on the page while Note is armed.
     func noteRequested(at point: CGPoint, on page: PDFPage)
+    /// v3.0.1: a comment badge was dragged to a new spot.
+    func noteMoved(_ ann: PDFAnnotation, from oldBounds: CGRect)
+}
+
+/// Env-gated flight recorder (JACK_EVENTLOG=1 → /tmp/jack-events.log) for event-path probes.
+enum EventLog {
+    static let on = ProcessInfo.processInfo.environment["JACK_EVENTLOG"] != nil
+    static func note(_ s: String) {
+        guard on else { return }
+        let line = "\(String(format: "%.3f", ProcessInfo.processInfo.systemUptime)) \(s)\n"
+        if let h = FileHandle(forWritingAtPath: "/tmp/jack-events.log") { h.seekToEndOfFile(); h.write(line.data(using: .utf8)!); h.closeFile() }
+        else { try? line.write(toFile: "/tmp/jack-events.log", atomically: true, encoding: .utf8) }
+    }
 }
 
 final class SigningPDFView: PDFView {
@@ -114,6 +127,11 @@ final class SigningPDFView: PDFView {
     private var dragStartBounds: CGRect = .zero
     // Typewriter text drag (FreeText is a plain PDFAnnotation, not our stamp subclass).
     private var draggingFree: PDFAnnotation?
+    // Comment badge: press = select; drag past 3 pt = move; release without moving = open.
+    private var draggingNote: CommentBadgeAnnotation?
+    private var noteStartBounds: CGRect = .zero
+    private var noteDragTotal: CGPoint = .zero
+    private var noteDidMove = false
     private var freeStartBounds: CGRect = .zero
     // Redact rubber band: a plain view-space overlay (PDFView's page cache can't be trusted
     // to repaint annotation mutations live — see forceRefresh in DocumentWindowController).
@@ -124,6 +142,8 @@ final class SigningPDFView: PDFView {
     private var bandIsRegion = false            // set when the rubber band feeds regionAction
 
     override func mouseDown(with event: NSEvent) {
+        EventLog.note("SigningPDFView.mouseDown")
+        defer { EventLog.note("SigningPDFView.mouseDown returned (buttons=\(NSEvent.pressedMouseButtons))") }
         let viewPoint = convert(event.locationInWindow, from: nil)
         guard let page = page(for: viewPoint, nearest: true) else { super.mouseDown(with: event); return }
         let p = convert(viewPoint, to: page)
@@ -219,8 +239,11 @@ final class SigningPDFView: PDFView {
         // Only the comment badge opens the note; the linked highlight stays plain text.
         if let note = page.annotations.last(where: {
             $0 is CommentBadgeAnnotation && $0.bounds.insetBy(dx: -4, dy: -4).contains(p)
-        }) {
-            stampDelegate?.noteClicked(note)
+        }) as? CommentBadgeAnnotation {
+            draggingNote = note; dragPage = page; last = p
+            noteStartBounds = note.bounds
+            noteDragTotal = .zero
+            noteDidMove = false
             return
         }
         if let ann = page.annotations.compactMap({ $0 as? ImageStampAnnotation }).last(where: { $0.bounds.contains(p) }) {
@@ -270,6 +293,7 @@ final class SigningPDFView: PDFView {
     }
 
     override func mouseDragged(with event: NSEvent) {
+        EventLog.note("SigningPDFView.mouseDragged")
         if let band = rubberBand {
             let p = convert(event.locationInWindow, from: nil)
             band.frame = CGRect(x: min(markOriginView.x, p.x), y: min(markOriginView.y, p.y),
@@ -324,6 +348,19 @@ final class SigningPDFView: PDFView {
             stampDelegate?.fieldBoundsChanging()
             return
         }
+        if let note = draggingNote, let page = dragPage {
+            let p = convert(convert(event.locationInWindow, from: nil), to: page)
+            noteDragTotal.x += p.x - last.x
+            noteDragTotal.y += p.y - last.y
+            last = p
+            // A click with a little hand jitter still opens the note; past 3 pt it's a move.
+            if !noteDidMove, hypot(noteDragTotal.x, noteDragTotal.y) < 3 { return }
+            noteDidMove = true
+            note.liveDrag = true
+            note.bounds = noteStartBounds.offsetBy(dx: noteDragTotal.x, dy: noteDragTotal.y)
+            needsDisplay = true
+            return
+        }
         if let free = draggingFree, let page = dragPage {
             let p = convert(convert(event.locationInWindow, from: nil), to: page)
             // The page tiles can't follow a live drag — hand the text to PDFView's layer
@@ -345,6 +382,17 @@ final class SigningPDFView: PDFView {
     }
 
     override func mouseUp(with event: NSEvent) {
+        EventLog.note("SigningPDFView.mouseUp")
+        if let note = draggingNote {
+            note.liveDrag = false
+            draggingNote = nil; dragPage = nil
+            if noteDidMove, note.bounds != noteStartBounds {
+                stampDelegate?.noteMoved(note, from: noteStartBounds)
+            } else {
+                stampDelegate?.noteClicked(note)
+            }
+            return
+        }
         if let band = rubberBand {
             let viewRect = band.frame
             // Instant erase/redact keep their band on screen: the controller applies the

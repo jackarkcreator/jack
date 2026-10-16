@@ -25,7 +25,13 @@
 import AppKit
 import PDFKit
 
-final class JackFreeText: PDFAnnotation {
+/// Annotations that draw through JackPage.draw (crisp) instead of PDFView's 1x annotation
+/// layer. While `liveDrag` is set the layer shows them so they can follow the pointer.
+protocol PageDrawnAnnotation: AnyObject {
+    var liveDrag: Bool { get }
+}
+
+final class JackFreeText: PDFAnnotation, PageDrawnAnnotation {
     /// While the user drags the text, the tiles can't follow it live — let PDFView's layer
     /// show it (as before this fix) and have the page skip it. Cleared at mouse-up, which
     /// then forces a repaint.
