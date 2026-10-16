@@ -55,7 +55,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             window?.orderBack(nil)
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
                 guard let self, let window = self.window else { return }
-                self.setMode(["markup", "note", "stamp", "stampdrag"].contains(showcase) ? .markup : showcase == "redact" ? .redact : .read)
+                self.setMode(["markup", "note", "stamp", "stampdrag", "markundo"].contains(showcase) ? .markup : showcase == "redact" ? .redact : .read)
                 if ["note", "stamp", "stampdrag"].contains(showcase), let page = self.pdfView.document?.page(at: 0) {
                     page.addAnnotation(CommentBadgeAnnotation(bounds: CGRect(x: 120, y: 520, width: 18, height: 18), text: "Showcase"))
                     // "stamp": a typed-style signature beside the badge, built like the Sign sheet's.
@@ -94,6 +94,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
                                                      timestamp: 0, windowNumber: window.windowNumber, context: nil,
                                                      subtype: 0, data1: 0, data2: 0) { NSApp.postEvent(tick, atStart: false) }
                     if showcase == "redact" { self.setMode(.redact) }
+                    if showcase == "markundo" {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self.docUndo.undo() }
+                    }
                 }
                 try? "\(window.windowNumber)".write(toFile: "/tmp/jack-showcase.id", atomically: true, encoding: .utf8)
                 DispatchQueue.main.asyncAfter(deadline: .now() + 8) { exit(0) }
@@ -3369,7 +3372,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         lastSelection = nil
         registerAnnotationRemovalUndo(added, name: name)
         markEdited()
-        forceRefresh()
+        repaintMarks(added)
     }
 
     // Context-menu items for a right-click in the page (built fresh each time).
@@ -3604,7 +3607,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         docUndo.registerUndo(withTarget: self) { me in
             items.forEach { $0.0.removeAnnotation($0.1) }
             me.registerAnnotationAddUndo(items, name: name)
-            me.markEdited(); me.forceRefresh()
+            me.markEdited(); me.repaintMarks(items)
         }
         docUndo.setActionName(name)
     }
@@ -3612,9 +3615,23 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         docUndo.registerUndo(withTarget: self) { me in
             items.forEach { $0.0.addAnnotation($0.1) }
             me.registerAnnotationRemovalUndo(items, name: name)
-            me.markEdited(); me.forceRefresh()
+            me.markEdited(); me.repaintMarks(items)
         }
         docUndo.setActionName(name)
+    }
+
+    /// v3.0.2: standard marks (highlight / underline / strike) repaint IN PLACE — PDFKit's
+    /// targeted per-page update, no document reload, no cover, no flash. Real-window captures
+    /// on macOS 26 showed the full reload was never needed for these. Page-drawn annotations
+    /// (comment badges, typed text, stamps) live in the page tiles, so they still need the
+    /// full repaint (forceRefresh) after an add or remove.
+    private func repaintMarks(_ items: [(PDFPage, PDFAnnotation)]) {
+        if items.contains(where: { $0.1 is PageDrawnAnnotation }) { forceRefresh(); return }
+        var seen = Set<ObjectIdentifier>()
+        for (page, _) in items where seen.insert(ObjectIdentifier(page)).inserted {
+            pdfView.annotationsChanged(on: page)
+        }
+        pdfView.needsDisplay = true
     }
 
     // MARK: - Snapshot & Crop
@@ -4477,7 +4494,76 @@ extension DocumentWindowController {
                 self.didSelect(nil)
                 page.removeAnnotation(stamp)
                 self.forceRefresh()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { continueArmedChecks() }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { swatchClickProbe { continueArmedChecks() } }
+            }
+        }
+        func swatchClickProbe(_ then: @escaping () -> Void) {
+            armMarkupTool(.highlight)
+            guard let pink = highlightSwatches.first(where: { $0.tag == 3 }) else { return then() }
+            let c = pink.convert(NSPoint(x: pink.bounds.midX, y: pink.bounds.midY), to: nil)
+            func mev(_ t: NSEvent.EventType) -> NSEvent? {
+                NSEvent.mouseEvent(with: t, location: c, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                   windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1,
+                                   pressure: t == .leftMouseUp ? 0 : 1)
+            }
+            let hitView = window.contentView?.hitTest(window.contentView!.convert(c, from: nil))
+            let before = UserDefaults.standard.integer(forKey: "jack.highlightColor")
+            if let up = mev(.leftMouseUp) { NSApp.postEvent(up, atStart: false) }
+            if let down = mev(.leftMouseDown) { window.sendEvent(down) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                let after = UserDefaults.standard.integer(forKey: "jack.highlightColor")
+                check("click on Pink swatch selects it", after == 3 && pink.isChosen,
+                      "defaults \(before)->\(after) chosen=\(pink.isChosen) hidden=\(pink.isHidden) frame=\(pink.frame) hit=\(hitView.map { String(describing: type(of: $0)) } ?? "nil")")
+                // Luis's scenario: Pink on word A, then Green on word B — A stays pink.
+                func clickSwatch(_ tag: Int) {
+                    guard let sw = self.highlightSwatches.first(where: { $0.tag == tag }) else { return }
+                    let p = sw.convert(NSPoint(x: sw.bounds.midX, y: sw.bounds.midY), to: nil)
+                    for t in [NSEvent.EventType.leftMouseUp] {
+                        if let e = NSEvent.mouseEvent(with: t, location: p, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                                      windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 0) {
+                            NSApp.postEvent(e, atStart: false)
+                        }
+                    }
+                    if let d = NSEvent.mouseEvent(with: .leftMouseDown, location: p, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                                  windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1) {
+                        window.sendEvent(d)
+                    }
+                }
+                func select(_ nth: Int) -> PDFAnnotation.Type? {
+                    let words = (self.pdfView.document?.page(at: 0)?.string ?? "")
+                        .components(separatedBy: .whitespacesAndNewlines).filter { $0.count >= 5 && $0.allSatisfy(\.isLetter) }
+                    guard words.count > nth, let sel = self.pdfView.document?.findString(words[nth], withOptions: []).first else { return nil }
+                    self.pdfView.setCurrentSelection(sel, animate: false)
+                    NotificationCenter.default.post(name: .PDFViewSelectionChanged, object: self.pdfView)
+                    return PDFAnnotation.self
+                }
+                func lastHighlights() -> [PDFAnnotation] {
+                    (self.pdfView.document?.page(at: 0)?.annotations ?? []).filter { $0.type == "Highlight" }
+                }
+                func same(_ a: NSColor, _ b: NSColor) -> Bool {
+                    guard let x = a.usingColorSpace(.sRGB), let y = b.usingColorSpace(.sRGB) else { return false }
+                    return abs(x.redComponent - y.redComponent) < 0.02 && abs(x.greenComponent - y.greenComponent) < 0.02
+                        && abs(x.blueComponent - y.blueComponent) < 0.02
+                }
+                let baseCount = lastHighlights().count
+                _ = select(2)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    clickSwatch(1)   // Green
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                        _ = select(4)
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                            let hs = lastHighlights()
+                            let pink = Self.highlightColors[3].color, green = Self.highlightColors[1].color
+                            let ok = hs.count == baseCount + 2 && hs.count >= 2
+                                && same(hs[hs.count - 2].color, pink) && same(hs[hs.count - 1].color, green)
+                            check("new color for new marks, old marks keep theirs", ok,
+                                  "highlights=\(hs.count - baseCount) colors=\(hs.suffix(2).map { $0.color.usingColorSpace(.sRGB).map { String(format: "%.2f,%.2f,%.2f", $0.redComponent, $0.greenComponent, $0.blueComponent) } ?? "?" })")
+                            self.docUndo.undo(); self.docUndo.undo()
+                            UserDefaults.standard.set(before, forKey: "jack.highlightColor")
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { then() }
+                        }
+                    }
+                }
             }
         }
         func continueArmedChecks() {

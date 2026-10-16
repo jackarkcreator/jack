@@ -380,9 +380,15 @@ final class HStackRow: NSView {
             v.frame = NSRect(x: x, y: ((bounds.height - size.height) / 2).rounded(), width: size.width, height: size.height)
             x += size.width
         }
-        contentWidth = x
+        if contentWidth != x { contentWidth = x; invalidateIntrinsicContentSize() }
     }
     private(set) var contentWidth: CGFloat = 0
+    /// 🧨 v3.0.2: without this a row nested in another row got a 0×0 frame, so its controls
+    /// drew outside it and every click fell through (the Options swatches and font pickers).
+    override var intrinsicContentSize: NSSize {
+        let h = arranged.filter { !$0.isHidden }.map { max($0.frame.height, $0.intrinsicContentSize.height) }.max() ?? 0
+        return NSSize(width: contentWidth, height: max(h, Chrome.groupHeight))
+    }
     override func resizeSubviews(withOldSize oldSize: NSSize) { super.resizeSubviews(withOldSize: oldSize); relayout() }
 }
 
