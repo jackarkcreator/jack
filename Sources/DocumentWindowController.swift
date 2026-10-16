@@ -4351,11 +4351,13 @@ extension DocumentWindowController {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
                 let frameMoved = self.pdfView.frame != f0
                 let scaled = abs(self.pdfView.scaleFactor - s0) > 0.0001
-                let scrolled = clipOrigin() != c0
+                let c1 = clipOrigin()
+                let scrolled = c1 != c0
+                if scrolled { EventLog.note("scroll during \(name): \(c0) -> \(c1) pressedButtons=\(NSEvent.pressedMouseButtons)") }
                 let reloads = docReloads - d0
                 let bad = removed > 0 || added > 0 || frameMoved || scaled || scrolled || reloads > 0
                 if bad { failures += 1 }
-                log += "\(bad ? "FAIL" : "ok  ") \(name): rowViewsRemoved=\(removed) rowViewsAdded=\(added) rowAnimations=\(anims) pageFrameMoved=\(frameMoved) scaleChanged=\(scaled) scrolled=\(scrolled) docReloads=\(reloads)\n"
+                log += "\(bad ? "FAIL" : "ok  ") \(name): rowViewsRemoved=\(removed) rowViewsAdded=\(added) rowAnimations=\(anims) pageFrameMoved=\(frameMoved) scaleChanged=\(scaled) scrolled=\(scrolled)\(scrolled ? " (\(c0.y)->\(c1.y))" : "") docReloads=\(reloads)\n"
                 next()
             }
         }
