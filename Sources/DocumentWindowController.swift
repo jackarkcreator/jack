@@ -43,11 +43,21 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     // NSDocument's display:true does not reliably order our hand-built window onscreen
     // (window-server showed it existing with onscreen=false) — show it ourselves, always.
     func presentWindow() {
+        // Self-test (JACK_MODE_SELFTEST=1): runs in an invisible window, never takes focus.
+        if ProcessInfo.processInfo.environment["JACK_MODE_SELFTEST"] != nil {
+            guard !modeSelfTestStarted else { return }
+            modeSelfTestStarted = true
+            window?.alphaValue = 0
+            window?.orderFrontRegardless()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in self?.runModeSelfTest() }
+            return
+        }
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 
     private let sidebar = PageSidebarController()
+    private var modeSelfTestStarted = false
     private var searchField: NSSearchField?
     private weak var saveButton: NSButton?
     // Typewriter: click the page, type, Return — a native FreeText annotation that stays
@@ -81,6 +91,8 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     private(set) var mode: Mode = .read
     private var modeSegment: NSSegmentedControl?
     private let modeRow = ToolStripView(frame: NSRect(x: 0, y: 0, width: 1180, height: 42))
+    private var modeRows: [Mode: ToolStripView] = [:]   // one persistent row per mode
+    private lazy var buildRow: ToolStripView = modeRow     // the row the build*Row helpers fill
     private var redactUsesErase = false      // Erase is a submode of Redact (white vs black paint)
     private var blackoutChip: NSButton?
     private var eraseChip: NSButton?
@@ -957,18 +969,43 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     @objc private func pickBlackout() { redactUsesErase = false; applyRedactStyle() }
     @objc private func pickErase()    { redactUsesErase = true;  applyRedactStyle() }
 
-    /// One row, fixed height, always present — only its content changes (the mock's law).
+    /// One row, fixed height, always present. Every mode's controls are built ONCE, when the
+    /// window is built (so even the first switch shows ready-made controls), and switching
+    /// modes only shows/hides those rows.
+    ///
+    /// 🧨 This used to tear every control down and build new ones on each switch (10–34 views
+    /// per switch, measured by the mode self-test). On Tahoe the fresh controls visibly re-drew
+    /// in place, so every Read/Markup/Redact click looked like the strip refreshing. Never
+    /// rebuild here: update the existing controls' state instead (see the re-sync below).
     private func populateModeRow() {
-        modeRow.subviews.forEach { $0.removeFromSuperview() }
-        modeRow.resetAnchors()
-        pagePopup = nil
-        blackoutChip = nil; eraseChip = nil
-        markupHint = nil
+        for m in modeChoices where modeRows[m] == nil {
+            let row = ToolStripView(frame: modeRow.bounds)
+            row.autoresizingMask = [.width, .height]
+            row.isHidden = true
+            modeRow.addSubview(row)
+            modeRows[m] = row
+            buildRow = row
+            switch m {
+            case .read:   buildReadRow()
+            case .markup: buildMarkupRow()
+            case .redact: buildRedactRow()
+            case .forms:  buildFormRow()
+            }
+        }
+        for (m, row) in modeRows { row.isHidden = m != mode }
+        // State the old rebuild refreshed as a side effect, now synced explicitly.
         switch mode {
-        case .read:   buildReadRow()
-        case .markup: buildMarkupRow()
-        case .redact: buildRedactRow()
-        case .forms:  buildFormRow()
+        case .read:
+            if let doc = pdfView.document, let page = pdfView.currentPage {
+                syncPagePopup(index: doc.index(for: page), count: doc.pageCount)
+            }
+        case .markup:
+            typewriterButton?.state = pdfView.typewriterMode ? .on : .off
+            syncStampControls()
+        case .redact:
+            applyRedactStyle()
+        case .forms:
+            break
         }
     }
 
@@ -977,7 +1014,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         l.font = .systemFont(ofSize: 10, weight: .semibold)
         l.textColor = .tertiaryLabelColor
         l.frame = NSRect(x: 14, y: 15, width: 56, height: 14)
-        modeRow.addSubview(l)
+        buildRow.addSubview(l)
     }
 
     @discardableResult
@@ -987,8 +1024,8 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         hint.font = .systemFont(ofSize: 11)
         hint.alignment = .right
         hint.frame = NSRect(x: 0, y: 13, width: min(640, hint.intrinsicContentSize.width + 8), height: 16)
-        modeRow.addSubview(hint)
-        modeRow.anchorRight(hint, gap: 16, yields: true)
+        buildRow.addSubview(hint)
+        buildRow.anchorRight(hint, gap: 16, yields: true)
         return hint
     }
 
@@ -1053,14 +1090,14 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             trackingMode: .momentary, target: self, action: #selector(zoomSegment(_:)))
         zoom.controlSize = .small
         zoom.frame = NSRect(x: 74, y: 8, width: 84, height: 26)
-        modeRow.addSubview(zoom)
+        buildRow.addSubview(zoom)
 
         let pp = NSPopUpButton(frame: NSRect(x: 166, y: 8, width: 108, height: 26), pullsDown: false)
         pp.controlSize = .small
         pp.font = .systemFont(ofSize: 11)
         pp.target = self; pp.action = #selector(pagePicked(_:))
         pagePopup = pp
-        modeRow.addSubview(pp)
+        buildRow.addSubview(pp)
         if let doc = pdfView.document, let page = pdfView.currentPage {
             syncPagePopup(index: doc.index(for: page), count: doc.pageCount)
         }
@@ -1091,7 +1128,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         t("Clean for Sharing…", #selector(cleanForSharing(_:)))
         t("Lock for Sharing…", #selector(lockForSharing(_:)))
         tools.menu = menu
-        modeRow.addSubview(tools)
+        buildRow.addSubview(tools)
 
         rowHint("Tools holds: Make Searchable · Bates · Watermark · Compress · Crop · Clean · Lock")
     }
@@ -1120,7 +1157,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         btn.bezelStyle = .rounded
         btn.controlSize = .small
         btn.frame = NSRect(x: x, y: 8, width: w, height: 26)
-        modeRow.addSubview(btn)
+        buildRow.addSubview(btn)
         return btn
     }
 
@@ -1140,7 +1177,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         si("Place Check ✓", #selector(addCheck))
         si("Place Cross ✘", #selector(addCross))
         sign.menu = sm
-        modeRow.addSubview(sign)
+        buildRow.addSubview(sign)
 
         let tw = NSButton(title: "Aa Typewriter", target: self, action: #selector(toggleTypewriter))
         tw.setButtonType(.pushOnPushOff)
@@ -1148,7 +1185,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         tw.controlSize = .small
         tw.state = pdfView.typewriterMode ? .on : .off
         tw.frame = NSRect(x: 182, y: 8, width: 106, height: 26)
-        modeRow.addSubview(tw)
+        buildRow.addSubview(tw)
         typewriterButton = tw
 
         // Font + Size are PERMANENT row controls (they used to pop in over the color dots):
@@ -1164,7 +1201,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         fontPopup.controlSize = .small
         fontPopup.font = .systemFont(ofSize: 11)
         fontPopup.target = self; fontPopup.action = #selector(textStylePicked(_:))
-        modeRow.addSubview(fontPopup)
+        buildRow.addSubview(fontPopup)
 
         if typewriterSizePopup.numberOfItems == 0 {
             typewriterSizePopup.addItems(withTitles: ["8", "9", "10", "11", "12", "14", "18", "24", "36", "48"])
@@ -1176,7 +1213,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         typewriterSizePopup.controlSize = .small
         typewriterSizePopup.font = .systemFont(ofSize: 11)
         typewriterSizePopup.target = self; typewriterSizePopup.action = #selector(textStylePicked(_:))
-        modeRow.addSubview(typewriterSizePopup)
+        buildRow.addSubview(typewriterSizePopup)
 
         var x: CGFloat = 492
         for (i, entry) in Self.highlightColors.enumerated() {
@@ -1185,7 +1222,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             dot.tag = i
             dot.toolTip = "Highlight \(entry.name)"
             dot.frame = NSRect(x: x, y: 12, width: 18, height: 18)
-            modeRow.addSubview(dot)
+            buildRow.addSubview(dot)
             x += 22
         }
         x += 8
@@ -1207,21 +1244,21 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         stampSizeLabel.font = .systemFont(ofSize: 11)
         stampSizeLabel.textColor = .secondaryLabelColor
         stampSizeLabel.frame = NSRect(x: 0, y: 13, width: 30, height: 16)
-        modeRow.addSubview(stampSizeLabel)
+        buildRow.addSubview(stampSizeLabel)
         sizeSlider.controlSize = .small
         sizeSlider.minValue = 14; sizeSlider.maxValue = 600
         sizeSlider.target = self; sizeSlider.action = #selector(resizeSelected)
         sizeSlider.frame = NSRect(x: 0, y: 10, width: 120, height: 22)
-        modeRow.addSubview(sizeSlider)
+        buildRow.addSubview(sizeSlider)
         removeButton.title = "Remove"
         removeButton.bezelStyle = .rounded
         removeButton.controlSize = .small
         removeButton.target = self; removeButton.action = #selector(removeSelected)
         removeButton.frame = NSRect(x: 0, y: 8, width: 76, height: 26)
-        modeRow.addSubview(removeButton)
-        modeRow.anchorRight(removeButton, gap: 16)
-        modeRow.anchorRight(sizeSlider, gap: 100)
-        modeRow.anchorRight(stampSizeLabel, gap: 226)
+        buildRow.addSubview(removeButton)
+        buildRow.anchorRight(removeButton, gap: 16)
+        buildRow.anchorRight(sizeSlider, gap: 100)
+        buildRow.anchorRight(stampSizeLabel, gap: 226)
         markupHint = rowHint("drop an image to place it")
         syncStampControls()
     }
@@ -1237,7 +1274,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         sizeSlider.isHidden = !has;   sizeSlider.isEnabled = has
         removeButton.isHidden = !has; removeButton.isEnabled = has
         stampSizeLabel.isHidden = !has
-        if let hint = markupHint { modeRow.setYieldHidden(hint, has) }
+        if let hint = markupHint { (hint.superview as? ToolStripView)?.setYieldHidden(hint, has) }
     }
 
     private func buildRedactRow() {
@@ -1251,7 +1288,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         redactTermField.frame = NSRect(x: 234, y: 9, width: 220, height: 24)
         redactTermField.target = self
         redactTermField.action = #selector(redactAllMatches)
-        modeRow.addSubview(redactTermField)
+        buildRow.addSubview(redactTermField)
         applyRedactStyle()
         rowHint("swipe applies instantly · certificate at save · ⌘Z undoes")
     }
@@ -1270,7 +1307,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             btn.tag = i
             let w = btn.intrinsicContentSize.width + 14
             btn.frame = NSRect(x: x, y: 8, width: w, height: 26)
-            modeRow.addSubview(btn)
+            buildRow.addSubview(btn)
             formPaletteButtons.append(btn)
             x += w + 6
         }
@@ -3873,5 +3910,79 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         guard !matches.isEmpty else { return }
         matchIndex = (matchIndex - 1 + matches.count) % matches.count
         showMatch()
+    }
+}
+
+// MARK: - Mode-switch self-test
+//
+// Switching modes or tools must never rebuild the tool row or disturb the page: no views torn
+// down and re-created, no PDFView frame/scale/scroll change, no document reload. Run with
+// JACK_MODE_SELFTEST=1 Jack.app/Contents/MacOS/Jack <file.pdf>; results land in
+// /tmp/jack-mode-selftest.log and the app exits.
+extension DocumentWindowController {
+    func runModeSelfTest() {
+        guard let window else { return }
+        func views(_ v: NSView) -> [NSView] { [v] + v.subviews.flatMap(views) }
+        func layerAnims(_ l: CALayer?) -> Int {
+            guard let l else { return 0 }
+            return (l.animationKeys()?.count ?? 0) + (l.sublayers ?? []).reduce(0) { $0 + layerAnims($1) }
+        }
+        func clipOrigin() -> CGPoint {
+            pdfView.subviews.compactMap { ($0 as? NSScrollView)?.contentView.bounds.origin }.first ?? .zero
+        }
+        var docReloads = 0
+        let token = NotificationCenter.default.addObserver(forName: .PDFViewDocumentChanged, object: pdfView,
+                                                           queue: nil) { _ in docReloads += 1 }
+        let steps: [(String, () -> Void)] = [
+            ("mode markup", { self.setMode(.markup) }),
+            ("tool typewriter on", { self.toggleTypewriter() }),
+            ("tool typewriter off", { self.toggleTypewriter() }),
+            ("mode redact", { self.setMode(.redact) }),
+            ("tool erase", { self.pickErase() }),
+            ("tool blackout", { self.pickBlackout() }),
+            ("mode read", { self.setMode(.read) }),
+            ("mode markup again", { self.setMode(.markup) }),
+            ("mode redact again", { self.setMode(.redact) }),
+            ("mode read again", { self.setMode(.read) })
+        ]
+        var log = "jack mode self-test · \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] ?? "?") · \(Date())\n"
+        var failures = 0
+        var i = 0
+        func next() {
+            guard i < steps.count else {
+                NotificationCenter.default.removeObserver(token)
+                log += failures == 0 ? "PASS\n" : "FAIL (\(failures) step(s))\n"
+                try? log.write(toFile: "/tmp/jack-mode-selftest.log", atomically: true, encoding: .utf8)
+                exit(failures == 0 ? 0 : 1)
+            }
+            let (name, act) = steps[i]; i += 1
+            let before = Set(views(modeRow).map(ObjectIdentifier.init))
+            let f0 = pdfView.frame, s0 = pdfView.scaleFactor, c0 = clipOrigin(), d0 = docReloads
+            act()
+            window.layoutIfNeeded()
+            window.displayIfNeeded()
+            let after = Set(views(modeRow).map(ObjectIdentifier.init))
+            let removed = before.subtracting(after).count, added = after.subtracting(before).count
+            let anims = layerAnims(modeRow.layer)
+            // Optional: JACK_MODE_SELFTEST_SNAP=<dir> writes the tool row as PNG per step.
+            if let dir = ProcessInfo.processInfo.environment["JACK_MODE_SELFTEST_SNAP"],
+               let rep = modeRow.bitmapImageRepForCachingDisplay(in: modeRow.bounds) {
+                modeRow.cacheDisplay(in: modeRow.bounds, to: rep)
+                let file = "\(dir)/\(String(format: "%02d", i))-\(name.replacingOccurrences(of: " ", with: "-")).png"
+                try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: file))
+            }
+            // Judge the page after PDFKit has had time for any queued relayout.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                let frameMoved = self.pdfView.frame != f0
+                let scaled = abs(self.pdfView.scaleFactor - s0) > 0.0001
+                let scrolled = clipOrigin() != c0
+                let reloads = docReloads - d0
+                let bad = removed > 0 || added > 0 || frameMoved || scaled || scrolled || reloads > 0
+                if bad { failures += 1 }
+                log += "\(bad ? "FAIL" : "ok  ") \(name): rowViewsRemoved=\(removed) rowViewsAdded=\(added) rowAnimations=\(anims) pageFrameMoved=\(frameMoved) scaleChanged=\(scaled) scrolled=\(scrolled) docReloads=\(reloads)\n"
+                next()
+            }
+        }
+        next()
     }
 }
