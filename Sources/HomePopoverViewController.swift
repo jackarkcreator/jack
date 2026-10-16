@@ -1,6 +1,80 @@
-// The menu bar popover: Jack's compact launcher — a 2×3 action grid, recents, and status.
-// v2.8 ratified mock: half the old height, drop-target hint up top, same six actions.
+// The menu bar popover: Jack's compact launcher — a 2×3 action grid and settings.
+// v3 (ratified mock): app header, a real drop zone, tinted tiles, switches (no ★ checkbox).
 import AppKit
+
+/// One launcher action: a tinted icon square + label on a quiet rounded tile.
+final class LauncherTile: NSButton {
+    private var hovering = false
+    private let label: String
+    private let symbolImage: NSImage?
+
+    init(symbol: String, label: String, target: AnyObject?, action: Selector?) {
+        self.label = label
+        self.symbolImage = Chrome.symbol([symbol], label, .init(pointSize: 15, weight: .medium))
+        super.init(frame: .zero)
+        title = label
+        isBordered = false
+        setButtonType(.momentaryChange)
+        self.target = target
+        self.action = action
+        setAccessibilityLabel(label)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
+                                       owner: self, userInfo: nil))
+    }
+    override func mouseEntered(with event: NSEvent) { hovering = true; needsDisplay = true }
+    override func mouseExited(with event: NSEvent) { hovering = false; needsDisplay = true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            let tile = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 12, yRadius: 12)
+            (isHighlighted ? Chrome.pressFill : (hovering ? Chrome.hoverFill : Chrome.groupFill)).setFill()
+            tile.fill()
+            Chrome.groupStroke.setStroke(); tile.lineWidth = 0.5; tile.stroke()
+            let sq = NSRect(x: 12, y: (bounds.height - 30) / 2, width: 30, height: 30)
+            Chrome.tintSoft.setFill()
+            NSBezierPath(roundedRect: sq, xRadius: 9, yRadius: 9).fill()
+            if let img = symbolImage {
+                let s = img.size
+                tinted(img, Chrome.tint).draw(in: NSRect(x: sq.midX - s.width / 2, y: sq.midY - s.height / 2,
+                                                         width: s.width, height: s.height))
+            }
+            let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 12.5, weight: .semibold),
+                                                        .foregroundColor: NSColor.labelColor]
+            let ts = (label as NSString).size(withAttributes: attrs)
+            (label as NSString).draw(at: NSPoint(x: sq.maxX + 10, y: (bounds.height - ts.height) / 2), withAttributes: attrs)
+        }
+    }
+}
+
+/// The dashed "drop here" zone at the top of the launcher.
+final class DropZoneHint: NSView {
+    override func draw(_ dirtyRect: NSRect) {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            let p = NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 12, yRadius: 12)
+            p.setLineDash([5, 4], count: 2, phase: 0)
+            p.lineWidth = 1.5
+            NSColor.tertiaryLabelColor.setStroke()
+            p.stroke()
+            let text = "Drop PDFs, photos or a folder"
+            let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.secondaryLabelColor]
+            let ts = (text as NSString).size(withAttributes: attrs)
+            let icon = Chrome.symbol(["tray.and.arrow.down"], "Drop", .init(pointSize: 13, weight: .regular))
+            let iw = (icon?.size.width ?? 0) + 8
+            let x0 = (bounds.width - ts.width - iw) / 2
+            if let icon {
+                tinted(icon, .secondaryLabelColor).draw(in: NSRect(x: x0, y: (bounds.height - icon.size.height) / 2,
+                                                                   width: icon.size.width, height: icon.size.height))
+            }
+            (text as NSString).draw(at: NSPoint(x: x0 + iw, y: (bounds.height - ts.height) / 2), withAttributes: attrs)
+        }
+    }
+}
 
 /// The popover's root: the ENTIRE surface accepts file drops (the header promises
 /// "drop anywhere" — as of v2.9.5 it's true). While a drag hovers, a big accent drop
@@ -53,26 +127,39 @@ final class HomePopoverViewController: NSViewController {
     var onToggleShelf: ((Bool) -> Void)?
     var loginEnabled = false { didSet { loginCheck?.state = loginEnabled ? .on : .off } }
     var shelfEnabled = true { didSet { shelfCheck?.state = shelfEnabled ? .on : .off } }
-    private var shelfCheck: NSButton?
+    private var shelfCheck: NSSwitch?
     var defaultEnabled = false {
         didSet {
             defaultCheck?.state = defaultEnabled ? .on : .off
-            defaultCheck?.title = defaultEnabled ? "Jack is your default PDF app" : "★ Make Jack my default PDF app"
         }
     }
-    private var defaultCheck: NSButton?
-    private var loginCheck: NSButton?
-    private let updateButton = NSButton(title: "↓ Update", target: nil, action: nil)
+    private var defaultCheck: NSSwitch?
+    private var loginCheck: NSSwitch?
+
+    /// The launcher's header glyph: a Jack-teal squircle with a page.
+    static func appGlyph() -> NSImage {
+        NSImage(size: NSSize(width: 28, height: 28), flipped: false) { r in
+            let g = NSGradient(starting: NSColor(srgbRed: 0.08, green: 0.72, blue: 0.65, alpha: 1),
+                               ending: NSColor(srgbRed: 0.055, green: 0.43, blue: 0.43, alpha: 1))
+            g?.draw(in: NSBezierPath(roundedRect: r, xRadius: 7, yRadius: 7), angle: -70)
+            if let doc = Chrome.symbol(["doc.text"], "Jack", .init(pointSize: 14, weight: .semibold)) {
+                let s = doc.size
+                tinted(doc, .white).draw(in: NSRect(x: r.midX - s.width / 2, y: r.midY - s.height / 2, width: s.width, height: s.height))
+            }
+            return true
+        }
+    }
+    private let updateButton = NSButton(title: "Update", target: nil, action: nil)
     private var updateURL: URL?
 
     func showUpdate(version: String, url: URL) {
         updateURL = url
-        updateButton.title = "↓ Update to \(version)"
+        updateButton.title = "Update to \(version)"
         updateButton.isHidden = false
     }
 
     private static let width: CGFloat = 312
-    private static let height: CGFloat = 376
+    private static let height: CGFloat = 452
 
     private let dropOverlay = NSVisualEffectView()
 
@@ -81,76 +168,82 @@ final class HomePopoverViewController: NSViewController {
         v.onDrop = { [weak self] urls in self?.onFilesDropped?(urls) }
         v.onDragState = { [weak self] active in self?.dropOverlay.isHidden = !active }
 
-        let header = NSTextField(labelWithString: "Drop files anywhere to start")
-        header.font = .systemFont(ofSize: 13, weight: .semibold)
-        header.frame = NSRect(x: 18, y: Self.height - 30, width: Self.width - 36, height: 18)
-        v.addSubview(header)
+        // Header: app glyph + name + the promise.
+        let glyph = NSImageView(frame: NSRect(x: 16, y: Self.height - 44, width: 28, height: 28))
+        glyph.wantsLayer = true
+        glyph.layer?.cornerRadius = 7
+        glyph.layer?.masksToBounds = true
+        glyph.image = Self.appGlyph()
+        v.addSubview(glyph)
+        let name = NSTextField(labelWithString: "Jack")
+        name.font = Chrome.titleFont
+        name.frame = NSRect(x: 54, y: Self.height - 30, width: 200, height: 17)
+        v.addSubview(name)
+        let promise = NSTextField(labelWithString: "Everything stays on this Mac")
+        promise.font = Chrome.metaFont
+        promise.textColor = .tertiaryLabelColor
+        promise.frame = NSRect(x: 54, y: Self.height - 45, width: 220, height: 14)
+        v.addSubview(promise)
 
-        // 2×3 grid — same six actions as always, mock's short labels.
+        let zone = DropZoneHint(frame: NSRect(x: 16, y: Self.height - 112, width: Self.width - 32, height: 52))
+        v.addSubview(zone)
+
+        // 2×3 grid — same six actions as always.
         let cards: [(String, String, Selector)] = [
             ("doc.badge.plus", "New PDF", #selector(newPDF)),
             ("folder", "Open", #selector(openPDF)),
             ("photo.on.rectangle", "Combine", #selector(photos)),
             ("signature", "Sign", #selector(sign)),
             ("doc.on.doc", "Organize", #selector(organize)),
-            ("gearshape.2", "Batch", #selector(batch))
+            ("checklist", "Batch", #selector(batch))
         ]
-        let cardW: CGFloat = 134, cardH: CGFloat = 58
+        let cardW: CGFloat = (Self.width - 32 - 8) / 2, cardH: CGFloat = 56
         for (i, entry) in cards.enumerated() {
             let col = i % 2, row = i / 2
-            let b = NSButton(title: entry.1, target: self, action: entry.2)
-            b.bezelStyle = .regularSquare
-            b.imagePosition = .imageAbove
-            b.font = .systemFont(ofSize: 12, weight: .semibold)
-            if let img = NSImage(systemSymbolName: entry.0, accessibilityDescription: entry.1) {
-                img.isTemplate = true
-                b.image = img.withSymbolConfiguration(.init(pointSize: 16, weight: .medium))
-            }
-            b.frame = NSRect(x: 16 + CGFloat(col) * (cardW + 12),
-                             y: Self.height - 100 - CGFloat(row) * (cardH + 8),
+            let b = LauncherTile(symbol: entry.0, label: entry.1, target: self, action: entry.2)
+            b.frame = NSRect(x: 16 + CGFloat(col) * (cardW + 8),
+                             y: Self.height - 124 - cardH - CGFloat(row) * (cardH + 8),
                              width: cardW, height: cardH)
             v.addSubview(b)
         }
 
-        let sep = NSBox(frame: NSRect(x: 16, y: 120, width: Self.width - 32, height: 1))
+        let sep = NSBox(frame: NSRect(x: 16, y: 130, width: Self.width - 32, height: 1))
         sep.boxType = .separator
         v.addSubview(sep)
 
-        let def = NSButton(checkboxWithTitle: "★ Make Jack my default PDF app", target: self, action: #selector(makeDefault))
-        def.font = .systemFont(ofSize: 11)
-        def.frame = NSRect(x: 16, y: 92, width: Self.width - 32, height: 20)
-        def.state = defaultEnabled ? .on : .off
-        if defaultEnabled { def.title = "Jack is your default PDF app" }
-        v.addSubview(def)
-        defaultCheck = def
-
-        let chk = NSButton(checkboxWithTitle: "Open Jack at login", target: self, action: #selector(toggleLogin))
-        chk.font = .systemFont(ofSize: 11)
-        chk.frame = NSRect(x: 16, y: 68, width: Self.width - 32, height: 20)
-        chk.state = loginEnabled ? .on : .off
-        v.addSubview(chk)
-        loginCheck = chk
-
-        let shelf = NSButton(checkboxWithTitle: "Show the shelf when dragging files", target: self, action: #selector(toggleShelf))
-        shelf.font = .systemFont(ofSize: 11)
-        shelf.frame = NSRect(x: 16, y: 44, width: Self.width - 32, height: 20)
-        shelf.state = shelfEnabled ? .on : .off
-        v.addSubview(shelf)
-        shelfCheck = shelf
+        // Settings as switches: a label on the left, the switch on the right.
+        func switchRow(_ title: String, y: CGFloat, on: Bool, action: Selector) -> NSSwitch {
+            let l = NSTextField(labelWithString: title)
+            l.font = .systemFont(ofSize: 12)
+            l.frame = NSRect(x: 16, y: y + 3, width: Self.width - 90, height: 16)
+            v.addSubview(l)
+            let s = NSSwitch()
+            s.controlSize = .small
+            s.target = self; s.action = action
+            s.state = on ? .on : .off
+            s.setAccessibilityLabel(title)
+            s.sizeToFit()
+            s.setFrameOrigin(NSPoint(x: Self.width - 16 - s.frame.width, y: y))
+            v.addSubview(s)
+            return s
+        }
+        defaultCheck = switchRow("Default PDF app", y: 100, on: defaultEnabled, action: #selector(makeDefault))
+        loginCheck = switchRow("Open at login", y: 74, on: loginEnabled, action: #selector(toggleLogin))
+        shelfCheck = switchRow("Drop shelf while dragging", y: 48, on: shelfEnabled, action: #selector(toggleShelf))
 
         let quit = NSButton(title: "Quit Jack", target: self, action: #selector(quit))
         quit.bezelStyle = .rounded
         quit.controlSize = .small
-        quit.frame = NSRect(x: 16, y: 8, width: 92, height: 26)
+        quit.frame = NSRect(x: 14, y: 10, width: 92, height: 26)
         v.addSubview(quit)
 
         updateButton.bezelStyle = .rounded
         updateButton.controlSize = .small
         updateButton.target = self
         updateButton.action = #selector(openUpdate)
-        updateButton.frame = NSRect(x: Self.width - 166, y: 8, width: 150, height: 26)
+        updateButton.frame = NSRect(x: Self.width - 166, y: 10, width: 150, height: 26)
         updateButton.isHidden = true
-        updateButton.contentTintColor = .controlAccentColor
+        updateButton.bezelColor = Chrome.tint
         v.addSubview(updateButton)
 
         // The drag-hover state OWNS the moment: frosted glass blurs the whole grid away —
@@ -162,7 +255,9 @@ final class HomePopoverViewController: NSViewController {
         dropOverlay.wantsLayer = true
         dropOverlay.layer?.cornerRadius = 12
         dropOverlay.layer?.borderWidth = 2
-        dropOverlay.layer?.borderColor = NSColor.controlAccentColor.cgColor
+        NSApp.effectiveAppearance.performAsCurrentDrawingAppearance {
+            dropOverlay.layer?.borderColor = Chrome.tint.cgColor
+        }
         dropOverlay.layer?.masksToBounds = true
         let dropTitle = NSTextField(labelWithString: "Drop to convert or combine")
         dropTitle.font = .systemFont(ofSize: 16, weight: .semibold)

@@ -28,6 +28,8 @@ protocol StampSelectionDelegate: AnyObject {
     /// Instant erase/redact: the user lifted the mouse over `rect`; `band` is still covering
     /// it and should be dissolved (or removed) by the receiver once the paint is applied.
     func regionSwiped(_ rect: CGRect, on page: PDFPage, band: NSView, erase: Bool)
+    /// v3 Note tool: a click on the page while Note is armed.
+    func noteRequested(at point: CGPoint, on page: PDFPage)
 }
 
 final class SigningPDFView: PDFView {
@@ -35,6 +37,12 @@ final class SigningPDFView: PDFView {
     var redactMode = false
     // Typewriter: while on, a click on empty page area asks the delegate for a text editor.
     var typewriterMode = false
+    /// v3 Note tool: while on, a click on the page asks the delegate for a note there.
+    var noteMode = false
+    /// v3 tool keys (V T H U S N G I · B E · Esc); return true when the key was used.
+    var toolKeyHandler: ((NSEvent) -> Bool)?
+    /// v3 armed marking: called after a text-selection drag ends.
+    var onSelectionFinished: (() -> Void)?
     // Form authoring: while on, widgets drag instead of accepting input; an armed kind
     // places a new field on click/drag (same rubber-band pattern as redact marks).
     var formAuthoringOn = false
@@ -64,6 +72,7 @@ final class SigningPDFView: PDFView {
     }
 
     override func keyDown(with event: NSEvent) {
+        if let handler = toolKeyHandler, handler(event) { return }
         if formAuthoringOn, let sel = selectedField,
            event.charactersIgnoringModifiers == String(UnicodeScalar(NSDeleteCharacter)!) {
             stampDelegate?.fieldDeleteRequested(name: sel.name)
@@ -252,6 +261,8 @@ final class SigningPDFView: PDFView {
             }
         } else if typewriterMode {
             stampDelegate?.typewriterClicked(at: p, on: page)
+        } else if noteMode {
+            stampDelegate?.noteRequested(at: p, on: page)
         } else {
             // Don't deselect on a background click — keep the active signature selected.
             super.mouseDown(with: event)
@@ -404,6 +415,7 @@ final class SigningPDFView: PDFView {
             draggingFree = nil; dragPage = nil
         } else {
             super.mouseUp(with: event)
+            onSelectionFinished?()
         }
     }
 

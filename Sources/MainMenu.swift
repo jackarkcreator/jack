@@ -14,6 +14,8 @@ enum MainMenu {
         appMenu.addItem(item("Check for Updates…", updateAction, "", target: target))
         appMenu.addItem(item("Make Jack the Default PDF App…", defaultAction, "", target: target))
         appMenu.addItem(.separator())
+        appMenu.addItem(item("Settings…", #selector(SettingsWindowController.show(_:)), ",", target: SettingsWindowController.shared))
+        appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Hide Jack", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         appMenu.addItem(withTitle: "Quit Jack", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
@@ -84,12 +86,20 @@ enum MainMenu {
         view.addItem(item("Continuous Scroll", #selector(DocumentWindowController.displayContinuous(_:)), ""))
         view.addItem(item("Single Page", #selector(DocumentWindowController.displaySinglePage(_:)), ""))
         view.addItem(item("Two Pages", #selector(DocumentWindowController.displayTwoPages(_:)), ""))
-        view.addItem(item("Markup", #selector(DocumentWindowController.toggleMarkup(_:)), "A"))
+        // v3 modes: ⌘1 ⌘2 ⌘3. The v2 toggles (⇧⌘A, ⇧⌘R) keep working as hidden alternates.
+        view.addItem(item("Read", #selector(DocumentWindowController.showReadMode(_:)), "1"))
+        view.addItem(item("Markup", #selector(DocumentWindowController.showMarkupMode(_:)), "2"))
+        view.addItem(item("Redact", #selector(DocumentWindowController.showRedactMode(_:)), "3"))
         if JackFormUI.enabled {
             view.addItem(item("Prepare Form", #selector(DocumentWindowController.toggleForm(_:)), "F"))
         }
-        view.addItem(item("Erase", #selector(DocumentWindowController.toggleErase(_:)), ""))
-        view.addItem(item("Redact", #selector(DocumentWindowController.toggleRedact(_:)), "R"))
+        for (title, sel, key) in [("Toggle Markup", #selector(DocumentWindowController.toggleMarkup(_:)), "A"),
+                                  ("Toggle Redact", #selector(DocumentWindowController.toggleRedact(_:)), "R")] {
+            let hidden = item(title, sel, key)
+            hidden.isHidden = true
+            hidden.allowsKeyEquivalentWhenHidden = true
+            view.addItem(hidden)
+        }
         viewItem.submenu = view
         main.addItem(viewItem)
 

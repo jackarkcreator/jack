@@ -169,7 +169,7 @@ final class PageOrganizerWindowController: NSWindowController, NSCollectionViewD
     // MARK: layout
 
     private let trayEmptyHint = NSTextField(wrappingLabelWithString:
-        "Drag pages here to build your PDF — or use ← Add Selected")
+        "Drag pages here to build your PDF, or use Add Selected")
 
     private func build() {
         guard let content = window?.contentView else { return }
@@ -182,11 +182,10 @@ final class PageOrganizerWindowController: NSWindowController, NSCollectionViewD
         left.autoresizingMask = [.height]
         content.addSubview(left)
 
-        addHeader("NEW PDF", to: left)
-        left.addSubview(chip("Rotate", "rotate.right", #selector(trayRotate),
-                             NSRect(x: 16, y: cH - 64, width: 84, height: 26)))
-        left.addSubview(chip("Remove", "trash", #selector(trayRemove),
-                             NSRect(x: 106, y: cH - 64, width: 92, height: 26)))
+        addHeader("New PDF", to: left)
+        left.addSubview(toolGroup([("Rotate", "rotate.right", #selector(trayRotate)),
+                                   ("Remove", "trash", #selector(trayRemove))], "New PDF tools",
+                                  at: NSPoint(x: 16, y: cH - 66)))
         left.addSubview(scroll(trayCV, layout(itemW: 138, itemH: 184),
                                frame: NSRect(x: 12, y: 12, width: 296, height: cH - 76 - 12)))
         trayEmptyHint.font = .systemFont(ofSize: 12)
@@ -207,15 +206,12 @@ final class PageOrganizerWindowController: NSWindowController, NSCollectionViewD
         main.autoresizingMask = [.width, .height]
         content.addSubview(main)
 
-        addHeader("SOURCE PAGES", to: main)
-        var x: CGFloat = 16
-        // The New PDF pane is on the LEFT — the arrows finally point where pages go.
-        for (title, symbol, sel, w) in [("Add Selected", "arrow.left", #selector(addSelected), CGFloat(122)),
-                                        ("Add All", "arrow.left.to.line", #selector(addAll), 96),
-                                        ("Save Selected As…", "square.and.arrow.down", #selector(saveSelectedAs), 168)] {
-            main.addSubview(chip(title, symbol, sel, NSRect(x: x, y: cH - 64, width: w, height: 26)))
-            x += w + 8
-        }
+        addHeader("Source Pages", to: main)
+        // The New PDF pane is on the LEFT — the arrows point where pages go.
+        main.addSubview(toolGroup([("Add Selected", "arrow.left", #selector(addSelected)),
+                                   ("Add All", "arrow.left.to.line", #selector(addAll)),
+                                   ("Save Selected As\u{2026}", "square.and.arrow.down", #selector(saveSelectedAs))],
+                                  "Source page tools", at: NSPoint(x: 16, y: cH - 66)))
         let srcLayout = layout(itemW: 150, itemH: 196)
         srcLayout.headerReferenceSize = NSSize(width: 0, height: 38)   // one labeled pile per document
         main.addSubview(scroll(sourceCV, srcLayout,
@@ -234,23 +230,20 @@ final class PageOrganizerWindowController: NSWindowController, NSCollectionViewD
 
     private func addHeader(_ text: String, to view: NSView) {
         let label = NSTextField(labelWithString: text)
-        label.font = .systemFont(ofSize: 11, weight: .semibold)
-        label.textColor = .tertiaryLabelColor
-        label.frame = NSRect(x: 17, y: view.bounds.height - 32, width: 200, height: 14)
+        label.font = Chrome.titleFont
+        label.textColor = .labelColor
+        label.frame = NSRect(x: 17, y: view.bounds.height - 30, width: 240, height: 17)
         label.autoresizingMask = [.minYMargin]
         view.addSubview(label)
     }
 
-    /// The mode-row chip, verbatim from the document window's grammar.
-    private func chip(_ title: String, _ symbol: String, _ action: Selector, _ frame: NSRect) -> NSButton {
-        let b = NSButton(title: title, target: self, action: action)
-        b.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
-        b.imagePosition = .imageLeading
-        b.bezelStyle = .rounded
-        b.controlSize = .small
-        b.frame = frame
-        b.autoresizingMask = [.minYMargin]
-        return b
+    /// v3: the same tool tiles and rounded groups as the document window's work row.
+    private func toolGroup(_ items: [(String, String, Selector)], _ label: String, at origin: NSPoint) -> ToolGroupView {
+        let tiles = items.map { ToolTile(symbol: [$0.1], label: $0.0, tip: $0.0, target: self, action: $0.2) }
+        let g = ToolGroupView(items: tiles, label: label)
+        g.setFrameOrigin(origin)
+        g.autoresizingMask = [.minYMargin]
+        return g
     }
 
     private func layout(itemW: CGFloat, itemH: CGFloat) -> NSCollectionViewFlowLayout {

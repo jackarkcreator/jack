@@ -93,6 +93,12 @@ final class BatchWindowController: NSWindowController, NSWindowDelegate, NSToolb
             runButton.action = #selector(run)
             runButton.isEnabled = !files.isEmpty
             item.view = runButton
+            if #available(macOS 26.0, *) {   // v3: the window's one filled control
+                item.style = .prominent
+                item.backgroundTintColor = Chrome.tint
+            } else {
+                runButton.bezelColor = Chrome.tint
+            }
             item.label = "Run"
             item.toolTip = "Run the operation on every PDF in the folder"
             return item
@@ -106,10 +112,10 @@ final class BatchWindowController: NSWindowController, NSWindowDelegate, NSToolb
         guard let v = window?.contentView else { return }
         let W: CGFloat = 500, H: CGFloat = 430
 
-        let opLabel = NSTextField(labelWithString: "OPERATION")
-        opLabel.font = .systemFont(ofSize: 11, weight: .semibold)
-        opLabel.textColor = .tertiaryLabelColor
-        opLabel.frame = NSRect(x: 21, y: H - 34, width: 120, height: 14)
+        let opLabel = NSTextField(labelWithString: "Operation")
+        opLabel.font = Chrome.titleFont
+        opLabel.textColor = .labelColor
+        opLabel.frame = NSRect(x: 21, y: H - 36, width: 160, height: 17)
         v.addSubview(opLabel)
 
         opPopup.frame = NSRect(x: 20, y: H - 66, width: 240, height: 26)
@@ -124,7 +130,7 @@ final class BatchWindowController: NSWindowController, NSWindowDelegate, NSToolb
         v.addSubview(optionsBox)
         buildOptions()
 
-        let outLabel = NSTextField(labelWithString: "Output: \(folder.lastPathComponent)/\(BatchEngine.outputFolderName) — originals are never touched")
+        let outLabel = NSTextField(labelWithString: "Output: \(folder.lastPathComponent)/\(BatchEngine.outputFolderName) \u{00B7} originals are never touched")
         outLabel.font = .systemFont(ofSize: 11)
         outLabel.textColor = .secondaryLabelColor
         outLabel.frame = NSRect(x: 20, y: H - 136, width: W - 40, height: 16)

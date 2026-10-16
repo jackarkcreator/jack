@@ -43,11 +43,43 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     // NSDocument's display:true does not reliably order our hand-built window onscreen
     // (window-server showed it existing with onscreen=false) — show it ourselves, always.
     func presentWindow() {
+        // Showcase (JACK_SHOWCASE=<read|markup|redact>): a visible window parked BEHIND other
+        // apps (never activated, no input) so a window-scoped screencapture can verify the real
+        // Tahoe chrome; writes the window number to /tmp/jack-showcase.id and quits after 8 s.
+        if let showcase = ProcessInfo.processInfo.environment["JACK_SHOWCASE"] {
+            guard !modeSelfTestStarted else { return }
+            modeSelfTestStarted = true
+            if let ap = ProcessInfo.processInfo.environment["JACK_MODE_SELFTEST_APPEARANCE"] {
+                window?.appearance = NSAppearance(named: ap == "light" ? .aqua : .darkAqua)
+            }
+            window?.orderBack(nil)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                guard let self, let window = self.window else { return }
+                self.setMode(showcase == "markup" ? .markup : showcase == "redact" ? .redact : .read)
+                if showcase != "read", let word = (self.pdfView.document?.page(at: 0)?.string ?? "")
+                    .components(separatedBy: .whitespacesAndNewlines).first(where: { $0.count >= 4 }),
+                   let sel = self.pdfView.document?.findString(word, withOptions: []).first {
+                    self.armMarkupTool(.highlight)
+                    self.pdfView.setCurrentSelection(sel, animate: false)
+                    self.applyArmedMarkToSelection()
+                    if let tick = NSEvent.otherEvent(with: .applicationDefined, location: .zero, modifierFlags: [],
+                                                     timestamp: 0, windowNumber: window.windowNumber, context: nil,
+                                                     subtype: 0, data1: 0, data2: 0) { NSApp.postEvent(tick, atStart: false) }
+                    if showcase == "redact" { self.setMode(.redact) }
+                }
+                try? "\(window.windowNumber)".write(toFile: "/tmp/jack-showcase.id", atomically: true, encoding: .utf8)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 8) { exit(0) }
+            }
+            return
+        }
         // Self-test (JACK_MODE_SELFTEST=1): runs in an invisible window, never takes focus.
         if ProcessInfo.processInfo.environment["JACK_MODE_SELFTEST"] != nil {
             guard !modeSelfTestStarted else { return }
             modeSelfTestStarted = true
             window?.alphaValue = 0
+            if let ap = ProcessInfo.processInfo.environment["JACK_MODE_SELFTEST_APPEARANCE"] {
+                window?.appearance = NSAppearance(named: ap == "light" ? .aqua : .darkAqua)
+            }
             window?.orderFrontRegardless()
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in self?.runModeSelfTest() }
             return
@@ -60,9 +92,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     private var modeSelfTestStarted = false
     private var searchField: NSSearchField?
     private weak var saveButton: NSButton?
+    private weak var saveItem: NSToolbarItem?
     // Typewriter: click the page, type, Return — a native FreeText annotation that stays
     // EDITABLE after saving (unlike the old Add Text, which placed a picture of the words).
-    private weak var typewriterButton: NSButton?
     private let typewriterSizePopup = NSPopUpButton()
     private let fontPopup = NSPopUpButton()
     private var typewriterEditor: TypewriterEditor?
@@ -81,7 +113,8 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     // Clicking toolbar/menu chrome can clear the live selection before the action runs
     // (Tahoe focus behavior) — annotate actions fall back to the last real selection.
     private var lastSelection: PDFSelection?
-    private var sidebarVisible = true
+    private var sidebarVisible = DocumentWindowController.thumbnailsOnOpen
+    static var thumbnailsOnOpen: Bool { UserDefaults.standard.object(forKey: "jack.thumbnailsOnOpen") as? Bool ?? true }
     private let sidebarWidth: CGFloat = 172
 
     // Mode system (v2.8 ratified mock): one segmented mode — Read · Markup · Redact · Forms —
@@ -89,19 +122,13 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     // appears or disappears, so switching tools can never shift the page again.
     enum Mode: Int { case read = 0, markup, redact, forms }
     private(set) var mode: Mode = .read
-    private var modeSegment: NSSegmentedControl?
-    private let modeRow = ToolStripView(frame: NSRect(x: 0, y: 0, width: 1180, height: 42))
-    private var modeRows: [Mode: ToolStripView] = [:]   // one persistent row per mode
-    private lazy var buildRow: ToolStripView = modeRow     // the row the build*Row helpers fill
+    private let modeRow = WorkRowView(frame: NSRect(x: 0, y: 0, width: 1180, height: Chrome.workRowHeight))
+    private var modeRows: [Mode: HStackRow] = [:]   // one persistent panel per mode
     private var redactUsesErase = false      // Erase is a submode of Redact (white vs black paint)
-    private var blackoutChip: NSButton?
-    private var eraseChip: NSButton?
-    private var pagePopup: NSPopUpButton?
 
     // Floating status HUD (Direction C's contribution to the ratified hybrid): page + zoom,
     // STATUS ONLY — Save keeps its single home in the toolbar. Clicks pass through.
-    private let hud = HUDPill()
-    private let hudLabel = NSTextField(labelWithString: "")
+    private let hud = PagePill()
 
     // Ask panel (on-device model; only exists when Apple Intelligence is available)
     private var askVisible = false
@@ -117,7 +144,6 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     private let sizeSlider = NSSlider()
     private let removeButton = NSButton()
     private let stampSizeLabel = NSTextField(labelWithString: "Size")
-    private var markupHint: NSTextField?
     private var shareButton: NSButton?
 
     // Redact row controls
@@ -146,18 +172,37 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
                            styleMask: [.titled, .closable, .miniaturizable, .resizable],
                            backing: .buffered, defer: false)
         win.center()
-        win.setFrameAutosaveName("JackDocument")
+        // v3: no shared frame autosave — one maximized window used to make EVERY later
+        // document open maximized (and, with fit-to-width, zoomed to 200%+).
         super.init(window: win)
         self.document = document
         shouldCloseDocument = true
         win.delegate = self
-        if let doc = document.pdf { buildUI(doc: doc); uiBuilt = true }
+        if let doc = document.pdf { buildUI(doc: doc); sizeWindow(toFirstPageOf: doc); uiBuilt = true }
         AppDelegate.documents.append(self)
         AppDelegate.updateActivationPolicy()
         if uiBuilt { DispatchQueue.main.async { [weak self] in self?.presentWindow() } }
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    /// New windows fit the first page at 100% plus chrome — never narrower than the width the
+    /// tool labels need, never more than 85% of the screen — and cascade from earlier windows.
+    private func sizeWindow(toFirstPageOf doc: PDFDocument) {
+        guard let window, let screen = window.screen ?? NSScreen.main, let page = doc.page(at: 0) else { return }
+        var size = page.bounds(for: .cropBox).size
+        if page.rotation % 180 != 0 { size = CGSize(width: size.height, height: size.width) }
+        let vis = screen.visibleFrame
+        let chromeH = window.frame.height - window.contentLayoutRect.height + Chrome.workRowHeight
+        // At least as wide as the labeled work row (measured in buildWorkRow), so tools open with labels.
+        let w = min(max(sidebarWidth + size.width + 56 + 16, labeledRowWidth, 1100), vis.width * 0.85)
+        let h = min(max(chromeH + size.height + 48, 600), vis.height * 0.85)
+        let others = AppDelegate.documents.count
+        let offset = CGFloat(others % 8) * 24
+        let x = vis.midX - w / 2 + offset
+        let y = vis.midY - h / 2 - offset
+        window.setFrame(NSRect(x: x, y: max(vis.minY, y), width: w, height: h), display: false)
+    }
 
     func openInMarkup() {
         DispatchQueue.main.async { [weak self] in self?.setMode(.markup) }
@@ -186,20 +231,16 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         toolbar.allowsUserCustomization = false
         window.toolbar = toolbar
         if #available(macOS 11.0, *) { window.toolbarStyle = .unified }
-        if #available(macOS 13.0, *) { toolbar.centeredItemIdentifiers = [ItemID.modeSegment] }
         installTitleChevron(on: window)
 
-        // The permanent mode row: added once, never removed — only its content swaps.
-        // Tahoe hands bottom titlebar accessories their native height (36pt — frame and
-        // constraints are both overridden, probed 2026-08-30). The row stays permanent and
-        // fixed-height either way; ToolStripView re-centers its controls for whatever
-        // height the titlebar grants.
-        modeRow.frame = NSRect(x: 0, y: 0, width: window.frame.width, height: 42)
-        let rowAcc = NSTitlebarAccessoryViewController()
-        rowAcc.view = modeRow
-        rowAcc.layoutAttribute = .bottom
-        window.addTitlebarAccessoryViewController(rowAcc)
-        populateModeRow()
+        // v3 work row (Mode · Tools · Options): a plain view at the top of the content, NOT a
+        // titlebar accessory — Tahoe forces accessories to 36 pt, too tight for 30 pt groups.
+        // Built once; only its per-mode panels show/hide.
+        modeRow.frame = NSRect(x: 0, y: content.bounds.height - Chrome.workRowHeight,
+                               width: content.bounds.width, height: Chrome.workRowHeight)
+        modeRow.autoresizingMask = [.width, .minYMargin]
+        content.addSubview(modeRow)
+        buildWorkRow()
 
         sidebar.document = doc
         sidebar.delegate = self
@@ -207,10 +248,12 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         content.addSubview(sidebar.scrollView)
 
         pdfView.document = doc
-        pdfView.autoScales = true
+        pdfView.autoScales = false
         pdfView.displayMode = .singlePageContinuous
         pdfView.backgroundColor = NSColor.underPageBackgroundColor
         pdfView.stampDelegate = self
+        pdfView.toolKeyHandler = { [weak self] event in self?.handleToolKey(event) ?? false }
+        pdfView.onSelectionFinished = { [weak self] in self?.applyArmedMarkToSelection() }
         content.addSubview(pdfView)
         if AskEngine.isAvailable { buildAskPanel() }
         content.addSubview(askPanel)
@@ -224,6 +267,8 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
                                                    name: NSView.boundsDidChangeNotification, object: clip)
         }
         layoutViews()
+        zoomPolicy = Self.defaultZoomPolicy
+        DispatchQueue.main.async { [weak self] in self?.applyZoomPolicy(self?.zoomPolicy ?? .automatic) }
 
         NotificationCenter.default.addObserver(self, selector: #selector(pageChanged),
                                                name: .PDFViewPageChanged, object: pdfView)
@@ -279,42 +324,35 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
                                                name: .jackDocumentDirtyChanged, object: document)
         sidebar.reload()
         pageChanged()
+        baselineMarks = markCount()
+        updateStatusLine()
     }
 
     private func layoutViews() {
         guard let content = window?.contentView else { return }
         let sw = sidebarVisible ? sidebarWidth : 0
         let aw = askVisible ? askWidth : 0
-        sidebar.scrollView.frame = NSRect(x: 0, y: 0, width: sw, height: content.bounds.height)
+        let bodyH = max(0, content.bounds.height - Chrome.workRowHeight)
+        modeRow.frame = NSRect(x: 0, y: bodyH, width: content.bounds.width, height: Chrome.workRowHeight)
+        sidebar.scrollView.frame = NSRect(x: 0, y: 0, width: sw, height: bodyH)
         sidebar.scrollView.isHidden = !sidebarVisible
         sidebar.scrollView.autoresizingMask = [.height]
-        pdfView.frame = NSRect(x: sw, y: 0, width: content.bounds.width - sw - aw, height: content.bounds.height)
+        pdfView.frame = NSRect(x: sw, y: 0, width: content.bounds.width - sw - aw, height: bodyH)
         pdfView.autoresizingMask = [.width, .height]
-        askPanel.frame = NSRect(x: content.bounds.width - aw, y: 0, width: askWidth, height: content.bounds.height)
+        askPanel.frame = NSRect(x: content.bounds.width - aw, y: 0, width: askWidth, height: bodyH)
         askPanel.isHidden = !askVisible
         askPanel.autoresizingMask = [.height, .minXMargin]
         layoutHUD()
     }
 
-    // MARK: - Floating status HUD (page + zoom, click-through)
-
-    private final class HUDPill: NSVisualEffectView {
-        override func hitTest(_ point: NSPoint) -> NSView? { nil }   // status only, never a target
-    }
+    // MARK: - Page pill (v3, D1): page navigation + zoom, interactive
 
     private func buildHUD() {
-        hud.material = .menu
-        hud.blendingMode = .withinWindow
-        hud.state = .active
-        hud.wantsLayer = true
-        hud.layer?.cornerRadius = 14
-        hud.layer?.masksToBounds = true
-        hud.layer?.borderWidth = 0.5
-        hud.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.4).cgColor
-        hudLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
-        hudLabel.textColor = .secondaryLabelColor
-        hudLabel.alignment = .center
-        hud.addSubview(hudLabel)
+        hud.prev.target = self; hud.prev.action = #selector(previousPage(_:))
+        hud.next.target = self; hud.next.action = #selector(nextPage(_:))
+        hud.zoomOut.target = self; hud.zoomOut.action = #selector(zoomOut(_:))
+        hud.zoomIn.target = self; hud.zoomIn.action = #selector(zoomIn(_:))
+        hud.zoomMenuButton.target = self; hud.zoomMenuButton.action = #selector(showZoomMenu(_:))
         updateHUD()
     }
 
@@ -322,20 +360,104 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         guard let content = window?.contentView else { return }
         let sw = sidebarVisible ? sidebarWidth : 0
         let aw = askVisible ? askWidth : 0
-        let w = hudLabel.intrinsicContentSize.width + 32
-        // Bottom-centered over the page area (between sidebar and Ask panel), 14pt up — per mock.
-        hud.frame = NSRect(x: sw + (content.bounds.width - sw - aw - w) / 2, y: 14, width: w, height: 28)
-        hudLabel.frame = NSRect(x: 0, y: (28 - hudLabel.intrinsicContentSize.height) / 2,
-                                width: w, height: hudLabel.intrinsicContentSize.height)
+        let w = hud.frame.width
+        // Bottom-centered over the page area (between sidebar and Ask panel), 14pt up.
+        hud.setFrameOrigin(NSPoint(x: (sw + (content.bounds.width - sw - aw - w) / 2).rounded(), y: 14))
     }
 
     private func updateHUD() {
         guard let doc = pdfView.document, let page = pdfView.currentPage else { return }
         let index = doc.index(for: page)
-        let pct = Int((pdfView.scaleFactor * 100).rounded())
-        hudLabel.stringValue = "Page \(index + 1) of \(doc.pageCount) · \(pct)%"
+        hud.update(page: index + 1, of: doc.pageCount, percent: Int((pdfView.scaleFactor * 100).rounded()))
         layoutHUD()
     }
+
+    @objc func previousPage(_ sender: Any?) { pdfView.goToPreviousPage(sender) }
+    @objc func nextPage(_ sender: Any?) { pdfView.goToNextPage(sender) }
+
+    // MARK: - Zoom policy (v3, D2)
+    //
+    // PDFKit's autoScales fits the page to the view's WIDTH in continuous mode, so a wide
+    // window opened every Letter page at 180–220%. Jack never uses autoScales now: the policy
+    // decides the scale. Automatic = fit width, never above 100%.
+
+    enum ZoomPolicy: String { case automatic, fitPage, fitWidth, actual, fixed }
+    private(set) var zoomPolicy: ZoomPolicy = .automatic
+    static let zoomLadder: [CGFloat] = [0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4]
+
+    private func pageSizeForFit() -> CGSize? {
+        guard let doc = pdfView.document, let page = pdfView.currentPage ?? doc.page(at: 0) else { return nil }
+        var b = page.bounds(for: pdfView.displayBox).size
+        if page.rotation % 180 != 0 { b = CGSize(width: b.height, height: b.width) }
+        return b
+    }
+
+    private func fitWidthScale() -> CGFloat? {
+        guard let size = pageSizeForFit(), size.width > 0 else { return nil }
+        let two = pdfView.displayMode == .twoUp || pdfView.displayMode == .twoUpContinuous
+        let avail = pdfView.bounds.width - (two ? 56 : 40) - 16   // margins + scroller
+        return max(0.1, avail / (two ? size.width * 2 : size.width))
+    }
+
+    private func fitPageScale() -> CGFloat? {
+        guard let size = pageSizeForFit(), size.height > 0, let fw = fitWidthScale() else { return nil }
+        return min(fw, max(0.1, (pdfView.bounds.height - 40) / size.height))
+    }
+
+    func applyZoomPolicy(_ policy: ZoomPolicy, fixed: CGFloat? = nil) {
+        zoomPolicy = policy
+        pdfView.autoScales = false
+        let target: CGFloat?
+        switch policy {
+        case .automatic: target = fitWidthScale().map { min($0, 1) }
+        case .fitPage:   target = fitPageScale()
+        case .fitWidth:  target = fitWidthScale()
+        case .actual:    target = 1
+        case .fixed:     target = fixed ?? pdfView.scaleFactor
+        }
+        if let t = target, abs(t - pdfView.scaleFactor) > 0.0005 { pdfView.scaleFactor = t }
+        updateHUD()
+    }
+
+    /// The user's default (Settings ▸ Default zoom); Automatic unless they chose otherwise.
+    static var defaultZoomPolicy: ZoomPolicy {
+        ZoomPolicy(rawValue: UserDefaults.standard.string(forKey: "jack.defaultZoom") ?? "") ?? .automatic
+    }
+
+    @objc private func showZoomMenu(_ sender: PillButton) {
+        let m = NSMenu()
+        m.autoenablesItems = false
+        func add(_ title: String, _ on: Bool, _ key: String = "", _ handler: @escaping () -> Void) {
+            let it = NSMenuItem(title: title, action: #selector(zoomMenuPicked(_:)), keyEquivalent: key)
+            it.target = self
+            it.state = on ? .on : .off
+            it.representedObject = ZoomMenuAction(handler)
+            m.addItem(it)
+        }
+        add("Automatic", zoomPolicy == .automatic) { [weak self] in self?.applyZoomPolicy(.automatic) }
+        add("Fit Page", zoomPolicy == .fitPage, "9") { [weak self] in self?.applyZoomPolicy(.fitPage) }
+        add("Fit Width", zoomPolicy == .fitWidth) { [weak self] in self?.applyZoomPolicy(.fitWidth) }
+        add("Actual Size", zoomPolicy == .actual, "0") { [weak self] in self?.applyZoomPolicy(.actual) }
+        m.addItem(.separator())
+        let current = pdfView.scaleFactor
+        let nearest = Self.zoomLadder.min { abs($0 - current) < abs($1 - current) } ?? 1
+        for z in Self.zoomLadder {
+            add("\(Int(z * 100))%", zoomPolicy == .fixed && z == nearest) { [weak self] in self?.applyZoomPolicy(.fixed, fixed: z) }
+        }
+        m.addItem(.separator())
+        add("Continuous Scroll", pdfView.displayMode == .singlePageContinuous) { [weak self] in self?.displayContinuous(nil) }
+        add("Single Page", pdfView.displayMode == .singlePage) { [weak self] in self?.displaySinglePage(nil) }
+        add("Two Pages", pdfView.displayMode == .twoUpContinuous) { [weak self] in self?.displayTwoPages(nil) }
+        sender.isOpen = true
+        m.popUp(positioning: nil, at: NSPoint(x: 0, y: -6), in: sender)
+        sender.isOpen = false
+    }
+
+    private final class ZoomMenuAction: NSObject {
+        let run: () -> Void
+        init(_ run: @escaping () -> Void) { self.run = run }
+    }
+    @objc private func zoomMenuPicked(_ sender: NSMenuItem) { (sender.representedObject as? ZoomMenuAction)?.run() }
 
     @objc private func scaleChanged() { updateHUD(); layoutFieldAdornment() }
 
@@ -368,27 +490,103 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         let index = doc.index(for: page)
         if index != NSNotFound { lastKnownPageIndex = index }
         updateHUD()
-        syncPagePopup(index: index, count: doc.pageCount)
         sidebar.highlight(pageIndex: index)
     }
 
     // v2.8: the page indicator lives in the HUD; the subtitle carries only the edit state.
+    /// A persistent status override (search results); empty = show the document's state.
     private func setSubtitle(_ s: String) {
         subtitleBase = s
+        updateStatusLine()
+    }
+
+    private var flashUntil = Date.distantPast
+    private var titleLeadingInset: CGFloat = 0
+    private var cachedHasText: Bool?
+    private var baselineMarks: Int?
+
+    /// v3: the line under the title is the document's ONE status home and always has content,
+    /// so the title never moves. Clean: what the file is. Edited: a teal dot + what changed.
+    private func updateStatusLine() {
+        guard Date() >= flashUntil else { return }
+        if !subtitleBase.isEmpty { subtitleLabel.stringValue = subtitleBase; layoutTitleAccessory(); return }
         let doc = document as? JackDocument
         let dirty = doc?.isDocumentEdited == true
-        // While edits are pending on someone else's PDF, say plainly that their file is safe.
-        let edited = dirty ? (doc?.protectsOriginal == true ? "Edited · original unchanged" : "Edited") : ""
-        if s.isEmpty {
-            subtitleLabel.stringValue = edited
-        } else {
-            subtitleLabel.stringValue = edited.isEmpty ? s : s + " — " + edited
+        let narrow = !(allTiles.first?.showsLabel ?? true)
+        let s = NSMutableAttributedString()
+        func add(_ t: String, _ c: NSColor, _ f: NSFont = Chrome.metaFont, _ extra: [NSAttributedString.Key: Any] = [:]) {
+            var a: [NSAttributedString.Key: Any] = [.font: f, .foregroundColor: c]
+            extra.forEach { a[$0.key] = $0.value }
+            s.append(NSAttributedString(string: t, attributes: a))
         }
+        if dirty {
+            add("\u{25CF} ", Chrome.tint, .systemFont(ofSize: 7), [.baselineOffset: 1.5])
+            add("Edited", .secondaryLabelColor, .systemFont(ofSize: 11, weight: .medium))
+            var parts: [String] = []
+            if doc?.protectsOriginal == true && !narrow { parts.append("original unchanged") }
+            let marks = markCount() - (baselineMarks ?? 0)
+            if marks > 0 { parts.append("\(marks) mark\(marks == 1 ? "" : "s")") }
+            if redactedRegionCount > 0 {
+                parts.append("\(redactedRegionCount) area\(redactedRegionCount == 1 ? "" : "s") redacted")
+                parts.append("certificate at save")
+            }
+            for p in parts { add(" \u{00B7} " + p, .tertiaryLabelColor) }
+        } else {
+            let n = pdfView.document?.pageCount ?? 0
+            var t = "\(n) page\(n == 1 ? "" : "s")"
+            if n > 0 { t += documentHasText() ? " \u{00B7} text searchable" : " \u{00B7} scanned, not searchable" }
+            add(t, .tertiaryLabelColor)
+        }
+        subtitleLabel.attributedStringValue = s
+        layoutTitleAccessory()
+    }
+
+    /// Markup the user can see as "marks" (highlights, underlines, notes, text, stamps).
+    private func markCount() -> Int {
+        guard let doc = pdfView.document else { return 0 }
+        let kinds: Set<String> = ["Highlight", "Underline", "StrikeOut", "FreeText", "Text", "Stamp", "Ink", "Square", "Circle"]
+        var n = 0
+        for i in 0..<min(doc.pageCount, 2000) {
+            n += doc.page(at: i)?.annotations.filter { kinds.contains($0.type ?? "") || $0 is ImageStampAnnotation }.count ?? 0
+        }
+        return n
+    }
+
+    private func documentHasText() -> Bool {
+        if let c = cachedHasText { return c }
+        guard let doc = pdfView.document else { return false }
+        var found = false
+        for i in 0..<min(doc.pageCount, 8) where !found {
+            if let t = doc.page(at: i)?.string, !t.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { found = true }
+        }
+        cachedHasText = found
+        return found
     }
 
     @objc private func dirtyChanged() {
-        setSubtitle(subtitleBase)
-        saveButton?.isEnabled = (document as? NSDocument)?.isDocumentEdited == true
+        cachedHasText = nil   // OCR and page swaps change what the text layer holds
+        if (document as? NSDocument)?.isDocumentEdited != true { baselineMarks = markCount() }   // saved = new baseline
+        updateStatusLine()
+        syncSaveButton()
+    }
+
+    /// Save is the window's one filled control: quiet when there is nothing to write,
+    /// Jack teal once there is.
+    private func syncSaveButton() {
+        let dirty = (document as? NSDocument)?.isDocumentEdited == true
+        saveButton?.isEnabled = dirty
+        if #available(macOS 26.0, *) {
+            saveItem?.style = dirty ? .prominent : .plain
+            saveItem?.backgroundTintColor = dirty ? Chrome.tint : nil
+        } else {
+            saveButton?.bezelColor = dirty ? Chrome.tint : nil
+        }
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        updateLabelBreakpoint()
+        updateStatusLine()
+        reapplyZoom()
     }
 
     // NSDocument re-syncs the title on rename/move/duplicate — keep our control in step.
@@ -413,8 +611,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         var ids: [NSToolbarItem.Identifier] =
-        [ItemID.sidebar, .flexibleSpace, ItemID.modeSegment, .flexibleSpace,
-         ItemID.share, ItemID.search, ItemID.saveDoc]
+        [.flexibleSpace, ItemID.share, ItemID.search, ItemID.saveDoc]
         if AskEngine.isAvailable, let i = ids.firstIndex(of: ItemID.share) {
             ids.insert(ItemID.ask, at: i)   // wand sits before Share — mock order
         }
@@ -451,19 +648,14 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         }
         switch id {
         case ItemID.sidebar:
-            // Preview-style view pull-down: Thumbnails toggle + page display modes.
-            let item = NSMenuToolbarItem(itemIdentifier: id)
-            item.image = Self.toolbarSymbol(["sidebar.leading", "sidebar.left"], "View")
-            item.label = "View"
-            item.toolTip = "Thumbnails and page layout"
-            let menu = NSMenu()
-            menu.delegate = self
-            menu.addItem({ let m = NSMenuItem(title: "Thumbnails", action: #selector(toggleSidebar(_:)), keyEquivalent: ""); m.target = self; m.tag = 100; return m }())
-            menu.addItem(.separator())
-            menu.addItem({ let m = NSMenuItem(title: "Continuous Scroll", action: #selector(displayContinuous(_:)), keyEquivalent: ""); m.target = self; m.tag = 101; return m }())
-            menu.addItem({ let m = NSMenuItem(title: "Single Page", action: #selector(displaySinglePage(_:)), keyEquivalent: ""); m.target = self; m.tag = 102; return m }())
-            menu.addItem({ let m = NSMenuItem(title: "Two Pages", action: #selector(displayTwoPages(_:)), keyEquivalent: ""); m.target = self; m.tag = 103; return m }())
-            item.menu = menu
+            // v3: a plain thumbnails toggle. Page layouts live in the zoom menu and View menu.
+            let item = NSToolbarItem(itemIdentifier: id)
+            item.image = Chrome.symbol(["sidebar.leading", "sidebar.left"], "Thumbnails", Chrome.toolbarSymbol)
+            item.label = "Thumbnails"
+            item.toolTip = "Show or hide thumbnails (\u{2318}T)"
+            item.target = self
+            item.action = #selector(toggleSidebar(_:))
+            item.isBordered = true
             return item
         case ItemID.ask:
             let item = NSToolbarItem(itemIdentifier: id)
@@ -474,49 +666,37 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             askButton = b
             item.view = b
             item.label = "Ask"
-            item.toolTip = "Ask this PDF — answers on this Mac, nothing uploaded"
+            item.toolTip = "Ask this PDF \u{00B7} answers on this Mac, nothing uploaded"
             return item
         case ItemID.share:
+            // v3: Share holds every way a copy leaves the Mac — the native picker, plus the
+            // export-only Clean and Locked copies (moved here from the old Read tools).
             let item = NSToolbarItem(itemIdentifier: id)
             let b = NSButton(image: Self.toolbarSymbol(["square.and.arrow.up"], "Share") ?? NSImage(),
-                             target: self, action: #selector(shareDocument(_:)))
+                             target: self, action: #selector(showShareMenu(_:)))
             b.bezelStyle = .texturedRounded
             shareButton = b
             item.view = b
             item.label = "Share"
-            item.toolTip = "Share — AirDrop, Mail, Messages…"
-            return item
-        case ItemID.modeSegment:
-            let item = NSToolbarItem(itemIdentifier: id)
-            let seg = NSSegmentedControl(labels: modeChoices.map {
-                                             switch $0 {
-                                             case .read: return "Read"
-                                             case .markup: return "Markup"
-                                             case .redact: return "Redact"
-                                             case .forms: return "Forms"
-                                             }
-                                         },
-                                         trackingMode: .selectOne,
-                                         target: self, action: #selector(modeSegmentChanged(_:)))
-            seg.selectedSegment = modeChoices.firstIndex(of: mode) ?? 0
-            seg.segmentStyle = .automatic
-            modeSegment = seg
-            item.view = seg
-            item.label = "Mode"
-            item.toolTip = "Read · Markup (⇧⌘A) · Redact (⇧⌘R) · Forms (⇧⌘F)"
+            item.toolTip = "Share \u{00B7} send a copy, a clean copy, or a locked copy"
             return item
         case ItemID.saveDoc:
-            // v2.5: the document is only written when this is used. It lights up when there
-            // is something to write, and is the one control that touches the user's file.
+            // v2.5: the document is only written when this is used. v3: it is the window's
+            // one filled control — quiet when clean, Jack teal (prominent) when dirty.
             let item = NSToolbarItem(itemIdentifier: id)
             let b = NSButton(title: "Save", target: self, action: #selector(saveDocumentAction(_:)))
+            b.image = Chrome.symbol(["square.and.arrow.down"], "Save", .init(pointSize: 13, weight: .medium))
+            b.imagePosition = .imageLeading
             b.bezelStyle = .texturedRounded
+            b.font = .systemFont(ofSize: 13, weight: .semibold)
             b.keyEquivalent = ""
-            b.isEnabled = (document as? NSDocument)?.isDocumentEdited == true
+            b.widthAnchor.constraint(equalToConstant: 86).isActive = true
             saveButton = b
+            saveItem = item
             item.view = b
             item.label = "Save"
-            item.toolTip = "Save your changes (⌘S) — the first save of someone else's PDF makes a copy"
+            item.toolTip = "Save your changes (\u{2318}S) \u{00B7} the first save of someone else's PDF makes a copy"
+            DispatchQueue.main.async { [weak self] in self?.syncSaveButton() }
             return item
         case ItemID.search:
             if #available(macOS 11.0, *) {
@@ -526,7 +706,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
                 item.searchField.action = #selector(searchChanged)
                 item.searchField.delegate = self
                 item.searchField.sendsWholeSearchString = true
-                item.preferredWidthForSearchField = 200
+                item.preferredWidthForSearchField = 180
+                // Tahoe stretches the search item to fill free space; the mock is 180 pt.
+                item.searchField.widthAnchor.constraint(lessThanOrEqualToConstant: 200).isActive = true
                 searchField = item.searchField
                 return item
             }
@@ -544,9 +726,13 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     @objc func toggleSidebar(_ sender: Any?) { sidebarVisible.toggle(); layoutViews() }
     @objc func undoEdit(_ sender: Any?) { docUndo.undo() }
     @objc func redoEdit(_ sender: Any?) { docUndo.redo() }
-    @objc func displayContinuous(_ sender: Any?) { pdfView.displayMode = .singlePageContinuous; pdfView.autoScales = true }
-    @objc func displaySinglePage(_ sender: Any?) { pdfView.displayMode = .singlePage; pdfView.autoScales = true }
-    @objc func displayTwoPages(_ sender: Any?) { pdfView.displayMode = .twoUpContinuous; pdfView.autoScales = true }
+    @objc func displayContinuous(_ sender: Any?) { pdfView.displayMode = .singlePageContinuous; reapplyZoom() }
+    @objc func displaySinglePage(_ sender: Any?) { pdfView.displayMode = .singlePage; reapplyZoom() }
+    @objc func displayTwoPages(_ sender: Any?) { pdfView.displayMode = .twoUpContinuous; reapplyZoom() }
+    /// Fit policies follow the view; a zoom the user picked (fixed / actual) stays put.
+    private func reapplyZoom() {
+        if zoomPolicy != .fixed && zoomPolicy != .actual { applyZoomPolicy(zoomPolicy) }
+    }
 
     // Keep the View pull-down's checkmarks true to the current state.
     func menuNeedsUpdate(_ menu: NSMenu) {
@@ -605,7 +791,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         askPanel.addSubview(divider)
 
         let title = NSTextField(labelWithString: "Ask this PDF")
-        title.font = .systemFont(ofSize: 14, weight: .semibold)
+        title.font = Chrome.titleFont
         title.frame = NSRect(x: 16, y: h - 34, width: w - 60, height: 20)
         title.autoresizingMask = [.minYMargin]
         askPanel.addSubview(title)
@@ -617,9 +803,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         askSpinner.autoresizingMask = [.minYMargin]
         askPanel.addSubview(askSpinner)
 
-        let privacy = NSTextField(labelWithString: "Answers on this Mac — nothing is uploaded.")
-        privacy.font = .systemFont(ofSize: 10)
-        privacy.textColor = .secondaryLabelColor
+        let privacy = NSTextField(labelWithString: "Answers on this Mac. Nothing is uploaded.")
+        privacy.font = Chrome.metaFont
+        privacy.textColor = .tertiaryLabelColor
         privacy.frame = NSRect(x: 16, y: h - 52, width: w - 32, height: 14)
         privacy.autoresizingMask = [.minYMargin]
         askPanel.addSubview(privacy)
@@ -710,6 +896,21 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
 
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 260, height: 34))
 
+        // v3: the thumbnails toggle leads the title group (lights · thumbnails · title).
+        let side = NSButton(image: Chrome.symbol(["sidebar.leading", "sidebar.left"], "Thumbnails", Chrome.toolbarSymbol) ?? NSImage(),
+                            target: self, action: #selector(toggleSidebar(_:)))
+        if #available(macOS 26.0, *) {
+            side.bezelStyle = .glass
+            side.borderShape = .capsule
+        } else {
+            side.bezelStyle = .texturedRounded
+        }
+        side.toolTip = "Show or hide thumbnails (\u{2318}T)"
+        side.setAccessibilityLabel("Thumbnails")
+        side.frame = NSRect(x: 0, y: 2, width: 36, height: 30)
+        container.addSubview(side)
+        titleLeadingInset = 46
+
         titleButton.isBordered = false
         titleButton.alignment = .left
         titleButton.lineBreakMode = .byTruncatingMiddle
@@ -729,8 +930,8 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         container.addSubview(b)
         titleChevron = b
 
-        subtitleLabel.font = .systemFont(ofSize: 11)
-        subtitleLabel.textColor = .secondaryLabelColor
+        subtitleLabel.font = Chrome.metaFont
+        subtitleLabel.textColor = .tertiaryLabelColor
         subtitleLabel.lineBreakMode = .byTruncatingTail
         container.addSubview(subtitleLabel)
 
@@ -748,15 +949,18 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         // never the fallback directory's name.
         let name = (document as? NSDocument)?.fileURL == nil
             ? ((document as? NSDocument)?.displayName ?? "Untitled")
-            : pdfURL.lastPathComponent
-        let font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+            : pdfURL.deletingPathExtension().lastPathComponent
+        let font = Chrome.titleFont
         titleButton.attributedTitle = NSAttributedString(string: name, attributes: [
             .font: font, .foregroundColor: NSColor.labelColor
         ])
         let titleWidth = min(ceil(name.size(withAttributes: [.font: font]).width) + 8, 420)
-        titleButton.frame = NSRect(x: 4, y: 15, width: titleWidth, height: 18)
+        let x0 = titleLeadingInset
+        titleButton.frame = NSRect(x: x0 + 4, y: 15, width: titleWidth, height: 18)
         titleChevron?.frame = NSRect(x: titleButton.frame.maxX, y: 16, width: 16, height: 16)
-        subtitleLabel.frame = NSRect(x: 6, y: 0, width: max(titleWidth + 40, 200), height: 14)
+        // The status line sizes to its text so the group never reserves empty toolbar space.
+        let statusW = ceil(subtitleLabel.attributedStringValue.size().width) + 8
+        subtitleLabel.frame = NSRect(x: x0 + 6, y: 0, width: min(max(titleWidth + 20, statusW), 520), height: 14)
         container.frame = NSRect(x: 0, y: 0,
                                  width: max(titleButton.frame.maxX + 20, subtitleLabel.frame.maxX),
                                  height: 34)
@@ -884,10 +1088,17 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         }
     }
 
-    @objc func zoomIn(_ sender: Any?) { pdfView.zoomIn(sender) }
-    @objc func zoomOut(_ sender: Any?) { pdfView.zoomOut(sender) }
-    @objc func zoomToFit(_ sender: Any?) { pdfView.autoScales = true }
-    @objc func actualSize(_ sender: Any?) { pdfView.scaleFactor = 1.0 }
+    // ⌘+ / ⌘− step a fixed ladder instead of PDFKit's multiplier.
+    @objc func zoomIn(_ sender: Any?) {
+        let s = pdfView.scaleFactor
+        applyZoomPolicy(.fixed, fixed: Self.zoomLadder.first { $0 > s + 0.001 } ?? Self.zoomLadder.last!)
+    }
+    @objc func zoomOut(_ sender: Any?) {
+        let s = pdfView.scaleFactor
+        applyZoomPolicy(.fixed, fixed: Self.zoomLadder.last { $0 < s - 0.001 } ?? Self.zoomLadder.first!)
+    }
+    @objc func zoomToFit(_ sender: Any?) { applyZoomPolicy(.fitPage) }
+    @objc func actualSize(_ sender: Any?) { applyZoomPolicy(.actual) }
     @objc func focusSearch(_ sender: Any?) { if let f = searchField { window?.makeFirstResponder(f) } }
 
     @objc func printDocument(_ sender: Any?) {
@@ -904,11 +1115,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     private var modeChoices: [Mode] { JackFormUI.enabled ? [.read, .markup, .redact, .forms]
                                                          : [.read, .markup, .redact] }
 
-    @objc private func modeSegmentChanged(_ sender: NSSegmentedControl) {
-        let choices = modeChoices
-        let i = sender.selectedSegment
-        setMode(i >= 0 && i < choices.count ? choices[i] : .read)
-    }
+    @objc func showReadMode(_ sender: Any?)   { setMode(.read) }
+    @objc func showMarkupMode(_ sender: Any?) { setMode(.markup) }
+    @objc func showRedactMode(_ sender: Any?) { setMode(.redact) }
 
     // The legacy toggles remain the shortcut/menu entry points (⇧⌘A, ⇧⌘R, ⇧⌘F, View menu).
     @objc func toggleMarkup(_ sender: Any?) { setMode(mode == .markup ? .read : .markup) }
@@ -955,348 +1164,245 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             pdfView.formAuthoringOn = true
             pdfView.formFieldMenuItems = { [weak self] widget in self?.fieldMenuItems(for: widget) ?? [] }
         }
-        modeSegment?.selectedSegment = modeChoices.firstIndex(of: new) ?? 0
         populateModeRow()
+        updateStatusLine()
     }
 
     private func applyRedactStyle() {
         pdfView.eraseStyle = redactUsesErase && mode == .redact
-        blackoutChip?.state = redactUsesErase ? .off : .on
-        blackoutChip?.bezelColor = redactUsesErase ? nil : .black
-        eraseChip?.state = redactUsesErase ? .on : .off
+        redactTiles?.blackout.isArmed = !redactUsesErase
+        redactTiles?.erase.isArmed = redactUsesErase
     }
 
-    @objc private func pickBlackout() { redactUsesErase = false; applyRedactStyle() }
-    @objc private func pickErase()    { redactUsesErase = true;  applyRedactStyle() }
+    @objc private func pickBlackout() { redactUsesErase = false; if mode != .redact { setMode(.redact) }; applyRedactStyle() }
+    @objc private func pickErase()    { redactUsesErase = true;  if mode != .redact { setMode(.redact) }; applyRedactStyle() }
 
-    /// One row, fixed height, always present. Every mode's controls are built ONCE, when the
-    /// window is built (so even the first switch shows ready-made controls), and switching
-    /// modes only shows/hides those rows.
-    ///
-    /// 🧨 This used to tear every control down and build new ones on each switch (10–34 views
-    /// per switch, measured by the mode self-test). On Tahoe the fresh controls visibly re-drew
-    /// in place, so every Read/Markup/Redact click looked like the strip refreshing. Never
-    /// rebuild here: update the existing controls' state instead (see the re-sync below).
-    private func populateModeRow() {
-        for m in modeChoices where modeRows[m] == nil {
-            let row = ToolStripView(frame: modeRow.bounds)
-            row.autoresizingMask = [.width, .height]
-            row.isHidden = true
-            modeRow.addSubview(row)
-            modeRows[m] = row
-            buildRow = row
-            switch m {
-            case .read:   buildReadRow()
-            case .markup: buildMarkupRow()
-            case .redact: buildRedactRow()
-            case .forms:  buildFormRow()
-            }
-        }
-        for (m, row) in modeRows { row.isHidden = m != mode }
-        // State the old rebuild refreshed as a side effect, now synced explicitly.
-        switch mode {
-        case .read:
-            if let doc = pdfView.document, let page = pdfView.currentPage {
-                syncPagePopup(index: doc.index(for: page), count: doc.pageCount)
-            }
-        case .markup:
-            typewriterButton?.state = pdfView.typewriterMode ? .on : .off
-            syncStampControls()
-        case .redact:
-            applyRedactStyle()
-        case .forms:
-            break
-        }
-    }
+    // MARK: - Work row (v3): Mode · Tools · Options
 
-    private func rowLabel(_ text: String) {
-        let l = NSTextField(labelWithString: text.uppercased())
-        l.font = .systemFont(ofSize: 10, weight: .semibold)
-        l.textColor = .tertiaryLabelColor
-        l.frame = NSRect(x: 14, y: 15, width: 56, height: 14)
-        buildRow.addSubview(l)
-    }
+    /// Markup tools. Select/Text/Highlight/Underline/Strike/Note ARM (teal) and stay armed
+    /// until another tool or Esc; Sign and Image are momentary (menu / file picker).
+    enum MarkupTool: Int { case select, text, highlight, underline, strike, note, sign, image }
+    private var markupTool: MarkupTool = .select
+    private var modeSwitch: ModeSwitch?
+    private let modeDivider = ZoneDivider()
+    private var markupTiles: [MarkupTool: ToolTile] = [:]
+    private var redactTiles: (blackout: ToolTile, erase: ToolTile)?
+    private var toolGroups: [ToolGroupView] = []
+    private var allTiles: [ToolTile] = []
+    private let markupOptions = HStackRow()
+    private let markupOptionsDivider = ZoneDivider()
+    private var highlightSwatches: [SwatchButton] = []
+    private var inkSwatches: [SwatchButton] = []
+    static let inkColors: [(name: String, color: NSColor)] = [
+        ("Red", NSColor(srgbRed: 0.86, green: 0.18, blue: 0.16, alpha: 1)),
+        ("Blue", NSColor(srgbRed: 0.10, green: 0.42, blue: 0.86, alpha: 1)),
+        ("Black", NSColor(srgbRed: 0.08, green: 0.09, blue: 0.11, alpha: 1)),
+        ("Green", NSColor(srgbRed: 0.13, green: 0.58, blue: 0.30, alpha: 1))
+    ]
 
-    @discardableResult
-    private func rowHint(_ text: String) -> NSTextField {
-        let hint = NSTextField(labelWithString: text)
-        hint.textColor = .secondaryLabelColor
-        hint.font = .systemFont(ofSize: 11)
-        hint.alignment = .right
-        hint.frame = NSRect(x: 0, y: 13, width: min(640, hint.intrinsicContentSize.width + 8), height: 16)
-        buildRow.addSubview(hint)
-        buildRow.anchorRight(hint, gap: 16, yields: true)
-        return hint
-    }
-
-    /// Tool-strip container whose right-aligned controls are re-laid on EVERY resize.
-    ///
-    /// 🧨 The strips were built with fixed frames at whatever `window.frame.width` happened to
-    /// be when the tool was toggled, relying on autoresizing margins from then on. Depending on
-    /// how the titlebar imposes the accessory's width (frame vs constraints, maximize vs drag),
-    /// the right-edge buttons — including Apply — could end up laid out against a stale width
-    /// and drift out of the visible strip on wide or resized windows. Re-anchoring from the
-    /// CURRENT bounds on every resize makes the layout correct no matter which path resized us.
-    private final class ToolStripView: NSView {
-        /// (view, gap): each view's trailing edge sits `gap` points in from the strip's right.
-        var rightAligned: [(view: NSView, gap: CGFloat)] = []
-        var yielding: Set<ObjectIdentifier> = []          // hints: hide instead of overlapping
-        private var yieldOverride: [ObjectIdentifier: Bool] = [:]
-        func anchorRight(_ view: NSView, gap: CGFloat, yields: Bool = false) {
-            rightAligned.append((view, gap))
-            if yields { yielding.insert(ObjectIdentifier(view)) }
-            realign()
-        }
-        func resetAnchors() {
-            rightAligned = []; yielding = []; yieldOverride = [:]
-        }
-        /// External visibility control for a yielding view (collision still wins).
-        func setYieldHidden(_ view: NSView, _ hidden: Bool) {
-            yieldOverride[ObjectIdentifier(view)] = hidden
-            realign()
-        }
-        private func realign() {
-            // Vertically center every control for whatever height the titlebar granted.
-            for v in subviews where v.frame.height < bounds.height {
-                v.frame.origin.y = ((bounds.height - v.frame.height) / 2).rounded()
-            }
-            let anchored = Set(rightAligned.map { ObjectIdentifier($0.view) })
-            let leftMax = subviews.filter { !anchored.contains(ObjectIdentifier($0)) }
-                .map { $0.frame.maxX }.max() ?? 0
-            for (v, gap) in rightAligned {
-                v.frame.origin.x = bounds.maxX - gap - v.frame.width
-                let id = ObjectIdentifier(v)
-                if yielding.contains(id) {
-                    // A hint never overlaps real controls — it yields (narrow windows).
-                    v.isHidden = (yieldOverride[id] ?? false) || v.frame.minX < leftMax + 12
-                }
-            }
-        }
+    /// The tray view behind the work row: one step deeper than the title bar.
+    final class WorkRowView: NSView {
+        var onLayout: (() -> Void)?
         override func resizeSubviews(withOldSize oldSize: NSSize) {
             super.resizeSubviews(withOldSize: oldSize)
-            realign()
+            onLayout?()
         }
-        override func layout() {
-            super.layout()
-            realign()
+        override func draw(_ dirtyRect: NSRect) {
+            effectiveAppearance.performAsCurrentDrawingAppearance {
+                Chrome.trayFill.setFill(); bounds.fill()
+                Chrome.separator.setFill(); NSRect(x: 0, y: 0, width: bounds.width, height: 0.5).fill()
+            }
         }
     }
 
-    private func buildReadRow() {
-        rowLabel("Read")
-        let zoom = NSSegmentedControl(images: [
-            Self.toolbarSymbol(["minus.magnifyingglass"], "Zoom Out") ?? NSImage(),
-            Self.toolbarSymbol(["plus.magnifyingglass"], "Zoom In") ?? NSImage()],
-            trackingMode: .momentary, target: self, action: #selector(zoomSegment(_:)))
-        zoom.controlSize = .small
-        zoom.frame = NSRect(x: 74, y: 8, width: 84, height: 26)
-        buildRow.addSubview(zoom)
-
-        let pp = NSPopUpButton(frame: NSRect(x: 166, y: 8, width: 108, height: 26), pullsDown: false)
-        pp.controlSize = .small
-        pp.font = .systemFont(ofSize: 11)
-        pp.target = self; pp.action = #selector(pagePicked(_:))
-        pagePopup = pp
-        buildRow.addSubview(pp)
-        if let doc = pdfView.document, let page = pdfView.currentPage {
-            syncPagePopup(index: doc.index(for: page), count: doc.pageCount)
+    /// Built ONCE. Switching modes only shows/hides each mode's panel.
+    /// 🧨 Never rebuild here (v2.9.15): rebuilt controls re-draw in place and every mode click
+    /// looked like the strip refreshing. Update existing controls' state instead.
+    private func buildWorkRow() {
+        let choices = modeChoices
+        let names: [Mode: String] = [.read: "Read", .markup: "Markup", .redact: "Redact", .forms: "Forms"]
+        let sw = ModeSwitch(titles: choices.map { names[$0] ?? "" },
+                            tips: choices.enumerated().map { i, m in "\(names[m] ?? "") (\u{2318}\(i + 1))" })
+        sw.onChange = { [weak self] i in
+            guard let self else { return }
+            let c = self.modeChoices
+            if i < c.count { self.setMode(c[i]) }
         }
-
-        let tools = NSPopUpButton(frame: NSRect(x: 282, y: 8, width: 92, height: 26), pullsDown: true)
-        tools.controlSize = .small
-        tools.font = .systemFont(ofSize: 11)
-        let menu = NSMenu()
-        let titleItem = NSMenuItem(title: "Tools", action: nil, keyEquivalent: "")
-        titleItem.image = Self.toolbarSymbol(["wrench.and.screwdriver"], "Tools")
-        menu.addItem(titleItem)
-        func t(_ title: String, _ action: Selector) {
-            let m = NSMenuItem(title: title, action: action, keyEquivalent: ""); m.target = self; menu.addItem(m)
+        modeSwitch = sw
+        modeRow.addSubview(sw)
+        modeRow.addSubview(modeDivider)
+        for m in choices {
+            let panel = HStackRow()
+            panel.gap = 4
+            panel.isHidden = true
+            modeRow.addSubview(panel)
+            modeRows[m] = panel
+            switch m {
+            case .read:   buildReadPanel(panel)
+            case .markup: buildMarkupPanel(panel)
+            case .redact: buildRedactPanel(panel)
+            case .forms:  buildFormPanel(panel)
+            }
         }
-        t("Make Searchable (OCR)…", #selector(makeSearchable(_:)))
-        t("Bates Numbering…", #selector(batesNumbering(_:)))
-        t("Watermark…", #selector(addWatermark(_:)))
-        t("Remove Watermark", #selector(removeWatermark(_:)))
-        t("Remove Bates Numbering", #selector(removeBates(_:)))
-        t("Compress…", #selector(compressDocument(_:)))
-        menu.addItem(.separator())
-        t("Copy Region as Image", #selector(copyRegionAsImage(_:)))
-        t("Save Region as Image…", #selector(saveRegionAsImage(_:)))
-        menu.addItem(.separator())
-        t("Crop Pages…", #selector(cropPages(_:)))
-        t("Remove Crop", #selector(removeCrop(_:)))
-        menu.addItem(.separator())
-        t("Clean for Sharing…", #selector(cleanForSharing(_:)))
-        t("Lock for Sharing…", #selector(lockForSharing(_:)))
-        tools.menu = menu
-        buildRow.addSubview(tools)
-
-        rowHint("Tools holds: Make Searchable · Bates · Watermark · Compress · Crop · Clean · Lock")
+        modeRow.onLayout = { [weak self] in self?.layoutWorkRow() }
+        measureLabeledRowWidth()
+        layoutWorkRow()
+        populateModeRow()
     }
 
-    @objc private func zoomSegment(_ sender: NSSegmentedControl) {
-        if sender.selectedSegment == 0 { pdfView.zoomOut(sender) } else { pdfView.zoomIn(sender) }
-    }
-
-    private func syncPagePopup(index: Int, count: Int) {
-        guard let pp = pagePopup else { return }
-        if pp.numberOfItems != count {
-            pp.removeAllItems()
-            pp.addItems(withTitles: (1...max(1, count)).map { "Page \($0)" })
+    private func layoutWorkRow() {
+        guard let sw = modeSwitch else { return }
+        let h = modeRow.bounds.height
+        sw.setFrameOrigin(NSPoint(x: Chrome.leadingEdge, y: ((h - sw.frame.height) / 2).rounded()))
+        modeDivider.frame = NSRect(x: sw.frame.maxX + 12, y: ((h - 18) / 2).rounded(), width: 1, height: 18)
+        let x0 = modeDivider.frame.maxX + 12
+        for row in modeRows.values {
+            row.frame = NSRect(x: x0, y: 0, width: max(0, modeRow.bounds.width - x0 - Chrome.trailingEdge), height: h)
+            row.relayout()
         }
-        if index >= 0 && index < pp.numberOfItems { pp.selectItem(at: index) }
+        updateLabelBreakpoint()
     }
 
-    @objc private func pagePicked(_ sender: NSPopUpButton) {
-        guard let doc = pdfView.document, let page = doc.page(at: sender.indexOfSelectedItem) else { return }
-        pdfView.go(to: page)
-    }
+    /// Width the work row needs with labels on, measured from the WIDEST mode (Markup with
+    /// its largest Options set), so every mode drops labels at the same point.
+    private var labeledRowWidth: CGFloat = 0
 
-    private func chip(_ title: String, _ action: Selector, x: CGFloat, w: CGFloat, toggle: Bool = false) -> NSButton {
-        let btn = NSButton(title: title, target: self, action: action)
-        if toggle { btn.setButtonType(.pushOnPushOff) }
-        btn.bezelStyle = .rounded
-        btn.controlSize = .small
-        btn.frame = NSRect(x: x, y: 8, width: w, height: 26)
-        buildRow.addSubview(btn)
-        return btn
-    }
-
-    private func buildMarkupRow() {
-        rowLabel("Markup")
-        let sign = NSPopUpButton(frame: NSRect(x: 74, y: 8, width: 100, height: 26), pullsDown: true)
-        sign.controlSize = .small
-        sign.font = .systemFont(ofSize: 11)
-        let sm = NSMenu()
-        let st = NSMenuItem(title: "Sign", action: nil, keyEquivalent: "")
-        st.image = Self.toolbarSymbol(["signature"], "Sign")
-        sm.addItem(st)
-        func si(_ title: String, _ action: Selector) {
-            let m = NSMenuItem(title: title, action: action, keyEquivalent: ""); m.target = self; sm.addItem(m)
+    private func measureLabeledRowWidth() {
+        allTiles.forEach { $0.showsLabel = true }
+        toolGroups.forEach { $0.relayout() }
+        var widest: CGFloat = 0
+        for (m, row) in modeRows {
+            row.relayout()
+            var w = row.contentWidth
+            if m == .markup { w += markupOptions.isHidden ? 12 + 240 : 0 }   // worst-case Options
+            widest = max(widest, w)
         }
-        si("Add Signature…", #selector(addSignature))
-        si("Place Check ✓", #selector(addCheck))
-        si("Place Cross ✘", #selector(addCross))
-        sign.menu = sm
-        buildRow.addSubview(sign)
+        let x0 = Chrome.leadingEdge + (modeSwitch?.frame.width ?? 0) + 12 + 1 + 12
+        labeledRowWidth = x0 + widest + Chrome.trailingEdge
+    }
 
-        let tw = NSButton(title: "Aa Typewriter", target: self, action: #selector(toggleTypewriter))
-        tw.setButtonType(.pushOnPushOff)
-        tw.bezelStyle = .rounded
-        tw.controlSize = .small
-        tw.state = pdfView.typewriterMode ? .on : .off
-        tw.frame = NSRect(x: 182, y: 8, width: 106, height: 26)
-        buildRow.addSubview(tw)
-        typewriterButton = tw
+    /// One breakpoint for every mode: below it, every group drops its labels together.
+    private func updateLabelBreakpoint() {
+        let show = modeRow.bounds.width >= labeledRowWidth
+        guard allTiles.first?.showsLabel != show else { return }
+        allTiles.forEach { $0.showsLabel = show }
+        toolGroups.forEach { $0.relayout() }
+        modeRows.values.forEach { $0.relayout() }
+    }
 
-        // Font + Size are PERMANENT row controls (they used to pop in over the color dots):
-        // idle, they set the default for the next typewriter text; while a capsule is open
-        // (typewriter, retype, or editing existing text) they restyle it live.
+    private func tile(_ symbol: [String], _ label: String, _ tip: String, _ action: Selector, tag: Int = 0) -> ToolTile {
+        let t = ToolTile(symbol: symbol, label: label, tip: tip, target: self, action: action)
+        t.tag = tag
+        allTiles.append(t)
+        return t
+    }
+
+    private func group(_ items: [NSView], _ label: String) -> ToolGroupView {
+        let g = ToolGroupView(items: items, label: label)
+        toolGroups.append(g)
+        return g
+    }
+
+    private func buildReadPanel(_ p: HStackRow) {
+        p.set([group([
+            tile(["text.viewfinder", "doc.text.magnifyingglass"], "Make Searchable", "Make Searchable \u{00B7} recognize text on scanned pages", #selector(makeSearchable(_:))),
+            tile(["arrow.down.right.and.arrow.up.left"], "Compress", "Compress \u{00B7} smaller file, same pages", #selector(compressDocument(_:))),
+            tile(["crop"], "Crop", "Crop \u{00B7} trim page margins", #selector(cropPages(_:))),
+            tile(["drop"], "Watermark", "Watermark \u{00B7} stamp text across every page", #selector(addWatermark(_:))),
+            tile(["number"], "Bates", "Bates \u{00B7} number pages for legal exhibits", #selector(batesNumbering(_:))),
+            tile(["camera.viewfinder"], "Snapshot", "Snapshot \u{00B7} copy a region as an image", #selector(copyRegionAsImage(_:)))
+        ], "Page tools")])
+    }
+
+    private func buildMarkupPanel(_ p: HStackRow) {
+        let spec: [(MarkupTool, [String], String, String)] = [
+            (.select, ["cursorarrow"], "Select", "Select (V) \u{00B7} move and resize marks"),
+            (.text, ["character.cursor.ibeam", "textformat"], "Text", "Text (T) \u{00B7} click the page and type"),
+            (.highlight, ["highlighter"], "Highlight", "Highlight (H) \u{00B7} mark selected text"),
+            (.underline, ["underline"], "Underline", "Underline (U) \u{00B7} underline selected text"),
+            (.strike, ["strikethrough"], "Strike", "Strike (S) \u{00B7} strike through selected text"),
+            (.note, ["text.bubble"], "Note", "Note (N) \u{00B7} pin a note to the page"),
+            (.sign, ["signature"], "Sign", "Sign (G) \u{00B7} place a saved signature"),
+            (.image, ["photo"], "Image", "Image (I) \u{00B7} place a picture or stamp")
+        ]
+        for (tool, sym, label, tip) in spec {
+            let t = tile(sym, label, tip, #selector(markupTileClicked(_:)), tag: tool.rawValue)
+            if tool == .sign { t.showsMenuIndicator = true }
+            markupTiles[tool] = t
+        }
+        let marks = group([MarkupTool.select, .text, .highlight, .underline, .strike, .note].compactMap { markupTiles[$0] }, "Marks")
+        let insert = group([MarkupTool.sign, .image].compactMap { markupTiles[$0] }, "Insert")
+
+        // Options: every control is created ONCE and only shown/hidden per armed tool.
+        let hlIndex = UserDefaults.standard.integer(forKey: "jack.highlightColor")
+        highlightSwatches = Self.highlightColors.enumerated().map { i, e in
+            let b = SwatchButton(color: e.color, name: "Highlight \(e.name)", target: self, action: #selector(swatchPicked(_:)))
+            b.tag = i; b.isChosen = i == hlIndex
+            return b
+        }
+        inkSwatches = Self.inkColors.enumerated().map { i, e in
+            let b = SwatchButton(color: e.color, name: e.name, target: self, action: #selector(swatchPicked(_:)))
+            b.tag = 100 + i
+            return b
+        }
         if fontPopup.numberOfItems == 0 {
             fontPopup.addItems(withTitles: ["System", "Helvetica", "Arial", "Times New Roman",
                                             "Georgia", "Courier New", "Verdana"])
             let saved = UserDefaults.standard.string(forKey: "jack.textFontFamily") ?? "System"
             if fontPopup.itemTitles.contains(saved) { fontPopup.selectItem(withTitle: saved) }
         }
-        fontPopup.frame = NSRect(x: 294, y: 8, width: 126, height: 26)
         fontPopup.controlSize = .small
-        fontPopup.font = .systemFont(ofSize: 11)
+        fontPopup.font = .systemFont(ofSize: 12)
         fontPopup.target = self; fontPopup.action = #selector(textStylePicked(_:))
-        buildRow.addSubview(fontPopup)
-
+        fontPopup.setFrameSize(NSSize(width: 124, height: 24))
         if typewriterSizePopup.numberOfItems == 0 {
             typewriterSizePopup.addItems(withTitles: ["8", "9", "10", "11", "12", "14", "18", "24", "36", "48"])
             let saved = UserDefaults.standard.double(forKey: "jack.textSize")
             typewriterSizePopup.selectItem(withTitle: saved > 0 ? String(Int(saved)) : "14")
             if typewriterSizePopup.indexOfSelectedItem < 0 { typewriterSizePopup.selectItem(withTitle: "14") }
         }
-        typewriterSizePopup.frame = NSRect(x: 426, y: 8, width: 56, height: 26)
         typewriterSizePopup.controlSize = .small
-        typewriterSizePopup.font = .systemFont(ofSize: 11)
+        typewriterSizePopup.font = .systemFont(ofSize: 12)
         typewriterSizePopup.target = self; typewriterSizePopup.action = #selector(textStylePicked(_:))
-        buildRow.addSubview(typewriterSizePopup)
-
-        var x: CGFloat = 492
-        for (i, entry) in Self.highlightColors.enumerated() {
-            let dot = NSButton(image: Self.swatch(entry.color), target: self, action: #selector(highlightDotPicked(_:)))
-            dot.isBordered = false
-            dot.tag = i
-            dot.toolTip = "Highlight \(entry.name)"
-            dot.frame = NSRect(x: x, y: 12, width: 18, height: 18)
-            buildRow.addSubview(dot)
-            x += 22
-        }
-        x += 8
-        let u = chip("U", #selector(underlineSelection(_:)), x: x, w: 32)
-        u.attributedTitle = NSAttributedString(string: "U", attributes: [
-            .underlineStyle: NSUnderlineStyle.single.rawValue,
-            .font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.labelColor])
-        x += 38
-        let s = chip("S", #selector(strikethroughSelection(_:)), x: x, w: 32)
-        s.attributedTitle = NSAttributedString(string: "S", attributes: [
-            .strikethroughStyle: NSUnderlineStyle.single.rawValue,
-            .font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.labelColor])
-        x += 38
-        let c = chip("Comment", #selector(addComment(_:)), x: x, w: 96)
-        c.image = NSImage(systemSymbolName: "text.bubble", accessibilityDescription: "Comment")
-        c.imagePosition = .imageLeading
-
-        // Size/Remove for the selected stamp live at the right edge; the hint yields to them.
-        stampSizeLabel.font = .systemFont(ofSize: 11)
+        stampSizeLabel.font = .systemFont(ofSize: 12)
         stampSizeLabel.textColor = .secondaryLabelColor
-        stampSizeLabel.frame = NSRect(x: 0, y: 13, width: 30, height: 16)
-        buildRow.addSubview(stampSizeLabel)
         sizeSlider.controlSize = .small
         sizeSlider.minValue = 14; sizeSlider.maxValue = 600
         sizeSlider.target = self; sizeSlider.action = #selector(resizeSelected)
-        sizeSlider.frame = NSRect(x: 0, y: 10, width: 120, height: 22)
-        buildRow.addSubview(sizeSlider)
+        sizeSlider.setFrameSize(NSSize(width: 120, height: 20))
         removeButton.title = "Remove"
         removeButton.bezelStyle = .rounded
         removeButton.controlSize = .small
         removeButton.target = self; removeButton.action = #selector(removeSelected)
-        removeButton.frame = NSRect(x: 0, y: 8, width: 76, height: 26)
-        buildRow.addSubview(removeButton)
-        buildRow.anchorRight(removeButton, gap: 16)
-        buildRow.anchorRight(sizeSlider, gap: 100)
-        buildRow.anchorRight(stampSizeLabel, gap: 226)
-        markupHint = rowHint("drop an image to place it")
-        syncStampControls()
+        let optionViews: [NSView] = highlightSwatches + inkSwatches
+            + [fontPopup, typewriterSizePopup, stampSizeLabel, sizeSlider, removeButton]
+        markupOptions.gap = 4
+        markupOptions.set(optionViews)
+        p.set([marks, insert, markupOptionsDivider, markupOptions],
+              spacingBefore: [ObjectIdentifier(markupOptionsDivider): 8, ObjectIdentifier(markupOptions): 8])
+        syncMarkupOptions()
     }
 
-    @objc private func highlightDotPicked(_ sender: NSButton) {
-        let i = (0..<Self.highlightColors.count).contains(sender.tag) ? sender.tag : 0
-        UserDefaults.standard.set(i, forKey: "jack.highlightColor")
-        annotateSelection(.highlight, color: Self.highlightColors[i].color, name: "Highlight")
-    }
-
-    private func syncStampControls() {
-        let has = selected != nil
-        sizeSlider.isHidden = !has;   sizeSlider.isEnabled = has
-        removeButton.isHidden = !has; removeButton.isEnabled = has
-        stampSizeLabel.isHidden = !has
-        if let hint = markupHint { (hint.superview as? ToolStripView)?.setYieldHidden(hint, has) }
-    }
-
-    private func buildRedactRow() {
-        rowLabel("Redact")
-        let black = chip("Blackout", #selector(pickBlackout), x: 74, w: 80, toggle: true)
-        let er = chip("Erase", #selector(pickErase), x: 160, w: 64, toggle: true)
-        blackoutChip = black
-        eraseChip = er
-        redactTermField.placeholderString = "Redact every occurrence of…"
+    private func buildRedactPanel(_ p: HStackRow) {
+        let black = tile(["rectangle.fill"], "Blackout", "Blackout (B) \u{00B7} cover with solid black, verified at save", #selector(pickBlackout))
+        let erase = tile(["eraser"], "Erase", "Erase (E) \u{00B7} remove and match the paper", #selector(pickErase))
+        redactTiles = (black, erase)
+        let g = group([black, erase], "Redaction style")
+        redactTermField.placeholderString = "Redact every match of\u{2026}"
         redactTermField.font = .systemFont(ofSize: 12)
-        redactTermField.frame = NSRect(x: 234, y: 9, width: 220, height: 24)
+        redactTermField.bezelStyle = .roundedBezel
+        if #available(macOS 26.0, *) { redactTermField.borderShape = .roundedRectangle }
+        redactTermField.setFrameSize(NSSize(width: 250, height: 24))
         redactTermField.target = self
         redactTermField.action = #selector(redactAllMatches)
-        buildRow.addSubview(redactTermField)
+        redactTermField.toolTip = "Type a word or number and press Return to redact every match"
+        let div = ZoneDivider()
+        p.set([g, div, redactTermField], spacingBefore: [ObjectIdentifier(div): 8, ObjectIdentifier(redactTermField): 8])
         applyRedactStyle()
-        rowHint("swipe applies instantly · certificate at save · ⌘Z undoes")
     }
 
-    private func buildFormRow() {
-        rowLabel("Forms")
+    private func buildFormPanel(_ p: HStackRow) {
         formPaletteButtons = []
-        var x: CGFloat = 74
         for (i, entry) in Self.formPalette.enumerated() {
             let btn = NSButton(title: entry.0, target: self, action: #selector(fieldToolPicked(_:)))
             btn.image = NSImage(systemSymbolName: entry.1, accessibilityDescription: entry.0)
@@ -1305,13 +1411,185 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             btn.bezelStyle = .rounded
             btn.controlSize = .small
             btn.tag = i
-            let w = btn.intrinsicContentSize.width + 14
-            btn.frame = NSRect(x: x, y: 8, width: w, height: 26)
-            buildRow.addSubview(btn)
+            btn.setFrameSize(NSSize(width: btn.intrinsicContentSize.width + 14, height: 24))
             formPaletteButtons.append(btn)
-            x += w + 6
         }
-        rowHint("click selects · drag moves · corner resizes · double-click caption renames · ⌫ deletes · fill in Read")
+        p.set(formPaletteButtons)
+    }
+
+    /// Show the current mode's panel and re-sync state (never rebuilds anything).
+    private func populateModeRow() {
+        for (m, row) in modeRows { row.isHidden = m != mode }
+        modeSwitch?.select(modeChoices.firstIndex(of: mode) ?? 0)
+        switch mode {
+        case .markup: syncMarkupTiles(); syncMarkupOptions()
+        case .redact: applyRedactStyle()
+        default: break
+        }
+    }
+
+    // MARK: Markup tools
+
+    @objc private func markupTileClicked(_ sender: NSButton) {
+        guard let tool = MarkupTool(rawValue: sender.tag) else { return }
+        switch tool {
+        case .sign:  showSignMenu(from: sender)
+        case .image: placeImageFromFile()
+        default:     armMarkupTool(markupTool == tool && tool != .select ? .select : tool)
+        }
+    }
+
+    func armMarkupTool(_ tool: MarkupTool) {
+        if mode != .markup { setMode(.markup) }
+        if tool == .note, hasLiveSelection {
+            addComment(nil)          // a note on the selected text; nothing stays armed
+            return
+        }
+        if tool != .text { commitTypewriterEditor() }
+        markupTool = tool
+        pdfView.typewriterMode = tool == .text
+        pdfView.noteMode = tool == .note
+        syncMarkupTiles()
+        syncMarkupOptions()
+        if [.highlight, .underline, .strike].contains(tool) { applyArmedMarkToSelection() }
+    }
+
+    private var hasLiveSelection: Bool {
+        !((pdfView.currentSelection?.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+    }
+
+    /// While Highlight/Underline/Strike is armed, every finished text selection gets marked.
+    private func applyArmedMarkToSelection() {
+        guard mode == .markup, hasLiveSelection else { return }
+        switch markupTool {
+        case .highlight: annotateSelection(.highlight, color: savedHighlightColor, name: "Highlight")
+        case .underline: annotateSelection(.underline, color: inkColor(for: .underline), name: "Underline")
+        case .strike:    annotateSelection(.strikeOut, color: inkColor(for: .strike), name: "Strikethrough")
+        default: break
+        }
+    }
+
+    private func inkColor(for tool: MarkupTool) -> NSColor {
+        let key = tool == .underline ? "jack.underlineColor" : "jack.strikeColor"
+        let fallback = tool == .underline ? 1 : 0
+        let i = UserDefaults.standard.object(forKey: key) as? Int ?? fallback
+        return Self.inkColors[(0..<Self.inkColors.count).contains(i) ? i : fallback].color
+    }
+
+    @objc private func swatchPicked(_ sender: SwatchButton) {
+        if sender.tag >= 100 {
+            let key = markupTool == .underline ? "jack.underlineColor" : "jack.strikeColor"
+            UserDefaults.standard.set(sender.tag - 100, forKey: key)
+        } else {
+            UserDefaults.standard.set(sender.tag, forKey: "jack.highlightColor")
+        }
+        syncMarkupOptions()
+        applyArmedMarkToSelection()
+    }
+
+    private func syncMarkupTiles() {
+        for (tool, t) in markupTiles { t.isArmed = tool == markupTool && tool != .select }
+        markupTiles[.select]?.isArmed = false
+    }
+
+    /// The Options zone shows only what the armed tool (or the selected stamp) needs.
+    private func syncMarkupOptions() {
+        let stamp = selected != nil
+        let showText = !stamp && (markupTool == .text || typewriterEditor != nil)
+        let showHL = !stamp && markupTool == .highlight
+        let showInk = !stamp && (markupTool == .underline || markupTool == .strike)
+        let hl = UserDefaults.standard.integer(forKey: "jack.highlightColor")
+        highlightSwatches.forEach { $0.isHidden = !showHL; $0.isChosen = $0.tag == hl }
+        let inkKey = markupTool == .underline ? "jack.underlineColor" : "jack.strikeColor"
+        let ink = UserDefaults.standard.object(forKey: inkKey) as? Int ?? (markupTool == .underline ? 1 : 0)
+        inkSwatches.forEach { $0.isHidden = !showInk; $0.isChosen = $0.tag - 100 == ink }
+        fontPopup.isHidden = !showText
+        typewriterSizePopup.isHidden = !showText
+        stampSizeLabel.isHidden = !stamp; sizeSlider.isHidden = !stamp; removeButton.isHidden = !stamp
+        sizeSlider.isEnabled = stamp; removeButton.isEnabled = stamp
+        let any = stamp || showText || showHL || showInk
+        markupOptions.isHidden = !any
+        markupOptionsDivider.isHidden = !any
+        markupOptions.relayout()
+        modeRows[.markup]?.relayout()
+    }
+
+    private func syncStampControls() { syncMarkupOptions() }
+
+    private func showSignMenu(from anchor: NSView?) {
+        if mode != .markup { setMode(.markup) }
+        guard let anchor = anchor ?? markupTiles[.sign] else { return }
+        let m = NSMenu()
+        func add(_ title: String, _ symbol: String, _ action: Selector) {
+            let it = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            it.target = self
+            it.image = Chrome.symbol([symbol], title, Chrome.menuSymbol)
+            m.addItem(it)
+        }
+        add("Add Signature\u{2026}", "signature", #selector(addSignature))
+        add("Place Checkmark", "checkmark", #selector(addCheck))
+        add("Place Cross", "xmark", #selector(addCross))
+        m.popUp(positioning: nil, at: NSPoint(x: 0, y: anchor.bounds.height + 4), in: anchor)
+    }
+
+    private func placeImageFromFile() {
+        guard let window else { return }
+        if mode != .markup { setMode(.markup) }
+        let panel = NSOpenPanel()
+        panel.allowedFileTypes = NSImage.imageTypes
+        panel.allowsMultipleSelection = false
+        panel.message = "Choose a picture or stamp to place on the page"
+        panel.beginSheetModal(for: window) { [weak self] r in
+            guard r == .OK, let url = panel.url, let img = NSImage(contentsOf: url) else { return }
+            self?.place(img)
+        }
+    }
+
+    @objc private func showShareMenu(_ sender: NSButton) {
+        let m = NSMenu()
+        func add(_ title: String, _ symbol: String, _ action: Selector) {
+            let it = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            it.target = self
+            it.image = Chrome.symbol([symbol], title, Chrome.menuSymbol)
+            m.addItem(it)
+        }
+        add("Send a Copy\u{2026}", "square.and.arrow.up", #selector(shareDocument(_:)))
+        m.addItem(.separator())
+        add("Save a Clean Copy\u{2026}", "sparkles", #selector(cleanForSharing(_:)))
+        add("Save a Locked Copy\u{2026}", "lock", #selector(lockForSharing(_:)))
+        m.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 4), in: sender)
+    }
+
+    /// Single-letter tool keys (PDF view focused, no modifiers), Esc to put tools down.
+    private func handleToolKey(_ event: NSEvent) -> Bool {
+        guard event.modifierFlags.intersection([.command, .option, .control]).isEmpty else { return false }
+        if event.keyCode == 53 {   // Esc: disarm first, then back to Read
+            if mode == .markup && markupTool != .select { armMarkupTool(.select); return true }
+            if mode != .read { setMode(.read); return true }
+            return false
+        }
+        guard let ch = event.charactersIgnoringModifiers?.lowercased(), ch.count == 1 else { return false }
+        switch mode {
+        case .markup:
+            let map: [String: MarkupTool] = ["v": .select, "t": .text, "h": .highlight, "u": .underline,
+                                             "s": .strike, "n": .note, "g": .sign, "i": .image]
+            guard let t = map[ch] else { return false }
+            if t == .sign { showSignMenu(from: markupTiles[.sign]) }
+            else if t == .image { placeImageFromFile() }
+            else { armMarkupTool(t) }
+            return true
+        case .redact:
+            if ch == "b" { pickBlackout(); return true }
+            if ch == "e" { pickErase(); return true }
+            return false
+        default:
+            return false
+        }
+    }
+
+    func noteRequested(at point: CGPoint, on page: PDFPage) {
+        addComment(on: page, at: point)
+        armMarkupTool(.select)
     }
 
     // Erase is an EDIT, not an export: affected pages are swapped in place (undoable via
@@ -2268,14 +2546,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     }
 
     @objc private func toggleTypewriter() {
-        let on = !(pdfView.typewriterMode)
-        pdfView.typewriterMode = on
-        typewriterButton?.state = on ? .on : .off
-        if on {
-            flashSubtitle("Typewriter — click the page and type. Click anywhere else places it, Esc cancels")
-        } else {
-            commitTypewriterEditor()
-        }
+        armMarkupTool(markupTool == .text ? .select : .text)
     }
 
     private var typewriterFontSize: CGFloat {
@@ -2324,7 +2595,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         // One-shot (the armed tool kept spawning boxes on every click): placing the capsule
         // disarms the tool. Click away to place the text; Esc cancels.
         pdfView.typewriterMode = false
-        typewriterButton?.state = .off
+        markupTool = .select
+        syncMarkupTiles()
+        syncMarkupOptions()   // font/size stay up while the capsule is open
     }
 
     func freeTextEditRequested(_ ann: PDFAnnotation) {
@@ -2492,6 +2765,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         typewriterEditor = nil
         typewriterTarget = nil
         typewriterEditing = nil
+        syncMarkupOptions()   // the Text options hide once the capsule closes (unless Text is armed)
 
         if text.isEmpty {
             // Empty commit: a new placement becomes nothing; an edited annotation is removed.
@@ -2543,6 +2817,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         typewriterEditor = nil
         typewriterTarget = nil
         typewriterEditing = nil
+        syncMarkupOptions()   // the Text options hide once the capsule closes (unless Text is armed)
         // Cancel while re-editing: put the original back untouched (no undo entry).
         if let old = editing, let page = target?.page {
             page.addAnnotation(old)
@@ -3282,8 +3557,10 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
 
     /// Transient status under the title, restored to the page indicator after a beat.
     private func flashSubtitle(_ text: String) {
+        flashUntil = Date().addingTimeInterval(2.5)
         subtitleLabel.stringValue = text
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in self?.pageChanged() }
+        layoutTitleAccessory()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.55) { [weak self] in self?.updateStatusLine() }
     }
 
     // One pasteboard item carrying EVERY flavor a paste target can want:
@@ -3889,6 +4166,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         matchIndex = 0
         pdfView.highlightedSelections = nil
         pdfView.setCurrentSelection(nil, animate: false)
+        setSubtitle("")
         pageChanged()
     }
 
@@ -3947,13 +4225,30 @@ extension DocumentWindowController {
         ]
         var log = "jack mode self-test · \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] ?? "?") · \(Date())\n"
         var failures = 0
+        // v3 D2: a document must never open above 100% (the old fit-to-width bug).
+        let openPct = Int((pdfView.scaleFactor * 100).rounded())
+        let zoomOK = openPct <= 100 && !pdfView.autoScales
+        if !zoomOK { failures += 1 }
+        log += "\(zoomOK ? "ok  " : "FAIL") open zoom: \(openPct)% policy=\(zoomPolicy.rawValue) autoScales=\(pdfView.autoScales) window=\(Int(window.frame.width))x\(Int(window.frame.height)) labels=\(allTiles.first?.showsLabel ?? false)\n"
+        if let dir = ProcessInfo.processInfo.environment["JACK_MODE_SELFTEST_SNAP"] {
+            func snap(_ v: NSView, _ name: String) {
+                guard v.bounds.width > 0, let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) else { return }
+                v.cacheDisplay(in: v.bounds, to: rep)
+                try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: "\(dir)/\(name).png"))
+            }
+            snap(hud, "00-page-pill")
+            snap(sidebar.scrollView, "00-sidebar")
+            if let t = titleContainer { snap(t, "00-title") }
+            let home = HomePopoverViewController()
+            home.view.appearance = window.appearance
+            snap(home.view, "00-launcher")
+        }
         var i = 0
         func next() {
             guard i < steps.count else {
                 NotificationCenter.default.removeObserver(token)
-                log += failures == 0 ? "PASS\n" : "FAIL (\(failures) step(s))\n"
-                try? log.write(toFile: "/tmp/jack-mode-selftest.log", atomically: true, encoding: .utf8)
-                exit(failures == 0 ? 0 : 1)
+                behaviorChecks()
+                return
             }
             let (name, act) = steps[i]; i += 1
             let before = Set(views(modeRow).map(ObjectIdentifier.init))
@@ -3982,6 +4277,72 @@ extension DocumentWindowController {
                 log += "\(bad ? "FAIL" : "ok  ") \(name): rowViewsRemoved=\(removed) rowViewsAdded=\(added) rowAnimations=\(anims) pageFrameMoved=\(frameMoved) scaleChanged=\(scaled) scrolled=\(scrolled) docReloads=\(reloads)\n"
                 next()
             }
+        }
+        // v3 behavior: zoom ladder, tool keys, armed Highlight on a real selection + undo.
+        func check(_ name: String, _ ok: Bool, _ detail: String) {
+            if !ok { failures += 1 }
+            log += "\(ok ? "ok  " : "FAIL") \(name): \(detail)\n"
+        }
+        func behaviorChecks() {
+            applyZoomPolicy(.actual)
+            let a = pdfView.scaleFactor
+            zoomIn(nil); let up = pdfView.scaleFactor
+            zoomOut(nil); let down = pdfView.scaleFactor
+            check("zoom ladder", abs(a - 1) < 0.001 && abs(up - 1.25) < 0.001 && abs(down - 1) < 0.001,
+                  "actual=\(a) in=\(up) out=\(down) policy=\(zoomPolicy.rawValue)")
+            applyZoomPolicy(.fitPage)
+            check("fit page", pdfView.scaleFactor <= (fitWidthScale() ?? 9) + 0.001, "scale=\(pdfView.scaleFactor)")
+            applyZoomPolicy(.automatic)
+
+            func key(_ chars: String, _ code: UInt16) -> NSEvent? {
+                NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                                 windowNumber: window.windowNumber, context: nil, characters: chars,
+                                 charactersIgnoringModifiers: chars, isARepeat: false, keyCode: code)
+            }
+            setMode(.markup)
+            if let h = key("h", 4) { _ = handleToolKey(h) }
+            check("key H arms Highlight", markupTool == .highlight && markupTiles[.highlight]?.isArmed == true,
+                  "tool=\(markupTool) armed=\(markupTiles[.highlight]?.isArmed ?? false)")
+
+            let before = markCount()
+            let word = (pdfView.document?.page(at: 0)?.string ?? "")
+                .components(separatedBy: .whitespacesAndNewlines).first { $0.count >= 4 && $0.allSatisfy(\.isLetter) }
+            guard let word, let sel = pdfView.document?.findString(word, withOptions: []).first else {
+                check("armed highlight", false, "no text to select in fixture")
+                return finish()
+            }
+            pdfView.setCurrentSelection(sel, animate: false)
+            applyArmedMarkToSelection()
+            // A real click ends AppKit's undo group when the event finishes; post one through the
+            // real event loop so the document sees the change the way it does for a user.
+            if let tick = NSEvent.otherEvent(with: .applicationDefined, location: .zero, modifierFlags: [],
+                                             timestamp: 0, windowNumber: window.windowNumber, context: nil,
+                                             subtype: 0, data1: 0, data2: 0) {
+                NSApp.postEvent(tick, atStart: false)
+            }
+            let after = markCount()
+            check("armed highlight marks selection", after == before + 1, "word=\(word) marks \(before)->\(after)")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                let edited = (self.document as? NSDocument)?.isDocumentEdited == true
+                var prominent = false
+                if #available(macOS 26.0, *) { prominent = self.saveItem?.style == .prominent }
+                check("an edit lights Save + status", edited && self.saveButton?.isEnabled == true
+                        && self.subtitleLabel.stringValue.hasPrefix("\u{25CF} Edited"),
+                      "edited=\(edited) saveEnabled=\(self.saveButton?.isEnabled ?? false) prominent=\(prominent) status=\"\(self.subtitleLabel.stringValue)\" changeCountUndoGroups=\(self.docUndo.groupingLevel)")
+                self.docUndo.undo()
+                let undone = self.markCount()
+                check("undo removes the mark", undone == before, "marks after undo=\(undone)")
+                if let esc = key("\u{1b}", 53) { _ = self.handleToolKey(esc) }
+                check("Esc puts the tool down", self.markupTool == .select, "tool=\(self.markupTool)")
+                if let esc = key("\u{1b}", 53) { _ = self.handleToolKey(esc) }
+                check("second Esc returns to Read", self.mode == .read, "mode=\(self.mode)")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { finish() }
+            }
+        }
+        func finish() {
+            log += failures == 0 ? "PASS\n" : "FAIL (\(failures) step(s))\n"
+            try? log.write(toFile: "/tmp/jack-mode-selftest.log", atomically: true, encoding: .utf8)
+            exit(failures == 0 ? 0 : 1)
         }
         next()
     }

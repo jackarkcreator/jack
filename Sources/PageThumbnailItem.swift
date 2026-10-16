@@ -1,5 +1,26 @@
-// One page tile in the Page Organizer: thumbnail + page number, with a selection ring.
+// One page tile (sidebar + Page Organizer): thumbnail + page number. v3: selection is a
+// rounded teal plate behind the page and a teal page-number pill (no square accent ring).
 import AppKit
+
+/// Draws the selection plate and the number pill; everything else is ordinary subviews.
+final class ThumbnailTileView: NSView {
+    var isSelected = false { didSet { needsDisplay = true } }
+    weak var numberLabel: NSTextField?
+    override func viewDidChangeEffectiveAppearance() { needsDisplay = true }
+    override func draw(_ dirtyRect: NSRect) {
+        guard isSelected else { return }
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            Chrome.tintSoft.setFill()
+            NSBezierPath(roundedRect: bounds.insetBy(dx: 2, dy: 2), xRadius: 10, yRadius: 10).fill()
+            if let l = numberLabel {
+                let w = ceil(l.attributedStringValue.size().width) + 14
+                let pill = NSRect(x: l.frame.midX - w / 2, y: l.frame.midY - 9, width: w, height: 18)
+                Chrome.tint.setFill()
+                NSBezierPath(roundedRect: pill, xRadius: 9, yRadius: 9).fill()
+            }
+        }
+    }
+}
 
 final class PageThumbnailItem: NSCollectionViewItem {
     static let id = NSUserInterfaceItemIdentifier("PageThumbnailItem")
@@ -9,9 +30,8 @@ final class PageThumbnailItem: NSCollectionViewItem {
     private let dash = CAShapeLayer()   // the empty-slot outline (taken mode)
 
     override func loadView() {
-        let v = NSView(frame: NSRect(x: 0, y: 0, width: 150, height: 196))
-        v.wantsLayer = true
-        v.layer?.cornerRadius = 6
+        let v = ThumbnailTileView(frame: NSRect(x: 0, y: 0, width: 150, height: 196))
+        v.numberLabel = label
 
         thumb.frame = NSRect(x: 8, y: 26, width: 134, height: 162)
         thumb.imageScaling = .scaleProportionallyDown
@@ -39,7 +59,7 @@ final class PageThumbnailItem: NSCollectionViewItem {
         thumb.layer?.borderColor = NSColor.separatorColor.cgColor
         dash.removeFromSuperlayer()
         label.stringValue = text
-        label.textColor = .secondaryLabelColor
+        updateRing()   // a reused tile keeps the right selection look
     }
 
     /// The organizer's physical-truth mode: a page moved into the New PDF leaves its slot
@@ -63,7 +83,8 @@ final class PageThumbnailItem: NSCollectionViewItem {
     override var isSelected: Bool { didSet { updateRing() } }
 
     private func updateRing() {
-        view.layer?.borderWidth = isSelected ? 3 : 0
-        view.layer?.borderColor = NSColor.controlAccentColor.cgColor
+        (view as? ThumbnailTileView)?.isSelected = isSelected
+        label.font = isSelected ? .systemFont(ofSize: 11, weight: .semibold) : .systemFont(ofSize: 11)
+        label.textColor = isSelected ? Chrome.onTint : .secondaryLabelColor
     }
 }

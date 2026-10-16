@@ -50,6 +50,8 @@
 	</array>
 	<key>CFBundleExecutable</key>
 	<string>Jack</string>
+	<key>NSAccentColorName</key>
+	<string>AccentColor</string>
 	<key>CFBundleIconFile</key>
 	<string>jack</string>
 	<key>CFBundleIdentifier</key>

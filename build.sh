@@ -45,6 +45,11 @@ iconutil -c icns "$ICONSET" -o "$APPDIR/Contents/Resources/jack.icns"
 echo "==> Install Info.plist"
 cp "$DIR/Info.plist" "$APPDIR/Contents/Info.plist"
 
+echo "==> Compile asset catalog (v3: Jack teal as the app accent — switches, focus, selection)"
+xcrun actool "$DIR/Assets.xcassets" --compile "$APPDIR/Contents/Resources" --platform macosx \
+  --minimum-deployment-target 11.0 --accent-color AccentColor \
+  --output-partial-info-plist "$BUILD/assets-partial.plist" >/dev/null
+
 echo "==> Build Finder extension (top-level right-click: Convert to PDF with Jack)"
 APPEX="$APPDIR/Contents/PlugIns/JackFinder.appex"
 mkdir -p "$APPEX/Contents/MacOS"
