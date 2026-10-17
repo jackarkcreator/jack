@@ -61,7 +61,7 @@ func loadPages(from urls: [URL]) -> [PDFPage] {
     return pages
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var didHandleOpen = false
     private var pending: [URL] = []
     private var scheduled = false
@@ -293,7 +293,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         popover.contentViewController = popoverVC
         popover.behavior = .transient
+        popover.delegate = self
     }
+
+    // 3.1: close on ANY click outside the launcher. `.transient` alone relies on Jack being the
+    // active app, which a menu-bar app often isn't (macOS 14+ cooperative activation), so a
+    // click on the desktop or another app left the launcher open. Monitors live only while
+    // the launcher is shown.
+    private var outsideClickMonitors: [Any] = []
+    func popoverWillShow(_ notification: Notification) { installOutsideClickMonitors() }
+    /// Installed the moment the launcher opens (not after its animation), so an early click counts.
+    private func installOutsideClickMonitors() {
+        removeOutsideClickMonitors()
+        if let g = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown], handler: { [weak self] _ in
+            self?.popover.performClose(nil)
+        }) { outsideClickMonitors.append(g) }
+        if let l = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown], handler: { [weak self] e in
+            guard let self else { return e }
+            let inLauncher = e.window === self.popoverVC.view.window
+            let onIcon = e.window === self.statusItem.button?.window   // the icon toggles it itself
+            EventLog.note("launcher local monitor: type=\(e.type.rawValue) window=\(e.window.map { String(describing: type(of: $0)) } ?? "nil") inLauncher=\(inLauncher) onIcon=\(onIcon)")
+            if !inLauncher && !onIcon {
+                self.popover.performClose(nil)
+                EventLog.note("launcher performClose -> isShown=\(self.popover.isShown)")
+            }
+            return e
+        }) { outsideClickMonitors.append(l) }
+    }
+    func popoverDidClose(_ notification: Notification) { removeOutsideClickMonitors() }
+    private func removeOutsideClickMonitors() {
+        outsideClickMonitors.forEach(NSEvent.removeMonitor)
+        outsideClickMonitors.removeAll()
+    }
+    /// Verification hook: whether the outside-click monitors are installed right now.
+    var launcherWatchesOutsideClicks: Bool { !outsideClickMonitors.isEmpty }
 
     // MARK: - Window showcase (verification only)
 
@@ -326,9 +359,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 win = wc.window
             case "settings":
                 win = SettingsWindowController.shared.window
-            case "launcher":
+            case "launcher", "launcherclose":
                 self.showPopover(activating: false)
                 win = self.popoverVC.view.window
+                if which == "launcherclose" {
+                    // A click in another Jack window must close the launcher (local monitor path).
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                        let watching = self.launcherWatchesOutsideClicks, shownBefore = self.popover.isShown
+                        let other = NSWindow(contentRect: NSRect(x: -3000, y: -3000, width: 200, height: 200), styleMask: [.borderless], backing: .buffered, defer: false)
+                        other.orderFrontRegardless()
+                        if let e = NSEvent.mouseEvent(with: .leftMouseDown, location: NSPoint(x: 50, y: 50), modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                                      windowNumber: other.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1) {
+                            EventLog.note("probe: posting mouseDown to window \(other.windowNumber)")
+                            NSApp.postEvent(e, atStart: false)   // through the queue, like a real click
+                        }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                            let info = "watching=\(watching) shownBefore=\(shownBefore) shownAfterOutsideClick=\(self.popover.isShown) watchingAfter=\(self.launcherWatchesOutsideClicks)"
+                            try? info.write(toFile: "/tmp/jack-showcase.info", atomically: true, encoding: .utf8)
+                            other.orderOut(nil)
+                        }
+                    }
+                }
             default: break
             }
             if which != "launcher" { win?.orderBack(nil) }   // organizer/organizerfull/batch/settings
@@ -348,6 +399,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popoverVC.shelfEnabled = DropShelf.enabled
         popoverVC.defaultEnabled = AppDelegate.isDefaultPDFApp()
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        if outsideClickMonitors.isEmpty { installOutsideClickMonitors() }
         // Spring-loaded opens (mid-drag) must not steal focus from the drag source.
         if activating { NSApp.activate(ignoringOtherApps: true) }
         checkForUpdate()

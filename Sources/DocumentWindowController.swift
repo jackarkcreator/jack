@@ -56,6 +56,24 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
                 guard let self, let window = self.window else { return }
                 self.setMode(["markup", "note", "stamp", "stampdrag", "stampselect", "markundo"].contains(showcase) ? .markup : showcase == "redact" ? .redact : .read)
+                // 3.1 sheets: "whatsnew", "sheet:watermark|bates|lock|clean|compress|ocr|crop".
+                if showcase == "whatsnew" { self.showWhatsNew(nil) }
+                if showcase.hasPrefix("sheet:") {
+                    switch showcase.dropFirst(6) {
+                    case "watermark": self.addWatermark(nil)
+                    case "bates": self.batesNumbering(nil)
+                    case "lock": self.lockForSharing(nil)
+                    case "clean": self.cleanForSharing(nil)
+                    case "compress": self.compressDocument(nil)
+                    case "ocr": self.makeSearchable(nil)
+                    case "crop":
+                        if let pg = self.pdfView.document?.page(at: 0) {
+                            let b = pg.bounds(for: .mediaBox)
+                            self.runCropDialog(rect: b.insetBy(dx: b.width * 0.12, dy: b.height * 0.15), page: pg)
+                        }
+                    default: break
+                    }
+                }
                 if ["note", "stamp", "stampdrag", "stampselect"].contains(showcase), let page = self.pdfView.document?.page(at: 0) {
                     page.addAnnotation(CommentBadgeAnnotation(bounds: CGRect(x: 120, y: 520, width: 18, height: 18), text: "Showcase"))
                     // "stamp": a typed-style signature beside the badge, built like the Sign sheet's.
@@ -130,6 +148,21 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         }
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        if WhatsNew.shouldShowAutomatically {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.showWhatsNew(nil) }
+        }
+    }
+
+    /// Help ▸ What's New in Jack (and once, automatically, after an update).
+    @objc func showWhatsNew(_ sender: Any?) {
+        guard let window, window.attachedSheet == nil else { return }
+        WhatsNew.markShown()
+        var sheetWin: NSWindow?
+        sheetWin = WhatsNew.makeSheet { [weak window] in
+            if let s = sheetWin { window?.endSheet(s) }
+            sheetWin = nil
+        }
+        if let s = sheetWin { window.beginSheet(s) { _ in } }
     }
 
     private let sidebar = PageSidebarController()
@@ -2570,19 +2603,23 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     // MARK: - Clean for Sharing (flatten everything + strip metadata + optional lock)
 
     @objc func cleanForSharing(_ sender: Any?) {
+        guard pdfView.document != nil else { return }
+        let sheet = ToolSheet(symbol: "sparkles", title: "Clean for Sharing", purpose: "Save a copy with nothing hidden in it.",
+                              note: Self.copyNote, primary: "Save Clean Copy\u{2026}", preview: false)
+        sheet.addRow("Removes", ToolSheet.note("Author, title and editing history \u{00B7} comments \u{00B7} form entries and signatures are flattened into the page"))
+        let pw = ToolSheet.field("", placeholder: "Optional \u{00B7} lock the copy too", secure: true)
+        sheet.addRow("Password", pw)
+        sheet.onPrimary = { [weak self, weak sheet] in
+            guard let self, let sheet else { return }
+            let password = pw.stringValue
+            self.finishSheet(sheet)
+            DispatchQueue.main.async { self.saveCleanCopy(password: password) }
+        }
+        showSheet(sheet)
+    }
+
+    private func saveCleanCopy(password: String) {
         guard let doc = pdfView.document, let window = window else { return }
-
-        let alert = NSAlert()
-        alert.messageText = "Clean for Sharing"
-        alert.informativeText = "Saves a copy with signatures and form entries flattened and all metadata (author, title, editing history) removed. Add a password to lock it too — or leave blank."
-        let pw = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
-        pw.placeholderString = "Password (optional)"
-        alert.accessoryView = pw
-        alert.addButton(withTitle: "Clean…")
-        alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        let password = pw.stringValue
-
         let panel = NSSavePanel()
         panel.nameFieldStringValue = exportBaseName + "-clean.pdf"
         panel.directoryURL = pdfURL.deletingLastPathComponent()
@@ -2606,7 +2643,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
                 NSWorkspace.shared.activateFileViewerSelecting([out])
                 NSSound(named: "Glass")?.play()
             } else {
-                infoAlert("Clean failed", "Couldn’t write the cleaned PDF.")
+                infoAlert("Clean failed", "Couldn\u{2019}t write the cleaned PDF.")
             }
         }
     }
@@ -3818,33 +3855,36 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
 
     private func runCropDialog(rect: CGRect, page: PDFPage) {
         guard let doc = pdfView.document else { return }
-        let alert = NSAlert()
-        alert.messageText = "Crop Pages"
-        alert.informativeText = "Standard crop hides everything outside the area — it's reversible, and the hidden content stays in the file. Permanent crop re-renders the page so what's outside is verifiably gone (the page becomes an image)."
-        let acc = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 58))
-        let scope = NSPopUpButton(frame: NSRect(x: 0, y: 32, width: 200, height: 25))
-        scope.addItems(withTitles: ["This page only", "All pages"])
-        acc.addSubview(scope)
-        let permanent = NSButton(checkboxWithTitle: "Permanent — remove content outside the crop", target: nil, action: nil)
-        permanent.frame = NSRect(x: 0, y: 4, width: 320, height: 20)
-        acc.addSubview(permanent)
-        alert.accessoryView = acc
-        alert.addButton(withTitle: "Crop")
-        alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { pageChanged(); return }
-
-        let pageIndexes: [Int]
-        if scope.indexOfSelectedItem == 1 {
-            pageIndexes = Array(0..<doc.pageCount)
-        } else {
-            pageIndexes = [doc.index(for: page)]
+        let sheet = ToolSheet(symbol: "crop", title: "Crop Pages", purpose: "Trim to the area you dragged on the page.",
+                              note: (Self.editNote.symbol, "Shows now \u{00B7} reversible \u{00B7} \u{2318}Z undoes"),
+                              primary: "Crop", preview: true)
+        let scope = ToolSheet.segmented(["This page", "All pages"], selected: 0)
+        let permanent = NSButton(checkboxWithTitle: "Remove what\u{2019}s outside for good", target: nil, action: nil)
+        sheet.addRow("Apply to", scope)
+        sheet.addRow("Method", permanent)
+        sheet.setPreview(toolPreview(page, crop: rect))
+        func refresh() {
+            if permanent.state == .on {
+                sheet.setMessage("The page is redrawn as an image so the trimmed content is verifiably gone. Its text stops being selectable.", .warn)
+                sheet.setNote(symbol: Self.editNote.symbol, "Applied now \u{00B7} verified gone \u{00B7} \u{2318}Z undoes")
+            } else {
+                sheet.setMessage("Hidden, not deleted: the crop can be removed later and the content is still in the file.", .hint)
+                sheet.setNote(symbol: Self.editNote.symbol, "Shows now \u{00B7} reversible \u{00B7} \u{2318}Z undoes")
+            }
         }
-        if permanent.state == .on {
-            applyPermanentCrop(rect: rect, pages: pageIndexes, in: doc)
-        } else {
-            applyStandardCrop(rect: rect, pages: pageIndexes, in: doc)
+        ControlAction.bind(permanent) { _ in refresh() }
+        sheet.onCancel = { [weak self] in self?.pageChanged() }
+        sheet.onPrimary = { [weak self, weak sheet] in
+            guard let self, let sheet else { return }
+            let pageIndexes = scope.selectedSegment == 1 ? Array(0..<doc.pageCount) : [doc.index(for: page)]
+            let perm = permanent.state == .on
+            self.finishSheet(sheet)
+            if perm { self.applyPermanentCrop(rect: rect, pages: pageIndexes, in: doc) }
+            else { self.applyStandardCrop(rect: rect, pages: pageIndexes, in: doc) }
+            self.pageChanged()
         }
-        pageChanged()
+        refresh()
+        showSheet(sheet)
     }
 
     private func applyStandardCrop(rect: CGRect, pages: [Int], in doc: PDFDocument) {
@@ -3927,48 +3967,67 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
 
     // v2.5: Compress edits the open document. Only the pages the engine actually re-rendered
     // are swapped in — pages it passed through keep their live annotations and form fields.
+    /// 3.1: Compress opens its sheet (size now), runs inside it (progress), and reports the
+    /// result there (before → after) — no alerts. Failures and "nothing to gain" show inline.
     @objc func compressDocument(_ sender: Any?) {
-        guard let doc = pdfView.document else { return }
-        // The engine runs off-main; PDFKit is not thread-safe, so hand it its own copy.
-        guard let data = doc.dataRepresentation(), let workCopy = PDFDocument(data: data) else {
-            infoAlert("Couldn\u{2019}t prepare document", "The document couldn\u{2019}t be copied for compression.")
-            return
-        }
+        guard let doc = pdfView.document, let data = doc.dataRepresentation() else { return }
+        let fmt = ByteCountFormatter()
         let originalSize = data.count
-        let out = tempWorkURL("compress")
-        DispatchQueue.global(qos: .userInitiated).async {
-            let (ok, changed) = CompressEngine.compress(workCopy, to: out)
-            let producedSize = (try? Data(contentsOf: out).count) ?? 0
-            DispatchQueue.main.async { [weak self] in
-                defer { try? FileManager.default.removeItem(at: out) }
-                guard let self = self else { return }
-                guard ok, producedSize > 0 else {
-                    infoAlert("Compress failed", "Couldn\u{2019}t compress this document. Nothing was changed.")
-                    return
+        let sheet = ToolSheet(symbol: "arrow.down.right.and.arrow.up.left", title: "Compress",
+                              purpose: "Make the file smaller without changing what the pages show.",
+                              note: (Self.editNote.symbol, "Applied as an edit \u{00B7} written when you save \u{00B7} \u{2318}Z undoes"),
+                              primary: "Compress", preview: false)
+        let big = ToolSheet.bigValue(fmt.string(fromByteCount: Int64(originalSize)))
+        let bar = NSProgressIndicator()
+        bar.isIndeterminate = true
+        bar.style = .bar
+        bar.isHidden = true
+        sheet.addRow("Size now", big)
+        sheet.addRow("Working", bar)
+        sheet.setMessage("Scanned pages are re-saved at 150 dpi. Pages with text are left alone.", .hint)
+        var finished = false
+        sheet.onPrimary = { [weak self, weak sheet] in
+            guard let self, let sheet else { return }
+            if finished { self.finishSheet(sheet); return }
+            guard let workCopy = PDFDocument(data: data) else {
+                sheet.setMessage("The document couldn\u{2019}t be copied for compression. Nothing was changed.", .error)
+                return
+            }
+            sheet.setPrimary("Compressing\u{2026}", enabled: false)
+            sheet.setCancelVisible(false)
+            bar.isHidden = false
+            bar.startAnimation(nil)
+            sheet.setMessage(nil)
+            let out = self.tempWorkURL("compress")
+            DispatchQueue.global(qos: .userInitiated).async {
+                let (ok, changed) = CompressEngine.compress(workCopy, to: out)
+                let producedSize = (try? Data(contentsOf: out).count) ?? 0
+                DispatchQueue.main.async {
+                    defer { try? FileManager.default.removeItem(at: out) }
+                    bar.stopAnimation(nil)
+                    bar.isHidden = true
+                    finished = true
+                    sheet.setPrimary("Done")
+                    if !ok || producedSize == 0 {
+                        sheet.setMessage("Couldn\u{2019}t compress this document. Nothing was changed.", .error)
+                    } else if producedSize >= originalSize || changed.isEmpty {
+                        sheet.setMessage("Already compact. Compressing wouldn\u{2019}t make it smaller, so nothing was changed.", .hint)
+                    } else if !self.swapTransformedPages(from: out, changed: changed, name: "Compress") {
+                        sheet.setMessage("The compressed pages couldn\u{2019}t be applied. The document was not modified.", .error)
+                    } else {
+                        NSSound(named: "Glass")?.play()
+                        // The REAL resulting size, measured after the swap (only changed pages were taken).
+                        let finalSize = self.pdfView.document?.dataRepresentation()?.count ?? producedSize
+                        let saved = 100 - finalSize * 100 / max(1, originalSize)
+                        let n = changed.count
+                        big.stringValue = "\(fmt.string(fromByteCount: Int64(originalSize))) \u{2192} \(fmt.string(fromByteCount: Int64(finalSize)))"
+                        sheet.setMessage("\(saved)% smaller \u{00B7} \(n) scanned page\(n == 1 ? "" : "s") re-saved", .ok)
+                    }
+                    sheet.layout()
                 }
-                guard producedSize < originalSize, !changed.isEmpty else {
-                    infoAlert("Nothing to gain",
-                              "This document is already compact — compressing it would not make it smaller, so nothing was changed.")
-                    return
-                }
-                guard self.swapTransformedPages(from: out, changed: changed, name: "Compress") else {
-                    infoAlert("Compress failed",
-                              "The compressed pages couldn\u{2019}t be applied — the document was not modified.")
-                    return
-                }
-                NSSound(named: "Glass")?.play()
-                // Report the REAL resulting size, measured after the swap, not the engine's
-                // intermediate — only the changed pages were taken from it.
-                let finalSize = self.pdfView.document?.dataRepresentation()?.count ?? producedSize
-                let fmt = ByteCountFormatter()
-                let saved = 100 - finalSize * 100 / max(1, originalSize)
-                let n = changed.count
-                infoAlert("Compressed",
-                          "\(fmt.string(fromByteCount: Int64(originalSize))) \u{2192} \(fmt.string(fromByteCount: Int64(finalSize))) "
-                          + "(\(saved)% smaller). \(n) scanned page\(n == 1 ? "" : "s") downsampled; pages with text were left untouched."
-                          + "\n\n\u{2318}S to save, \u{2318}Z to undo.")
             }
         }
+        showSheet(sheet)
     }
 
     /// Swap ONLY the pages an engine transformed into the live document, with page-identity
@@ -4006,111 +4065,245 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
 
     // v2.5: Make Searchable edits the open document — only the pages that actually had no
     // text layer are swapped in, so annotated and fillable pages are left alone.
+    /// 3.1: Make Searchable opens its sheet (how many pages need it), runs inside it with page
+    /// progress, and reports the result there — no alerts.
     @objc func makeSearchable(_ sender: Any?) {
-        guard let doc = pdfView.document, let window = window else { return }
-        // OCR runs off-main; PDFKit isn't thread-safe, so hand the worker its own copy.
-        guard let data = doc.dataRepresentation(), let workCopy = PDFDocument(data: data) else {
-            infoAlert("Couldn\u{2019}t prepare document", "The document couldn\u{2019}t be copied for recognition.")
-            return
-        }
-        let out = tempWorkURL("ocr")
-        let sheet = ProgressSheetController(title: "Recognizing text on this Mac\u{2026}", total: workCopy.pageCount)
-        window.beginSheet(sheet.window)
+        guard let doc = pdfView.document, let data = doc.dataRepresentation() else { return }
+        let total = doc.pageCount
+        let sheet = ToolSheet(symbol: "text.viewfinder", title: "Make Searchable",
+                              purpose: "Recognize the text in scanned pages so you can search and select it.",
+                              note: (Self.editNote.symbol, "Applied as an edit \u{00B7} written when you save \u{00B7} \u{2318}Z undoes"),
+                              primary: "Make Searchable", preview: false)
+        let big = ToolSheet.bigValue("\u{2026} of \(total)")
+        let bar = NSProgressIndicator()
+        bar.isIndeterminate = false
+        bar.minValue = 0
+        bar.isHidden = true
+        sheet.addRow("Pages", big)
+        sheet.addRow("Reading", bar)
+        sheet.primaryEnabled = false
+        sheet.setMessage("Checking which pages are scans\u{2026}", .hint)
+        // Counting reads every page's text — off the main thread, on its own copy (PDFKit isn't thread-safe).
         DispatchQueue.global(qos: .userInitiated).async {
-            let (ok, changed) = OCREngine.makeSearchable(workCopy, to: out) { i, total in
-                DispatchQueue.main.async { sheet.update(done: i + 1, of: total) }
-            }
-            DispatchQueue.main.async { [weak self] in
-                defer { try? FileManager.default.removeItem(at: out) }
-                window.endSheet(sheet.window)
-                guard let self = self else { return }
-                guard ok else {
-                    infoAlert("Recognition failed", "Couldn\u{2019}t recognize this document. Nothing was changed.")
-                    return
+            let copy = PDFDocument(data: data)
+            let needing = (0..<(copy?.pageCount ?? 0)).filter { i in
+                (copy?.page(at: i)?.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }.count
+            DispatchQueue.main.async { [weak sheet] in
+                guard let sheet else { return }
+                big.stringValue = "\(needing) of \(total)"
+                if needing == 0 {
+                    sheet.setMessage("Every page already has text. There\u{2019}s nothing to recognize.", .hint)
+                } else {
+                    sheet.primaryEnabled = true
+                    sheet.setMessage("\(needing) page\(needing == 1 ? " is a scan" : "s are scans") with no text. Recognition runs on this Mac in English and Spanish; nothing is uploaded.", .hint)
                 }
-                guard !changed.isEmpty else {
-                    infoAlert("Already searchable",
-                              "Every page already carries a text layer — nothing needed recognizing, so nothing was changed.")
-                    return
-                }
-                guard self.swapTransformedPages(from: out, changed: changed, name: "Make Searchable") else {
-                    infoAlert("Recognition failed",
-                              "The recognized pages couldn\u{2019}t be applied — the document was not modified.")
-                    return
-                }
-                NSSound(named: "Glass")?.play()
-                let n = changed.count
-                infoAlert("Made searchable",
-                          "\(n) scanned page\(n == 1 ? "" : "s") recognized — entirely on this Mac, nothing was uploaded. "
-                          + "You can now search and select the text."
-                          + "\n\n\u{2318}S to save, \u{2318}Z to undo.")
+                sheet.layout()
             }
         }
+        var finished = false
+        sheet.onPrimary = { [weak self, weak sheet] in
+            guard let self, let sheet else { return }
+            if finished { self.finishSheet(sheet); return }
+            guard let workCopy = PDFDocument(data: data) else {
+                sheet.setMessage("The document couldn\u{2019}t be copied for recognition. Nothing was changed.", .error)
+                return
+            }
+            sheet.setPrimary("Reading\u{2026}", enabled: false)
+            sheet.setCancelVisible(false)
+            bar.isHidden = false
+            sheet.setMessage("Page 1 of \(workCopy.pageCount)", .hint)
+            let out = self.tempWorkURL("ocr")
+            DispatchQueue.global(qos: .userInitiated).async {
+                let (ok, changed) = OCREngine.makeSearchable(workCopy, to: out) { i, n in
+                    DispatchQueue.main.async {
+                        bar.maxValue = Double(max(1, n))
+                        bar.doubleValue = Double(i + 1)
+                        sheet.setMessage("Page \(i + 1) of \(n)", .hint)
+                    }
+                }
+                DispatchQueue.main.async {
+                    defer { try? FileManager.default.removeItem(at: out) }
+                    bar.isHidden = true
+                    finished = true
+                    sheet.setPrimary("Done")
+                    if !ok {
+                        sheet.setMessage("Couldn\u{2019}t recognize this document. Nothing was changed.", .error)
+                    } else if changed.isEmpty {
+                        sheet.setMessage("Every page already had text, so nothing was changed.", .hint)
+                    } else if !self.swapTransformedPages(from: out, changed: changed, name: "Make Searchable") {
+                        sheet.setMessage("The recognized pages couldn\u{2019}t be applied. The document was not modified.", .error)
+                    } else {
+                        NSSound(named: "Glass")?.play()
+                        let n = changed.count
+                        big.stringValue = "\(total) of \(total) searchable"
+                        sheet.setMessage("\(n) page\(n == 1 ? " now has" : "s now have") selectable, searchable text \u{00B7} recognized on this Mac", .ok)
+                    }
+                    sheet.layout()
+                }
+            }
+        }
+        showSheet(sheet)
     }
 
     // v2.5 Phase 3: Bates and Watermark are LIVE marks on the open document — visible at once,
     // undoable, removable — and they burn into the page as REAL VECTOR CONTENT at save, so a
     // Bates number stays extractable and searchable the way legal production requires.
-    @objc func batesNumbering(_ sender: Any?) {
-        guard let doc = pdfView.document else { return }
-        let alert = NSAlert()
-        alert.messageText = "Bates Numbering"
-        alert.informativeText = "Numbers every page sequentially. The numbers appear now and are written into the file when you save."
-        let box = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 58))
-        let prefix = NSTextField(frame: NSRect(x: 0, y: 32, width: 150, height: 24))
-        prefix.placeholderString = "Prefix (e.g. TRC-)"
-        let start = NSTextField(frame: NSRect(x: 158, y: 32, width: 74, height: 24))
-        start.placeholderString = "Start"; start.stringValue = "1"
-        let digits = NSPopUpButton(frame: NSRect(x: 240, y: 30, width: 80, height: 26))
-        digits.addItems(withTitles: ["4 digits", "6 digits", "8 digits"])
-        digits.selectItem(at: 1)
-        let corner = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 232, height: 26))
-        corner.addItems(withTitles: ["Bottom Right", "Bottom Left", "Top Right", "Top Left"])
-        box.addSubview(prefix); box.addSubview(start); box.addSubview(digits); box.addSubview(corner)
-        alert.accessoryView = box
-        alert.addButton(withTitle: "Add Numbering")
-        alert.addButton(withTitle: "Cancel")
-        alert.window.initialFirstResponder = prefix
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        guard confirmFlattenIfForm("Bates numbering") else { return }
+    // MARK: - 3.1 tool sheets (one template — ToolSheet.swift)
 
-        let startN = Int(start.stringValue.trimmingCharacters(in: .whitespaces)) ?? 1
-        let digitsN = [4, 6, 8][max(0, digits.indexOfSelectedItem)]
-        let cornerV = StampEngine.Corner(rawValue: corner.indexOfSelectedItem) ?? .bottomRight
+    /// The sheet on screen (retained while it is up).
+    private var activeSheet: ToolSheet?
+    private var activeWatcher: TextChangeWatcher?
+    private static let editNote = (symbol: "arrow.uturn.backward", text: "Shows now \u{00B7} written when you save \u{00B7} \u{2318}Z undoes")
+    private static let copyNote = (symbol: "doc.on.doc", text: "Saves a copy \u{00B7} this file stays as it is")
 
-        applyOverlay(name: "Bates Numbering", replacing: { $0 is BatesAnnotation }) { page in
-            BatesAnnotation(prefix: prefix.stringValue, start: startN, digits: digitsN,
-                            corner: cornerV, pageBox: page.bounds(for: .mediaBox))
+    private func formWarning(_ what: String) -> String {
+        "This PDF has fillable fields. Saving with \(what) finalizes them: they keep their values but stop being fillable."
+    }
+
+    private func showSheet(_ sheet: ToolSheet, watcher: TextChangeWatcher? = nil) {
+        guard let window else { return }
+        activeSheet = sheet
+        activeWatcher = watcher
+        let clear: () -> Void = { [weak self] in self?.activeSheet = nil; self?.activeWatcher = nil }
+        let cancel = sheet.onCancel
+        sheet.onCancel = { cancel?(); clear() }
+        sheet.present(on: window)
+    }
+
+    private func finishSheet(_ sheet: ToolSheet) {
+        sheet.close()
+        activeSheet = nil
+        activeWatcher = nil
+    }
+
+    /// The real first page, scaled into the sheet's preview, with the tool's mark drawn on top.
+    /// `focus` (page space) zooms the preview into one region — Bates uses its corner, because
+    /// a whole-page preview shrinks the number to an unreadable 2 pt.
+    private func toolPreview(_ page: PDFPage, overlay: PDFAnnotation? = nil, crop: CGRect? = nil, focus: CGRect? = nil) -> NSImage {
+        let box = page.bounds(for: .mediaBox)
+        var size = box.size
+        if page.rotation % 180 != 0 { size = CGSize(width: size.height, height: size.width) }
+        let region = focus.map { CGRect(x: $0.minX - box.minX, y: $0.minY - box.minY, width: $0.width, height: $0.height) }
+            ?? CGRect(origin: .zero, size: size)
+        let fit = min(150 / max(region.width, 1), 194 / max(region.height, 1))
+        let out = NSSize(width: (region.width * fit).rounded(), height: (region.height * fit).rounded())
+        return NSImage(size: out, flipped: false) { _ in
+            guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
+            ctx.setFillColor(.white)
+            ctx.fill(CGRect(origin: .zero, size: out))
+            ctx.saveGState()
+            ctx.scaleBy(x: fit, y: fit)
+            ctx.translateBy(x: -region.minX, y: -region.minY)
+            page.draw(with: .mediaBox, to: ctx)
+            ctx.restoreGState()
+            ctx.saveGState()
+            ctx.scaleBy(x: fit, y: fit)
+            ctx.translateBy(x: -region.minX, y: -region.minY)
+            page.transform(ctx, for: .mediaBox)
+            overlay?.draw(with: .mediaBox, in: ctx)
+            if let crop {
+                let outer = CGPath(rect: box, transform: nil)
+                let shade = CGMutablePath(); shade.addPath(outer); shade.addRect(crop)
+                ctx.addPath(shade)
+                ctx.setFillColor(CGColor(gray: 0, alpha: 0.25))
+                ctx.fillPath(using: .evenOdd)
+                ctx.setStrokeColor(CGColor(srgbRed: 0.055, green: 0.43, blue: 0.43, alpha: 1))
+                ctx.setLineWidth(1.5 / fit)
+                ctx.setLineDash(phase: 0, lengths: [5 / fit, 3 / fit])
+                ctx.stroke(crop)
+            }
+            ctx.restoreGState()
+            return true
         }
-        flashSubtitle("Bates numbering added — renumbers if you reorder pages. \u{2318}S to save, \u{2318}Z to undo")
+    }
+
+    @objc func batesNumbering(_ sender: Any?) {
+        guard let doc = pdfView.document, let first = doc.page(at: 0) else { return }
+        let sheet = ToolSheet(symbol: "number", title: "Bates Numbering",
+                              purpose: "Number every page in order for legal exhibits.",
+                              note: (Self.editNote.symbol, "Shows now \u{00B7} renumbers if you reorder pages \u{00B7} \u{2318}Z undoes"),
+                              primary: "Add Numbering", preview: true)
+        let prefix = ToolSheet.field("", placeholder: "TRC-")
+        let start = ToolSheet.field("1")
+        let digits = ToolSheet.segmented(["4 digits", "6 digits", "8 digits"], selected: 1)
+        let corner = NSPopUpButton()
+        corner.addItems(withTitles: ["Bottom Right", "Bottom Left", "Top Right", "Top Left"])
+        let range = ToolSheet.note("")
+        sheet.addRow("Prefix", prefix)
+        sheet.addRow("Start at", start)
+        sheet.addRow("Digits", digits)
+        sheet.addRow("Corner", corner)
+        sheet.addRow("First \u{00B7} last", range)
+        if FormFieldEngine.hasWidgets(doc) { sheet.setMessage(formWarning("Bates numbers"), .warn) }
+        func values() -> (prefix: String, start: Int, digits: Int, corner: StampEngine.Corner) {
+            (prefix.stringValue, Int(start.stringValue.trimmingCharacters(in: .whitespaces)) ?? 1,
+             [4, 6, 8][max(0, digits.selectedSegment)], StampEngine.Corner(rawValue: corner.indexOfSelectedItem) ?? .bottomRight)
+        }
+        func refresh() {
+            let v = values()
+            func label(_ n: Int) -> String { v.prefix + String(format: "%0\(v.digits)d", n) }
+            range.stringValue = "\(label(v.start)) \u{00B7} \(label(v.start + doc.pageCount - 1))"
+            let b = first.bounds(for: .mediaBox)
+            let fw = b.width * 0.32, fh = b.height * 0.2
+            let top = v.corner == .topLeft || v.corner == .topRight, right = v.corner == .bottomRight || v.corner == .topRight
+            let focus = CGRect(x: right ? b.maxX - fw : b.minX, y: top ? b.maxY - fh : b.minY, width: fw, height: fh)
+            sheet.setPreview(toolPreview(first, overlay: BatesAnnotation(prefix: v.prefix, start: v.start, digits: v.digits,
+                                                                         corner: v.corner, pageBox: b), focus: focus))
+            sheet.layout()
+        }
+        let watcher = TextChangeWatcher()
+        watcher.watch(prefix) { refresh() }
+        watcher.watch(start) { refresh() }
+        ControlAction.bind(digits) { _ in refresh() }
+        ControlAction.bind(corner) { _ in refresh() }
+        sheet.onPrimary = { [weak self, weak sheet] in
+            guard let self, let sheet else { return }
+            let v = values()
+            self.finishSheet(sheet)
+            self.applyOverlay(name: "Bates Numbering", replacing: { $0 is BatesAnnotation }) { page in
+                BatesAnnotation(prefix: v.prefix, start: v.start, digits: v.digits, corner: v.corner, pageBox: page.bounds(for: .mediaBox))
+            }
+            self.flashSubtitle("Bates numbering added")
+        }
+        refresh()
+        showSheet(sheet, watcher: watcher)
     }
 
     @objc func addWatermark(_ sender: Any?) {
-        guard pdfView.document != nil else { return }
-        let alert = NSAlert()
-        alert.messageText = "Watermark"
-        alert.informativeText = "Stamps a diagonal watermark across every page. It appears now and is written into the file when you save."
-        let box = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 26))
-        let text = NSTextField(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
-        text.stringValue = "CONFIDENTIAL"
-        let strength = NSPopUpButton(frame: NSRect(x: 208, y: -1, width: 112, height: 26))
-        strength.addItems(withTitles: ["Light", "Medium", "Strong"])
-        strength.selectItem(at: 1)
-        box.addSubview(text); box.addSubview(strength)
-        alert.accessoryView = box
-        alert.addButton(withTitle: "Add Watermark")
-        alert.addButton(withTitle: "Cancel")
-        alert.window.initialFirstResponder = text
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        let wmText = text.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !wmText.isEmpty else { return }
-        guard confirmFlattenIfForm("A watermark") else { return }
-        let opacity: CGFloat = [0.10, 0.18, 0.28][max(0, strength.indexOfSelectedItem)]
-
-        applyOverlay(name: "Watermark", replacing: { $0 is WatermarkAnnotation }) { page in
-            WatermarkAnnotation(text: wmText, opacity: opacity, pageBox: page.bounds(for: .mediaBox))
+        guard let doc = pdfView.document, let first = doc.page(at: 0) else { return }
+        let sheet = ToolSheet(symbol: "drop", title: "Watermark", purpose: "Stamp text diagonally across every page.",
+                              note: Self.editNote, primary: "Add Watermark", preview: true)
+        let text = ToolSheet.field("CONFIDENTIAL")
+        let strength = ToolSheet.segmented(["Light", "Medium", "Strong"], selected: 1)
+        sheet.addRow("Text", text)
+        sheet.addRow("Strength", strength)
+        sheet.addRow("Pages", ToolSheet.note("All \(doc.pageCount) page\(doc.pageCount == 1 ? "" : "s")"))
+        if FormFieldEngine.hasWidgets(doc) { sheet.setMessage(formWarning("a watermark"), .warn) }
+        let opacities: [CGFloat] = [0.10, 0.18, 0.28]
+        func refresh() {
+            let t = text.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            sheet.primaryEnabled = !t.isEmpty
+            let op = opacities[max(0, strength.selectedSegment)]
+            sheet.setPreview(toolPreview(first, overlay: t.isEmpty ? nil
+                : WatermarkAnnotation(text: t, opacity: op, pageBox: first.bounds(for: .mediaBox))))
         }
-        flashSubtitle("Watermark added — \u{2318}S to save, \u{2318}Z to undo")
+        let watcher = TextChangeWatcher()
+        watcher.watch(text) { refresh() }
+        ControlAction.bind(strength) { _ in refresh() }
+        sheet.onPrimary = { [weak self, weak sheet] in
+            guard let self, let sheet else { return }
+            let wmText = text.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !wmText.isEmpty else { return }
+            let opacity = opacities[max(0, strength.selectedSegment)]
+            self.finishSheet(sheet)
+            self.applyOverlay(name: "Watermark", replacing: { $0 is WatermarkAnnotation }) { page in
+                WatermarkAnnotation(text: wmText, opacity: opacity, pageBox: page.bounds(for: .mediaBox))
+            }
+            self.flashSubtitle("Watermark added")
+        }
+        refresh()
+        showSheet(sheet, watcher: watcher)
     }
 
     @objc func removeWatermark(_ sender: Any?) { removeOverlays(name: "Remove Watermark") { $0 is WatermarkAnnotation } }
@@ -4194,28 +4387,54 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     // MARK: - Lock for Sharing
 
     @objc func lockForSharing(_ sender: Any?) {
+        guard pdfView.document != nil else { return }
+        let sheet = ToolSheet(symbol: "lock", title: "Lock for Sharing", purpose: "Save a copy that needs a password to open.",
+                              note: Self.copyNote, primary: "Save Locked Copy\u{2026}", preview: false)
+        // Each password has a secure and a visible twin; "Show password" swaps which is shown.
+        let pw = ToolSheet.field("", secure: true), pwPlain = ToolSheet.field("")
+        let verify = ToolSheet.field("", secure: true), verifyPlain = ToolSheet.field("")
+        pwPlain.isHidden = true; verifyPlain.isHidden = true
+        sheet.addRow("Password", pw); sheet.addRow("Password", pwPlain)
+        sheet.addRow("Verify", verify); sheet.addRow("Verify", verifyPlain)
+        let show = NSButton(checkboxWithTitle: "Show password", target: nil, action: nil)
+        sheet.addRow(nil, show)
+        pw.nextKeyView = verify; pwPlain.nextKeyView = verifyPlain
+        var showing: Bool { show.state == .on }
+        func current() -> (String, String) {
+            showing ? (pwPlain.stringValue, verifyPlain.stringValue) : (pw.stringValue, verify.stringValue)
+        }
+        func refresh() {
+            let (a, b) = current()
+            let ok = a.count >= 6 && a == b
+            sheet.primaryEnabled = ok
+            if !b.isEmpty && a != b { sheet.setMessage("Passwords don\u{2019}t match.", .error) }
+            else if ok { sheet.setMessage("Ready. AES-256, the same protection Acrobat uses.", .ok) }
+            else { sheet.setMessage("At least 6 characters. Anyone with the password can open the copy.", .hint) }
+        }
+        let watcher = TextChangeWatcher()
+        [pw, pwPlain, verify, verifyPlain].forEach { f in watcher.watch(f) { refresh() } }
+        ControlAction.bind(show) { _ in
+            if showing { pwPlain.stringValue = pw.stringValue; verifyPlain.stringValue = verify.stringValue }
+            else { pw.stringValue = pwPlain.stringValue; verify.stringValue = verifyPlain.stringValue }
+            pw.isHidden = showing; verify.isHidden = showing
+            pwPlain.isHidden = !showing; verifyPlain.isHidden = !showing
+            sheet.layout()
+            sheet.window.makeFirstResponder(showing ? pwPlain : pw)
+            refresh()
+        }
+        sheet.onPrimary = { [weak self, weak sheet] in
+            guard let self, let sheet else { return }
+            let (a, b) = current()
+            guard a.count >= 6, a == b else { return }
+            self.finishSheet(sheet)
+            DispatchQueue.main.async { self.saveLockedCopy(password: a) }
+        }
+        refresh()
+        showSheet(sheet, watcher: watcher)
+    }
+
+    private func saveLockedCopy(password: String) {
         guard let doc = pdfView.document, let window = window else { return }
-
-        let alert = NSAlert()
-        alert.messageText = "Lock for Sharing"
-        alert.informativeText = "Saves an AES-256 encrypted copy (the same protection Adobe Acrobat uses). Anyone with the password can open it; the original file is untouched."
-        let box = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 58))
-        let pw = NSSecureTextField(frame: NSRect(x: 0, y: 32, width: 300, height: 24))
-        pw.placeholderString = "Password"
-        let verify = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
-        verify.placeholderString = "Verify password"
-        pw.nextKeyView = verify
-        box.addSubview(pw); box.addSubview(verify)
-        alert.accessoryView = box
-        alert.addButton(withTitle: "Lock…")
-        alert.addButton(withTitle: "Cancel")
-        alert.window.initialFirstResponder = pw
-
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        let password = pw.stringValue
-        guard !password.isEmpty else { infoAlert("No password", "Enter a password to lock the PDF."); return }
-        guard password == verify.stringValue else { infoAlert("Passwords don’t match", "The two password fields must match."); return }
-
         let panel = NSSavePanel()
         panel.nameFieldStringValue = exportBaseName + "-locked.pdf"
         panel.directoryURL = pdfURL.deletingLastPathComponent()
@@ -4226,7 +4445,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
                 NSWorkspace.shared.activateFileViewerSelecting([out])
                 NSSound(named: "Glass")?.play()
             } else {
-                infoAlert("Lock failed", "Couldn’t write the locked PDF.")
+                infoAlert("Lock failed", "Couldn\u{2019}t write the locked PDF.")
             }
         }
     }

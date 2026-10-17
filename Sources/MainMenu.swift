@@ -128,6 +128,14 @@ enum MainMenu {
         window.addItem(withTitle: "Bring All to Front", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: "")
         windowItem.submenu = window
         main.addItem(windowItem)
+
+        // Help
+        let helpItem = NSMenuItem()
+        let help = NSMenu(title: "Help")
+        help.addItem(item("What\u{2019}s New in Jack", #selector(DocumentWindowController.showWhatsNew(_:)), ""))
+        helpItem.submenu = help
+        main.addItem(helpItem)
+        NSApp.helpMenu = help
         NSApp.windowsMenu = window
 
         NSApp.mainMenu = main

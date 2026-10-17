@@ -38,6 +38,9 @@ enum Chrome {
     static let raised = dynamic("JackRaised", light: .white, dark: NSColor(white: 1, alpha: 0.17))
     /// The work row sits one step deeper than the title bar.
     static let trayFill = dynamic("JackTray", light: NSColor(white: 0, alpha: 0.035), dark: NSColor(white: 0, alpha: 0.22))
+    /// 3.1 launcher: a SOLID panel (glass washed out over white pages) with solid tiles.
+    static let panelFill = dynamic("JackPanel", light: rgb(0xFBFBFC), dark: rgb(0x26262A))
+    static let panelTile = dynamic("JackPanelTile", light: rgb(0xEFF1F3), dark: rgb(0x33333A))
     static let separator = dynamic("JackSeparator", light: NSColor(white: 0, alpha: 0.08), dark: NSColor(white: 1, alpha: 0.09))
 
     /// Tool labels: dark text on light reads heavier than light on dark, so light mode draws

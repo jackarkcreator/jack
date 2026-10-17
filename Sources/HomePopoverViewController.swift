@@ -33,8 +33,10 @@ final class LauncherTile: NSButton {
     override func draw(_ dirtyRect: NSRect) {
         effectiveAppearance.performAsCurrentDrawingAppearance {
             let tile = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 12, yRadius: 12)
-            (isHighlighted ? Chrome.pressFill : (hovering ? Chrome.hoverFill : Chrome.groupFill)).setFill()
+            Chrome.panelTile.setFill()
             tile.fill()
+            if isHighlighted { Chrome.pressFill.setFill(); tile.fill() }
+            else if hovering { Chrome.hoverFill.setFill(); tile.fill() }
             Chrome.groupStroke.setStroke(); tile.lineWidth = 0.5; tile.stroke()
             let sq = NSRect(x: 12, y: (bounds.height - 30) / 2, width: 30, height: 30)
             Chrome.tintSoft.setFill()
@@ -52,30 +54,6 @@ final class LauncherTile: NSButton {
     }
 }
 
-/// The dashed "drop here" zone at the top of the launcher.
-final class DropZoneHint: NSView {
-    override func draw(_ dirtyRect: NSRect) {
-        effectiveAppearance.performAsCurrentDrawingAppearance {
-            let p = NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 12, yRadius: 12)
-            p.setLineDash([5, 4], count: 2, phase: 0)
-            p.lineWidth = 1.5
-            NSColor.tertiaryLabelColor.setStroke()
-            p.stroke()
-            let text = "Drop PDFs, photos or a folder"
-            let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.secondaryLabelColor]
-            let ts = (text as NSString).size(withAttributes: attrs)
-            let icon = Chrome.symbol(["tray.and.arrow.down"], "Drop", .init(pointSize: 13, weight: .regular))
-            let iw = (icon?.size.width ?? 0) + 8
-            let x0 = (bounds.width - ts.width - iw) / 2
-            if let icon {
-                tinted(icon, .secondaryLabelColor).draw(in: NSRect(x: x0, y: (bounds.height - icon.size.height) / 2,
-                                                                   width: icon.size.width, height: icon.size.height))
-            }
-            (text as NSString).draw(at: NSPoint(x: x0 + iw, y: (bounds.height - ts.height) / 2), withAttributes: attrs)
-        }
-    }
-}
-
 /// The popover's root: the ENTIRE surface accepts file drops (the header promises
 /// "drop anywhere" — as of v2.9.5 it's true). While a drag hovers, a big accent drop
 /// state takes over so the action is unmistakable.
@@ -86,6 +64,11 @@ final class DropSurfaceView: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         registerForDraggedTypes([.fileURL])
+    }
+
+    /// 3.1: a solid panel, not see-through glass (tiles washed out over white pages).
+    override func draw(_ dirtyRect: NSRect) {
+        effectiveAppearance.performAsCurrentDrawingAppearance { Chrome.panelFill.setFill(); bounds.fill() }
     }
     required init?(coder: NSCoder) { fatalError() }
 
@@ -159,7 +142,7 @@ final class HomePopoverViewController: NSViewController {
     }
 
     private static let width: CGFloat = 312
-    private static let height: CGFloat = 452
+    private static let height: CGFloat = 388
 
     private let dropOverlay = NSVisualEffectView()
 
@@ -185,9 +168,8 @@ final class HomePopoverViewController: NSViewController {
         promise.frame = NSRect(x: 54, y: Self.height - 45, width: 220, height: 14)
         v.addSubview(promise)
 
-        let zone = DropZoneHint(frame: NSRect(x: 16, y: Self.height - 112, width: Self.width - 32, height: 52))
-        v.addSubview(zone)
-
+        // 3.1: no drop box — the Drop Shelf catches drags, and dropping on the menu-bar icon
+        // (or anywhere on this panel) still works; it just isn't advertised with a box.
         // 2×3 grid — same six actions as always.
         let cards: [(String, String, Selector)] = [
             ("doc.badge.plus", "New PDF", #selector(newPDF)),
@@ -202,7 +184,7 @@ final class HomePopoverViewController: NSViewController {
             let col = i % 2, row = i / 2
             let b = LauncherTile(symbol: entry.0, label: entry.1, target: self, action: entry.2)
             b.frame = NSRect(x: 16 + CGFloat(col) * (cardW + 8),
-                             y: Self.height - 124 - cardH - CGFloat(row) * (cardH + 8),
+                             y: Self.height - 60 - cardH - CGFloat(row) * (cardH + 8),
                              width: cardW, height: cardH)
             v.addSubview(b)
         }
