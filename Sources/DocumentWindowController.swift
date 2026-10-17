@@ -52,6 +52,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             if let ap = ProcessInfo.processInfo.environment["JACK_MODE_SELFTEST_APPEARANCE"] {
                 window?.appearance = NSAppearance(named: ap == "light" ? .aqua : .darkAqua)
             }
+            window?.ignoresMouseEvents = Self.harnessIgnoresMouse
             window?.orderBack(nil)
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
                 guard let self, let window = self.window else { return }
@@ -139,6 +140,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             guard !modeSelfTestStarted else { return }
             modeSelfTestStarted = true
             window?.alphaValue = 0
+            // An alpha-0 window still sits on screen and takes the user's real scroll gestures
+            // when the pointer is over it, which moved the page mid-test (the "sideways shift").
+            window?.ignoresMouseEvents = Self.harnessIgnoresMouse
             if let ap = ProcessInfo.processInfo.environment["JACK_MODE_SELFTEST_APPEARANCE"] {
                 window?.appearance = NSAppearance(named: ap == "light" ? .aqua : .darkAqua)
             }
@@ -167,6 +171,8 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
 
     private let sidebar = PageSidebarController()
     private var modeSelfTestStarted = false
+    /// Test windows never take the user's pointer; JACK_HARNESS_ALLOW_MOUSE=1 restores the old behavior (diagnostics only).
+    static let harnessIgnoresMouse = ProcessInfo.processInfo.environment["JACK_HARNESS_ALLOW_MOUSE"] == nil
     private var searchField: NSSearchField?
     private weak var saveButton: NSButton?
     private weak var saveItem: NSToolbarItem?
@@ -4540,6 +4546,13 @@ extension DocumentWindowController {
         func clipOrigin() -> CGPoint {
             pdfView.subviews.compactMap { ($0 as? NSScrollView)?.contentView.bounds.origin }.first ?? .zero
         }
+        if EventLog.on {
+            // A real scroll gesture reaching the test window (should never happen: it ignores the pointer).
+            _ = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { e in
+                EventLog.note("scroll gesture reached test window ours=\(e.window === window) dx=\(e.scrollingDeltaX) dy=\(e.scrollingDeltaY) phase=\(e.phase.rawValue) momentum=\(e.momentumPhase.rawValue) mouse=\(NSEvent.mouseLocation) frame=\(window.frame)")
+                return e
+            }
+        }
         var docReloads = 0
         let token = NotificationCenter.default.addObserver(forName: .PDFViewDocumentChanged, object: pdfView,
                                                            queue: nil) { _ in docReloads += 1 }
@@ -4608,7 +4621,7 @@ extension DocumentWindowController {
                 let reloads = docReloads - d0
                 let bad = removed > 0 || added > 0 || frameMoved || scaled || scrolled || reloads > 0
                 if bad { failures += 1 }
-                log += "\(bad ? "FAIL" : "ok  ") \(name): rowViewsRemoved=\(removed) rowViewsAdded=\(added) rowAnimations=\(anims) pageFrameMoved=\(frameMoved) scaleChanged=\(scaled) scrolled=\(scrolled)\(scrolled ? " (\(c0.y)->\(c1.y))" : "") docReloads=\(reloads)\n"
+                log += "\(bad ? "FAIL" : "ok  ") \(name): rowViewsRemoved=\(removed) rowViewsAdded=\(added) rowAnimations=\(anims) pageFrameMoved=\(frameMoved) scaleChanged=\(scaled) scrolled=\(scrolled)\(scrolled ? " (x \(c0.x)->\(c1.x), y \(c0.y)->\(c1.y))" : "") docReloads=\(reloads)\n"
                 next()
             }
         }
