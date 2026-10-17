@@ -59,6 +59,12 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
                 self.setMode(["markup", "note", "stamp", "stampdrag", "stampselect", "markundo"].contains(showcase) ? .markup : showcase == "redact" ? .redact : .read)
                 // 3.1 sheets: "whatsnew", "sheet:watermark|bates|lock|clean|compress|ocr|crop".
                 if showcase == "whatsnew" { self.showWhatsNew(nil) }
+                // Ask panel: "ask" opens it empty; "ask:<question>|summarize" also runs the on-device model.
+                if showcase == "ask" || showcase.hasPrefix("ask:") {
+                    self.toggleAsk(nil)
+                    let q = String(showcase.dropFirst(4))
+                    if !q.isEmpty { self.runAsk(q == "summarize" ? "__summarize__" : q) }
+                }
                 if showcase.hasPrefix("sheet:") {
                     switch showcase.dropFirst(6) {
                     case "watermark": self.addWatermark(nil)
@@ -131,7 +137,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
                     }
                 }
                 try? "\(window.windowNumber)".write(toFile: "/tmp/jack-showcase.id", atomically: true, encoding: .utf8)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 8) { exit(0) }
+                DispatchQueue.main.asyncAfter(deadline: .now() + (showcase.hasPrefix("ask:") ? 60 : 8)) { exit(0) }
             }
             return
         }
