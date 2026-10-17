@@ -215,7 +215,10 @@ final class JackPage: PDFPage {
         // Typed text super didn't draw (PDFView's tiles exclude annotations) is drawn HERE, in
         // the resolution-matched page path — see JackFreeText.swift.
         // Typed text, comment badges and image stamps all draw here (see PageDrawnAnnotation).
-        let pending = annotations.filter { a in
+        // 3.2.1: in PDFView's tiles the live overlay draws these instead (MarksOverlay.swift), so
+        // an edit never has to flush the tile cache. Thumbnails/flatten/print/save still draw here.
+        let inOverlay = MarksOverlay.enabled && MarksOverlay.isTileRender
+        let pending = inOverlay ? [] : annotations.filter { a in
             guard let pd = a as? PageDrawnAnnotation else { return false }
             return a.shouldDisplay && !pd.liveDrag && !drawn.contains(ObjectIdentifier(a))
         }

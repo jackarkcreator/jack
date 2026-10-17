@@ -56,6 +56,8 @@ enum CGContextKind {
     }()
     static let layerBackingStore: Int32 = 11
 
+    static func typeOf(_ ctx: CGContext) -> Int32 { getType?(ctx) ?? -1 }
+
     static func isLayerBackingStore(_ ctx: CGContext) -> Bool {
         guard let getType else { return false }
         return getType(ctx) == layerBackingStore

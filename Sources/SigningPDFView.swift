@@ -144,7 +144,7 @@ final class SigningPDFView: PDFView {
     private var bandIsRegion = false            // set when the rubber band feeds regionAction
 
     override func mouseDown(with event: NSEvent) {
-        EventLog.note("SigningPDFView.mouseDown")
+        EventLog.note("SigningPDFView.mouseDown at=\(convert(event.locationInWindow, from: nil)) inBounds=\(bounds.contains(convert(event.locationInWindow, from: nil))) clicks=\(event.clickCount) win=\(event.windowNumber) mine=\(window?.windowNumber ?? -1) ts=\(event.timestamp)")
         defer { EventLog.note("SigningPDFView.mouseDown returned (buttons=\(NSEvent.pressedMouseButtons))") }
         let viewPoint = convert(event.locationInWindow, from: nil)
         guard let page = page(for: viewPoint, nearest: true) else { super.mouseDown(with: event); return }
@@ -387,7 +387,7 @@ final class SigningPDFView: PDFView {
     }
 
     override func mouseUp(with event: NSEvent) {
-        EventLog.note("SigningPDFView.mouseUp")
+        EventLog.note("SigningPDFView.mouseUp at=\(convert(event.locationInWindow, from: nil))")
         if let note = draggingNote {
             note.liveDrag = false
             draggingNote = nil; dragPage = nil

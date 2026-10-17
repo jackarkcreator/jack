@@ -346,6 +346,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         sidebar.undoProvider = { [weak self] in self?.docUndo }
         content.addSubview(sidebar.scrollView)
 
+        if #available(macOS 13.0, *), MarksOverlay.enabled { pdfView.pageOverlayViewProvider = self }
         pdfView.document = doc
         pdfView.autoScales = false
         pdfView.displayMode = .singlePageContinuous
@@ -367,6 +368,11 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             clip.postsBoundsChangedNotifications = true
             NotificationCenter.default.addObserver(self, selector: #selector(pdfViewScrolled),
                                                    name: NSView.boundsDidChangeNotification, object: clip)
+        }
+        if EventLog.on {
+            pdfView.postsFrameChangedNotifications = true
+            NotificationCenter.default.addObserver(self, selector: #selector(pdfViewFrameChanged),
+                                                   name: NSView.frameDidChangeNotification, object: pdfView)
         }
         layoutViews()
         zoomPolicy = Self.defaultZoomPolicy
@@ -1671,10 +1677,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         if erase, let img = CropEngine.snapshotImage(page: page, region: rect) {
             dissolve = (img, pdfView.convert(rect, from: page))
         }
-        withPreservedPosition(anchorIndex: index) {
-            doc.removePage(at: index)
-            doc.insert(new, at: index)
-        }
+        swapPages([(index, new)])
         paintSessions[ObjectIdentifier(new)] = (session.original, paints)
         docUndo.beginUndoGrouping()
         registerPermanentCropUndo([(index, page, new)], restoreOld: true, name: erase ? "Erase" : "Redact")
@@ -1907,7 +1910,18 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         fieldAdornment.needsDisplay = true
     }
 
-    @objc private func pdfViewScrolled() { layoutFieldAdornment(); layoutStampRing() }
+    @objc private func pdfViewScrolled() { layoutFieldAdornment(); layoutStampRing(); diagMove("clip") }
+
+    /// DIAG (refresh/jump hunt, JACK_EVENTLOG=1 only): every page move or PDF view resize,
+    /// with the code path that caused it.
+    private func diagMove(_ what: String) {
+        guard EventLog.on, let clip = pdfView.subviews.compactMap({ ($0 as? NSScrollView)?.contentView }).first else { return }
+        let stack = Thread.callStackSymbols.dropFirst(2).prefix(22).map {
+            $0.split(separator: " ", omittingEmptySubsequences: true).dropFirst(3).prefix(2).joined(separator: " ")
+        }.joined(separator: " < ")
+        EventLog.note("DIAG \(what) clip=\(clip.bounds.origin) pdfFrame=\(pdfView.frame) scale=\(pdfView.scaleFactor) :: \(stack)")
+    }
+    @objc private func pdfViewFrameChanged() { diagMove("frame") }
 
     /// v3.0.3: the selected stamp's outline, as a view that tracks the stamp on screen.
     private let stampRing = SelectionRing()
@@ -2493,9 +2507,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             swaps.append((i, page, new))
             produced.append((i, new, (session.original, paints)))
         }
-        withPreservedPosition(anchorIndex: swaps.first?.0) {
-            for (i, _, new) in swaps { doc.removePage(at: i); doc.insert(new, at: i) }
-        }
+        swapPages(swaps.map { (index: $0.0, page: $0.2) })
         for (_, new, session) in produced { paintSessions[ObjectIdentifier(new)] = session }
         let pages = swaps.map { $0.0 }
         let regionCount = byPage.values.reduce(0) { $0 + $1.count }
@@ -2662,7 +2674,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         }
         if let c = ann.fontColor { retypeColor = c }
         page.removeAnnotation(ann)
-        forceRefresh()
+        refreshMarks()
         openTypewriterEditor(on: page, at: CGPoint(x: ann.bounds.minX, y: ann.bounds.maxY),
                              existing: ann)
     }
@@ -2757,10 +2769,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             infoAlert("Couldn\u{2019}t retype here", "This span couldn\u{2019}t be removed cleanly, so nothing was changed.")
             return
         }
-        withPreservedPosition(anchorIndex: index) {
-            doc.removePage(at: index)
-            doc.insert(new, at: index)
-        }
+        swapPages([(index, new)])
         registerPermanentCropUndo([(index, page, new)], restoreOld: true, name: "Retype")
         sidebar.reload()
         lastSelection = nil
@@ -2801,7 +2810,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         guard let ann = sender.representedObject as? PDFAnnotation, let page = ann.page else { return }
         page.removeAnnotation(ann)
         registerFreeTextUndo(page: page, add: nil, remove: ann, name: "Remove Text")
-        forceRefresh()
+        refreshMarks()
         markDirty()
     }
 
@@ -2821,7 +2830,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             // Empty commit: a new placement becomes nothing; an edited annotation is removed.
             if let old = editing {
                 registerFreeTextUndo(page: target.page, add: nil, remove: old, name: "Remove Text")
-                forceRefresh()
+                refreshMarks()
                 markDirty()
             }
             return
@@ -2854,7 +2863,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         ann.border = border
         target.page.addAnnotation(ann)
         registerFreeTextUndo(page: target.page, add: ann, remove: editing, name: editing == nil ? "Add Text" : "Edit Text")
-        forceRefresh()
+        refreshMarks()
         markDirty()
     }
 
@@ -2871,7 +2880,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         // Cancel while re-editing: put the original back untouched (no undo entry).
         if let old = editing, let page = target?.page {
             page.addAnnotation(old)
-            forceRefresh()
+            refreshMarks()
         }
     }
 
@@ -2880,10 +2889,10 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             let now = ann.bounds
             ann.bounds = oldBounds
             me.noteMoved(ann, from: now)
-            me.forceRefresh()
+            me.refreshMarks()
         }
         docUndo.setActionName("Move Note")
-        forceRefresh()   // Tahoe's render cache ghosts moved annotations — repaint at gesture end
+        refreshMarks()   // Tahoe's render cache ghosts moved annotations — repaint at gesture end
         markDirty()
     }
 
@@ -2892,14 +2901,14 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             let now = ann.bounds
             ann.bounds = oldBounds
             me.freeTextMoved(ann, from: now)
-            me.forceRefresh()
+            me.refreshMarks()
         }
         docUndo.setActionName("Move Text")
         // 🧨 Tahoe's render cache ghosts a MOVED native annotation exactly like an added one:
         // the cached page still shows the old position while the annotation draws at the new
         // one — two copies of the same text on screen, none of them a real duplicate. Same
         // lesson as adds/deletes: repaint via document-reassign at gesture end.
-        forceRefresh()
+        refreshMarks()
         markDirty()
     }
 
@@ -2909,7 +2918,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             if let a = add { page.removeAnnotation(a) }
             if let r = remove { page.addAnnotation(r) }
             me.registerFreeTextUndo(page: page, add: remove, remove: add, name: name)
-            me.forceRefresh()
+            me.refreshMarks()
         }
         docUndo.setActionName(name)
     }
@@ -2955,7 +2964,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         docUndo.registerUndo(withTarget: self) { $0.removeStampUndoable(ann) }
         docUndo.setActionName("Add Mark")
         markEdited()
-        forceRefresh()   // page-drawn (ImageStampAnnotation): cached tiles need the repaint
+        refreshMarks()   // page-drawn (ImageStampAnnotation): cached tiles need the repaint
     }
 
     private func removeStampUndoable(_ ann: ImageStampAnnotation) {
@@ -2968,7 +2977,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         docUndo.setActionName("Remove Mark")
         markEdited()
         if selected === ann { selected = nil }
-        forceRefresh()   // PDFView caches page renders; deletes need a forced repaint
+        refreshMarks()   // PDFView caches page renders; deletes need a forced repaint
         didSelect(lastStamp())
     }
 
@@ -2987,7 +2996,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             ann.bounds = oldBounds
             me.registerBoundsUndo(ann, current, name: name)
             if me.selected === ann { me.sizeSlider.doubleValue = Double(oldBounds.width) }
-            me.forceRefresh()
+            me.refreshMarks()
         }
         docUndo.setActionName(name)
         markEdited()
@@ -2997,7 +3006,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     /// where it started: tiles drawn mid-drag skipped it.
     func stampMoved(_ ann: ImageStampAnnotation, from oldBounds: CGRect) {
         if ann.bounds != oldBounds { registerBoundsUndo(ann, oldBounds, name: "Move Mark") }
-        forceRefresh()
+        refreshMarks()
         layoutStampRing()
     }
 
@@ -3048,7 +3057,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             sliderStartBounds = nil
         }
         layoutStampRing()
-        if !ann.liveDrag { forceRefresh() }
+        if !ann.liveDrag { refreshMarks() }
     }
 
     @objc private func removeSelected() {
@@ -3104,6 +3113,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     /// returns. `anchorIndex` is the page the user actually edited: if the captured
     /// destination is unusable, the view stays on that page — never "some other page".
     func withPreservedPosition(anchorIndex: Int? = nil, _ mutate: () -> Void) {   // internal for the position kill-tests
+        EventLog.note("DIAG >>> full reload (withPreservedPosition) from: \(Thread.callStackSymbols.dropFirst(1).prefix(6).map { $0.split(separator: " ", omittingEmptySubsequences: true).dropFirst(3).prefix(1).joined() }.joined(separator: " < "))")
         let scale = pdfView.scaleFactor
         let autoScales = pdfView.autoScales
         var destIndex: Int?
@@ -3170,6 +3180,57 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     }
 
     private func forceRefresh() { withPreservedPosition {} }
+
+    /// 3.2.1: replace pages WITHOUT reassigning the document. PDFKit re-renders just those
+    /// pages; same-size pages keep the document geometry identical, so the exact scroll origin
+    /// is restored (no snapshot cover, no blink, no jump). Different sizes or rotation fall back
+    /// to the old reassign path. JACK_INPLACE=0 forces the old path.
+    static let inPlaceSwaps = ProcessInfo.processInfo.environment["JACK_INPLACE"] != "0"
+    func swapPages(_ swaps: [(index: Int, page: PDFPage)]) {
+        guard let doc = pdfView.document else { return }
+        let box = pdfView.displayBox
+        let sameShape = swaps.allSatisfy { s in
+            guard let old = doc.page(at: s.index) else { return false }
+            return old.bounds(for: box).size == s.page.bounds(for: box).size && old.rotation == s.page.rotation
+        }
+        guard Self.inPlaceSwaps, sameShape,
+              let scroll = pdfView.subviews.compactMap({ $0 as? NSScrollView }).first else {
+            withPreservedPosition(anchorIndex: swaps.first?.index) {
+                for s in swaps { doc.removePage(at: s.index); doc.insert(s.page, at: s.index) }
+            }
+            return
+        }
+        let clip = scroll.contentView
+        let origin = clip.bounds.origin
+        for s in swaps { doc.removePage(at: s.index); doc.insert(s.page, at: s.index) }
+        pdfView.layoutDocumentView()
+        let hold = { [weak pdfView] in
+            guard pdfView != nil, clip.bounds.origin != origin else { return }
+            clip.scroll(to: origin)
+            scroll.reflectScrolledClipView(clip)
+        }
+        hold()
+        // PDFKit may queue its own relayout after the insert: keep the view where it was.
+        for d in [0.0, 0.05, 0.15] { DispatchQueue.main.asyncAfter(deadline: .now() + d, execute: hold) }
+        EventLog.note("DIAG >>> in-place swap pages=\(swaps.map { $0.index + 1 }) origin=\(origin)")
+    }
+
+    /// Page-drawn marks (typed text, notes, signatures/images) changed: redraw their live
+    /// overlays in place — no document reload, no cover (MarksOverlay.swift). Pages that are
+    /// not JackPages draw those marks natively and keep the old reload.
+    private let marksOverlays = NSMapTable<PDFPage, MarksOverlayView>.weakToWeakObjects()
+    func refreshMarks(_ pages: [PDFPage] = []) {
+        guard MarksOverlay.enabled else { forceRefresh(); return }
+        if pages.contains(where: { !($0 is JackPage) }) { forceRefresh(); return }
+        let live = marksOverlays.keyEnumerator().allObjects.compactMap { $0 as? PDFPage }
+        for p in Set((pages + live).map(ObjectIdentifier.init)).compactMap({ id in (pages + live).first { ObjectIdentifier($0) == id } }) {
+            pdfView.annotationsChanged(on: p)
+        }
+        for case let v as MarksOverlayView in marksOverlays.objectEnumerator()?.allObjects ?? [] { v.needsDisplay = true }
+        EventLog.note("DIAG >>> refreshMarks pages=\(pages.count) overlays=\(marksOverlays.count)")
+    }
+    fileprivate func registerOverlay(_ v: MarksOverlayView, for page: PDFPage) { marksOverlays.setObject(v, forKey: page) }
+    fileprivate func unregisterOverlay(for page: PDFPage) { marksOverlays.removeObject(forKey: page) }
 
     /// Which page slices are on screen, measured from the STABLE pre-mutation view by pure
     /// geometry — never the view's page bookkeeping (visiblePages/currentDestination were
@@ -3493,7 +3554,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         lastSelection = nil
         registerAnnotationRemovalUndo(added, name: "Add Comment")
         markEdited()
-        forceRefresh()
+        refreshMarks()
     }
 
     private func addComment(on page: PDFPage, at point: CGPoint) {
@@ -3508,7 +3569,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         page.addAnnotation(ann)
         registerAnnotationRemovalUndo([(page, ann)], name: "Add Comment")
         markEdited()
-        forceRefresh()
+        refreshMarks()
     }
 
     private func promptForCommentText(initial: String) -> String? {
@@ -3595,7 +3656,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         guard !items.isEmpty else { return }
         registerAnnotationAddUndo(items, name: "Remove Comment")
         markEdited()
-        forceRefresh()
+        refreshMarks()
     }
 
     private func collectComments() -> [(Int, PDFAnnotation)] {
@@ -3631,7 +3692,8 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     /// (comment badges, typed text, stamps) live in the page tiles, so they still need the
     /// full repaint (forceRefresh) after an add or remove.
     private func repaintMarks(_ items: [(PDFPage, PDFAnnotation)]) {
-        if items.contains(where: { $0.1 is PageDrawnAnnotation }) { forceRefresh(); return }
+        EventLog.note("DIAG >>> repaintMarks \(items.map { String(describing: type(of: $0.1)) })")
+        if items.contains(where: { $0.1 is PageDrawnAnnotation }) { refreshMarks(items.map { $0.0 }); return }
         var seen = Set<ObjectIdentifier>()
         for (page, _) in items where seen.insert(ObjectIdentifier(page)).inserted {
             pdfView.annotationsChanged(on: page)
@@ -3672,10 +3734,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             return
         }
 
-        withPreservedPosition(anchorIndex: index) {
-            doc.removePage(at: index)
-            doc.insert(cleaned, at: index)
-        }
+        swapPages([(index, cleaned)])
         registerPermanentCropUndo([(index, page, cleaned)], restoreOld: true, name: "Remove Object")
         lastImageHit = nil
         sidebar.reload()
@@ -3887,12 +3946,8 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     private func registerPermanentCropUndo(_ swaps: [(Int, PDFPage, PDFPage)], restoreOld: Bool, name: String) {
         docUndo.registerUndo(withTarget: self) { me in
             guard let doc = me.pdfView.document else { return }
-            me.withPreservedPosition(anchorIndex: swaps.first?.0) {
-                for (i, old, new) in swaps {
-                    doc.removePage(at: i)
-                    doc.insert(restoreOld ? old : new, at: i)
-                }
-            }
+            _ = doc
+            me.swapPages(swaps.map { (index: $0.0, page: restoreOld ? $0.1 : $0.2) })
             me.registerPermanentCropUndo(swaps, restoreOld: !restoreOld, name: name)
             me.sidebar.reload()
         }
@@ -3980,12 +4035,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             swaps.append((i, old, new))
         }
         guard !swaps.isEmpty else { return true }
-        withPreservedPosition(anchorIndex: swaps.first?.0) {
-            for (i, _, new) in swaps {
-                doc.removePage(at: i)
-                doc.insert(new, at: i)
-            }
-        }
+        swapPages(swaps.map { (index: $0.0, page: $0.2) })
         registerPermanentCropUndo(swaps, restoreOld: true, name: name)
         sidebar.reload()
         return true
@@ -4851,5 +4901,25 @@ extension DocumentWindowController {
             exit(failures == 0 ? 0 : 1)
         }
         next()
+    }
+}
+
+
+@available(macOS 13.0, *)
+extension DocumentWindowController: PDFPageOverlayViewProvider {
+    func pdfView(_ view: PDFView, overlayViewFor page: PDFPage) -> NSView? {
+        let v = MarksOverlayView(page: page, displayBox: view.displayBox)
+        registerOverlay(v, for: page)
+        return v
+    }
+    func pdfView(_ pdfView: PDFView, willDisplayOverlayView overlayView: NSView, for page: PDFPage) {
+        guard let v = overlayView as? MarksOverlayView else { return }
+        v.displayBox = pdfView.displayBox
+        registerOverlay(v, for: page)
+        v.needsDisplay = true
+        EventLog.note("DIAG overlay show p=\((pdfView.document?.index(for: page) ?? -1) + 1) frame=\(v.frame) flipped=\(v.isFlipped) pageBox=\(page.bounds(for: pdfView.displayBox).size) scale=\(pdfView.scaleFactor)")
+    }
+    func pdfView(_ pdfView: PDFView, willEndDisplayingOverlayView overlayView: NSView, for page: PDFPage) {
+        unregisterOverlay(for: page)
     }
 }

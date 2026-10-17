@@ -6,7 +6,28 @@ import AppKit
 final class ThumbnailTileView: NSView {
     var isSelected = false { didSet { needsDisplay = true } }
     weak var numberLabel: NSTextField?
+    weak var pageView: NSImageView?
     override func viewDidChangeEffectiveAppearance() { needsDisplay = true }
+
+    /// Laid out from the tile's REAL size: the sidebar uses 140×180 items, the organizer larger
+    /// ones. Fixed 150×196 frames made the page overflow right/top, so the selection plate showed
+    /// only on the left and bottom (read as a shadow, page off center). The page box hugs the
+    /// page's own aspect so no white margin shows around it either.
+    override func layout() {
+        super.layout()
+        let inset: CGFloat = 8, labelH: CGFloat = 16, labelGap: CGFloat = 6
+        numberLabel?.frame = NSRect(x: 0, y: 6, width: bounds.width, height: labelH)
+        let box = NSRect(x: inset, y: 6 + labelH + labelGap, width: bounds.width - 2 * inset,
+                         height: bounds.height - (6 + labelH + labelGap) - inset)
+        guard let pv = pageView else { return }
+        var r = box
+        if let size = pv.image?.size, size.width > 0, size.height > 0 {
+            let scale = min(box.width / size.width, box.height / size.height)
+            let w = (size.width * scale).rounded(), h = (size.height * scale).rounded()
+            r = NSRect(x: (box.midX - w / 2).rounded(), y: (box.midY - h / 2).rounded(), width: w, height: h)
+        }
+        pv.frame = r
+    }
     override func draw(_ dirtyRect: NSRect) {
         guard isSelected else { return }
         effectiveAppearance.performAsCurrentDrawingAppearance {
@@ -32,6 +53,7 @@ final class PageThumbnailItem: NSCollectionViewItem {
     override func loadView() {
         let v = ThumbnailTileView(frame: NSRect(x: 0, y: 0, width: 150, height: 196))
         v.numberLabel = label
+        v.pageView = thumb
 
         thumb.frame = NSRect(x: 8, y: 26, width: 134, height: 162)
         thumb.imageScaling = .scaleProportionallyDown
@@ -54,6 +76,8 @@ final class PageThumbnailItem: NSCollectionViewItem {
 
     func configure(_ image: NSImage?, label text: String) {
         thumb.image = image
+        thumb.imageScaling = .scaleAxesIndependently   // the box already has the page's aspect
+        view.needsLayout = true
         thumb.layer?.backgroundColor = NSColor.white.cgColor
         thumb.layer?.borderWidth = 1
         thumb.layer?.borderColor = NSColor.separatorColor.cgColor
@@ -66,6 +90,8 @@ final class PageThumbnailItem: NSCollectionViewItem {
     /// EMPTY — a dashed outline where it used to sit, number intact, nothing renumbers.
     func configureTaken(label text: String) {
         thumb.image = nil
+        view.needsLayout = true
+        view.layoutSubtreeIfNeeded()
         thumb.layer?.backgroundColor = NSColor.clear.cgColor
         thumb.layer?.borderWidth = 0
         dash.frame = thumb.bounds
