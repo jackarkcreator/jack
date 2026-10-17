@@ -55,8 +55,8 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             window?.orderBack(nil)
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
                 guard let self, let window = self.window else { return }
-                self.setMode(["markup", "note", "stamp", "stampdrag", "markundo"].contains(showcase) ? .markup : showcase == "redact" ? .redact : .read)
-                if ["note", "stamp", "stampdrag"].contains(showcase), let page = self.pdfView.document?.page(at: 0) {
+                self.setMode(["markup", "note", "stamp", "stampdrag", "stampselect", "markundo"].contains(showcase) ? .markup : showcase == "redact" ? .redact : .read)
+                if ["note", "stamp", "stampdrag", "stampselect"].contains(showcase), let page = self.pdfView.document?.page(at: 0) {
                     page.addAnnotation(CommentBadgeAnnotation(bounds: CGRect(x: 120, y: 520, width: 18, height: 18), text: "Showcase"))
                     // "stamp": a typed-style signature beside the badge, built like the Sign sheet's.
                     var stamp: ImageStampAnnotation?
@@ -70,6 +70,19 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
                     self.forceRefresh()
                     // "stampdrag": a real drag through SigningPDFView, held mid-gesture (no mouse-up),
                     // so the capture shows whether a stale copy is left at the start position.
+                    // "stampselect": a real click on the stamp (down + up, no movement) selects it.
+                    if showcase == "stampselect", let stamp {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                            let c = CGPoint(x: stamp.bounds.midX, y: stamp.bounds.midY)
+                            let wp = self.pdfView.convert(self.pdfView.convert(c, from: page), to: nil)
+                            for t in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                                guard let e = NSEvent.mouseEvent(with: t, location: wp, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                                                 windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1,
+                                                                 pressure: t == .leftMouseUp ? 0 : 1) else { continue }
+                                if t == .leftMouseDown { self.pdfView.mouseDown(with: e) } else { self.pdfView.mouseUp(with: e) }
+                            }
+                        }
+                    }
                     if showcase == "stampdrag", let stamp {
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
                             func ev(_ t: NSEvent.EventType, _ pp: CGPoint) -> NSEvent? {
@@ -292,6 +305,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         content.addSubview(hud)
         fieldAdornment.isHidden = true
         pdfView.addSubview(fieldAdornment)
+        stampRing.isHidden = true
+        pdfView.addSubview(stampRing)
+        pdfView.onStampDragged = { [weak self] in self?.layoutStampRing() }
         if let clip = pdfView.subviews.compactMap({ ($0 as? NSScrollView)?.contentView }).first {
             clip.postsBoundsChangedNotifications = true
             NotificationCenter.default.addObserver(self, selector: #selector(pdfViewScrolled),
@@ -490,7 +506,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     }
     @objc private func zoomMenuPicked(_ sender: NSMenuItem) { (sender.representedObject as? ZoomMenuAction)?.run() }
 
-    @objc private func scaleChanged() { updateHUD(); layoutFieldAdornment() }
+    @objc private func scaleChanged() { updateHUD(); layoutFieldAdornment(); layoutStampRing() }
 
     /// v3.0.1: armed Highlight/Underline/Strike mark a selection once it stops changing AND the
     /// mouse is up. Driven by selection changes, not mouse-up: macOS 26 PDFKit selects text in
@@ -540,6 +556,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         if index != NSNotFound { lastKnownPageIndex = index }
         updateHUD()
         sidebar.highlight(pageIndex: index)
+        layoutStampRing()   // forceRefresh / undo end here — keep the ring on the stamp
     }
 
     // v2.8: the page indicator lives in the HUD; the subtitle carries only the edit state.
@@ -1563,7 +1580,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         modeRows[.markup]?.relayout()
     }
 
-    private func syncStampControls() { syncMarkupOptions() }
+    private func syncStampControls() { syncMarkupOptions(); layoutStampRing() }
 
     private func showSignMenu(from anchor: NSView?) {
         if mode != .markup { setMode(.markup) }
@@ -1921,7 +1938,19 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         fieldAdornment.needsDisplay = true
     }
 
-    @objc private func pdfViewScrolled() { layoutFieldAdornment() }
+    @objc private func pdfViewScrolled() { layoutFieldAdornment(); layoutStampRing() }
+
+    /// v3.0.3: the selected stamp's outline, as a view that tracks the stamp on screen.
+    private let stampRing = SelectionRing()
+    private func layoutStampRing() {
+        guard mode == .markup, let ann = selected, let page = ann.page, pdfView.document?.index(for: page) != NSNotFound else {
+            stampRing.isHidden = true
+            return
+        }
+        stampRing.frame = pdfView.convert(ann.bounds, from: page).insetBy(dx: -6, dy: -6).integral
+        stampRing.isHidden = false
+        stampRing.needsDisplay = true
+    }
 
     func fieldSelected(name: String?, widget: PDFAnnotation?) {
         selectedFieldWidget = widget
@@ -2996,6 +3025,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     func stampMoved(_ ann: ImageStampAnnotation, from oldBounds: CGRect) {
         if ann.bounds != oldBounds { registerBoundsUndo(ann, oldBounds, name: "Move Mark") }
         forceRefresh()
+        layoutStampRing()
     }
 
     private func hasFormFields(_ doc: PDFDocument) -> Bool {
@@ -3015,6 +3045,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             if mode != .markup { setMode(.markup) }   // clicking a stamp surfaces its controls
         }
         syncStampControls()
+        layoutStampRing()
         pdfView.needsDisplay = true
     }
 
@@ -3043,6 +3074,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             }
             sliderStartBounds = nil
         }
+        layoutStampRing()
         if !ann.liveDrag { forceRefresh() }
     }
 
@@ -4496,7 +4528,42 @@ extension DocumentWindowController {
                 self.didSelect(nil)
                 page.removeAnnotation(stamp)
                 self.forceRefresh()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { swatchClickProbe { continueArmedChecks() } }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { ringChecks { swatchClickProbe { continueArmedChecks() } } }
+            }
+        }
+        // v3.0.3: a selected stamp shows its ring, the ring follows a drag, and hides in Read.
+        func ringChecks(_ then: @escaping () -> Void) {
+            guard let page = pdfView.document?.page(at: 0), let img = renderText("Ring Test", size: 48, pad: 10) else { return then() }
+            setMode(.markup)
+            let stamp = ImageStampAnnotation(image: img, bounds: CGRect(x: 120, y: 320, width: 120, height: 40))
+            page.addAnnotation(stamp)
+            pdfView.go(to: PDFDestination(page: page, at: CGPoint(x: 0, y: 420)))
+            window.layoutIfNeeded()
+            func ev(_ t: NSEvent.EventType, _ pp: CGPoint) -> NSEvent? {
+                NSEvent.mouseEvent(with: t, location: pdfView.convert(pdfView.convert(pp, from: page), to: nil), modifierFlags: [],
+                                   timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil,
+                                   eventNumber: 0, clickCount: 1, pressure: t == .leftMouseUp ? 0 : 1)
+            }
+            let c = CGPoint(x: stamp.bounds.midX, y: stamp.bounds.midY)
+            if let d = ev(.leftMouseDown, c) { pdfView.mouseDown(with: d) }
+            if let u = ev(.leftMouseUp, c) { pdfView.mouseUp(with: u) }
+            let viewRect = pdfView.convert(stamp.bounds, from: page)
+            let shown = !stampRing.isHidden && stampRing.superview === pdfView && stampRing.frame.contains(viewRect)
+            check("selected stamp shows its ring", shown, "ringHidden=\(stampRing.isHidden) ring=\(stampRing.frame) stamp=\(viewRect)")
+            if let d = ev(.leftMouseDown, c) { pdfView.mouseDown(with: d) }
+            if let m = ev(.leftMouseDragged, CGPoint(x: c.x + 60, y: c.y - 40)) { pdfView.mouseDragged(with: m) }
+            let midDrag = stampRing.frame.contains(pdfView.convert(stamp.bounds, from: page))
+            if let u = ev(.leftMouseUp, CGPoint(x: c.x + 60, y: c.y - 40)) { pdfView.mouseUp(with: u) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                let follows = midDrag && self.stampRing.frame.contains(self.pdfView.convert(stamp.bounds, from: page))
+                check("ring follows a dragged stamp", follows, "midDrag=\(midDrag) ring=\(self.stampRing.frame)")
+                self.setMode(.read)
+                check("ring hides outside Markup", self.stampRing.isHidden, "hidden=\(self.stampRing.isHidden)")
+                self.docUndo.undo()                 // the move
+                page.removeAnnotation(stamp)
+                self.forceRefresh()
+                self.setMode(.markup)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { then() }
             }
         }
         func swatchClickProbe(_ then: @escaping () -> Void) {

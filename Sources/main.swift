@@ -133,6 +133,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                          defaultAction: #selector(makeDefaultAction),
                          updateAction: #selector(checkUpdatesAction),
                          target: self)
+        runWindowShowcaseIfRequested()
         checkForUpdate()
         // Dev-only test hook: `Jack --organize a.pdf b.pdf` opens the organizer directly.
         if let flag = CommandLine.arguments.firstIndex(of: "--organize"),
@@ -292,6 +293,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         popover.contentViewController = popoverVC
         popover.behavior = .transient
+    }
+
+    // MARK: - Window showcase (verification only)
+
+    /// JACK_SHOWCASE_WINDOW=<organizer|batch|settings|launcher> opens that window parked BEHIND
+    /// other apps (never activated, no input), writes its window number to
+    /// /tmp/jack-showcase.id for a window-scoped screencapture, and quits after 8 s.
+    /// JACK_SHOWCASE_PDF names the fixture; JACK_MODE_SELFTEST_APPEARANCE=light|dark forces the look.
+    private static var showcaseKeep: [AnyObject] = []
+    private func runWindowShowcaseIfRequested() {
+        let env = ProcessInfo.processInfo.environment
+        guard let which = env["JACK_SHOWCASE_WINDOW"] else { return }
+        if let ap = env["JACK_MODE_SELFTEST_APPEARANCE"] { NSApp.appearance = NSAppearance(named: ap == "light" ? .aqua : .darkAqua) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+            guard let self else { return }
+            var win: NSWindow?
+            let pdfURL = URL(fileURLWithPath: env["JACK_SHOWCASE_PDF"] ?? "")
+            switch which {
+            case "organizer", "organizerfull":
+                if let doc = PDFDocument(url: pdfURL) {
+                    Self.showcaseKeep.append(doc)
+                    let pages = (0..<doc.pageCount).compactMap { doc.page(at: $0) }
+                    let wc = PageOrganizerWindowController(groups: [PageGroup(name: pdfURL.deletingPathExtension().lastPathComponent, pages: pages)])
+                    Self.showcaseKeep.append(wc)
+                    win = wc.window
+                    if which == "organizerfull" { _ = wc.perform(NSSelectorFromString("addAll")) }
+                }
+            case "batch":
+                let wc = BatchWindowController(folder: pdfURL.deletingLastPathComponent())
+                Self.showcaseKeep.append(wc)
+                win = wc.window
+            case "settings":
+                win = SettingsWindowController.shared.window
+            case "launcher":
+                self.showPopover(activating: false)
+                win = self.popoverVC.view.window
+            default: break
+            }
+            if which != "launcher" { win?.orderBack(nil) }   // organizer/organizerfull/batch/settings
+            if let win { try? "\(win.windowNumber)".write(toFile: "/tmp/jack-showcase.id", atomically: true, encoding: .utf8) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 8) { exit(0) }
+        }
     }
 
     private func togglePopover() {

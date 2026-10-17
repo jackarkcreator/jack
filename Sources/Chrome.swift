@@ -86,6 +86,21 @@ enum Chrome {
     static let trailingEdge: CGFloat = 12       // Save's right edge
     /// Below this window width every tool group drops its labels together.
     static let labelBreakpoint: CGFloat = 1000
+
+    /// The window's one filled control (Save, Run, Save New PDF): Jack teal when `on`, quiet
+    /// otherwise. Applied on the next run-loop turn — a style set while the toolbar is still
+    /// building the item does not stick (seen on Batch's Run in 3.0.2).
+    static func setPrimary(_ item: NSToolbarItem?, _ button: NSButton?, on: Bool) {
+        DispatchQueue.main.async {
+            button?.isEnabled = on
+            if #available(macOS 26.0, *) {
+                item?.style = on ? .prominent : .plain
+                item?.backgroundTintColor = on ? Chrome.tint : nil
+            } else {
+                button?.bezelColor = on ? Chrome.tint : nil
+            }
+        }
+    }
 }
 
 // MARK: - Tool tile
@@ -306,6 +321,29 @@ final class ModeSwitch: NSView {
                 (text as NSString).draw(at: NSPoint(x: (bounds.width - s.width) / 2, y: (bounds.height - s.height) / 2),
                                         withAttributes: attrs)
             }
+        }
+    }
+}
+
+// MARK: - Selection ring
+
+/// The outline around a selected signature/image. A plain view over the page, NOT drawn in the
+/// annotation layer: macOS 26 PDFKit caches that layer, so an outline toggled there never showed
+/// (3.0.0–3.0.2). Dashed Jack teal over a white halo reads on light and dark pages. Click-through.
+final class SelectionRing: NSView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    override func draw(_ dirtyRect: NSRect) {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            let r = bounds.insetBy(dx: 2, dy: 2)
+            let halo = NSBezierPath(roundedRect: r, xRadius: 4, yRadius: 4)
+            halo.lineWidth = 3.5
+            NSColor(white: 1, alpha: 0.85).setStroke()
+            halo.stroke()
+            let dash = NSBezierPath(roundedRect: r, xRadius: 4, yRadius: 4)
+            dash.lineWidth = 1.5
+            dash.setLineDash([6, 4], count: 2, phase: 0)
+            Chrome.tint.setStroke()
+            dash.stroke()
         }
     }
 }

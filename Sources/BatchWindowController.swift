@@ -10,6 +10,7 @@ final class BatchWindowController: NSWindowController, NSWindowDelegate, NSToolb
     private let opPopup = NSPopUpButton()
     private let optionsBox = NSView()
     private let runButton = NSButton()
+    private weak var runItem: NSToolbarItem?
     private let progressBar = NSProgressIndicator()
     private let statusLabel = NSTextField(labelWithString: "")
     private let results = NSTextView()
@@ -91,14 +92,9 @@ final class BatchWindowController: NSWindowController, NSWindowDelegate, NSToolb
             runButton.keyEquivalent = "\r"
             runButton.target = self
             runButton.action = #selector(run)
-            runButton.isEnabled = !files.isEmpty
             item.view = runButton
-            if #available(macOS 26.0, *) {   // v3: the window's one filled control
-                item.style = .prominent
-                item.backgroundTintColor = Chrome.tint
-            } else {
-                runButton.bezelColor = Chrome.tint
-            }
+            runItem = item
+            Chrome.setPrimary(item, runButton, on: !files.isEmpty)   // v3: the window's one filled control
             item.label = "Run"
             item.toolTip = "Run the operation on every PDF in the folder"
             return item
@@ -212,7 +208,7 @@ final class BatchWindowController: NSWindowController, NSWindowDelegate, NSToolb
     @objc private func run() {
         guard !running, !files.isEmpty else { return }
         running = true
-        runButton.isEnabled = false
+        Chrome.setPrimary(runItem, runButton, on: false)
         opPopup.isEnabled = false
         results.string = ""
         let op = currentOperation()
@@ -242,7 +238,7 @@ final class BatchWindowController: NSWindowController, NSWindowDelegate, NSToolb
                     NSSound(named: "Glass")?.play()
                 }
                 self.running = false
-                self.runButton.isEnabled = true
+                Chrome.setPrimary(self.runItem, self.runButton, on: true)
                 self.opPopup.isEnabled = true
             }
         }

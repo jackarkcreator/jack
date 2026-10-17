@@ -54,6 +54,8 @@ final class SigningPDFView: PDFView {
     var noteMode = false
     /// v3 tool keys (V T H U S N G I · B E · Esc); return true when the key was used.
     var toolKeyHandler: ((NSEvent) -> Bool)?
+    /// v3.0.3: called while a stamp is dragged, so the selection ring can follow it.
+    var onStampDragged: (() -> Void)?
     /// v3 armed marking: called after a text-selection drag ends.
     var onSelectionFinished: (() -> Void)?
     // Form authoring: while on, widgets drag instead of accepting input; an armed kind
@@ -381,6 +383,7 @@ final class SigningPDFView: PDFView {
         ann.bounds = b
         last = p
         needsDisplay = true
+        onStampDragged?()
     }
 
     override func mouseUp(with event: NSEvent) {

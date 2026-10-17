@@ -1,14 +1,15 @@
 // A PDF annotation that draws an NSImage (the placed signature, a dropped image, ✔/✘).
 // v3.0.2: the image draws through the PAGE (JackPage.draw), not PDFView's 1x annotation layer,
 // which scaled it up and stair-stepped every edge at 200% — same fix as typed text and comment
-// badges (JackFreeText.swift). The selection outline stays in the layer: it is screen-only
-// chrome, so it never reaches a page draw (thumbnails, flattens, rasters).
+// badges (JackFreeText.swift). v3.0.3: the selection outline is NOT drawn here any more —
+// toggling it in PDFKit's cached layer never repainted on macOS 26, so it never showed. The
+// document window draws it as a SelectionRing view over the page instead.
 import PDFKit
 import AppKit
 
 final class ImageStampAnnotation: PDFAnnotation, PageDrawnAnnotation {
     let image: NSImage
-    var outline = false   // selection outline (on screen only; never flattened)
+    var outline = false   // selected (the ring is a view — see SelectionRing)
     /// Set while the user drags or slider-resizes the stamp: the layer copy follows live and
     /// the page skips it. Cleared at gesture end, which then forces a repaint.
     var liveDrag = false
@@ -31,14 +32,6 @@ final class ImageStampAnnotation: PDFAnnotation, PageDrawnAnnotation {
             context.restoreGState()
         }
 
-        if outline, !PageDrawScope.isActive {
-            context.saveGState()
-            context.setStrokeColor(NSColor.controlAccentColor.cgColor)
-            context.setLineWidth(1.5)
-            context.setLineDash(phase: 0, lengths: [6, 4])
-            context.stroke(bounds.insetBy(dx: -3, dy: -3))
-            context.restoreGState()
-        }
     }
 
     var aspect: CGFloat {

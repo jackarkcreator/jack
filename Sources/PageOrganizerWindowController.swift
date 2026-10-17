@@ -159,6 +159,9 @@ final class PageOrganizerWindowController: NSWindowController, NSCollectionViewD
             b.bezelStyle = .texturedRounded
             b.keyEquivalent = "s"
             item.view = b
+            saveButton = b
+            saveItem = item
+            Chrome.setPrimary(item, b, on: !trayPages.isEmpty)   // teal once there is a New PDF to save
             item.label = "Save New PDF"
             item.toolTip = "Save the pages you've assembled (⌘S)"
             return item
@@ -226,7 +229,12 @@ final class PageOrganizerWindowController: NSWindowController, NSCollectionViewD
         syncTrayHint()
     }
 
-    private func syncTrayHint() { trayEmptyHint.isHidden = !trayPages.isEmpty }
+    private weak var saveButton: NSButton?
+    private weak var saveItem: NSToolbarItem?
+    private func syncTrayHint() {
+        trayEmptyHint.isHidden = !trayPages.isEmpty
+        Chrome.setPrimary(saveItem, saveButton, on: !trayPages.isEmpty)
+    }
 
     private func addHeader(_ text: String, to view: NSView) {
         let label = NSTextField(labelWithString: text)
