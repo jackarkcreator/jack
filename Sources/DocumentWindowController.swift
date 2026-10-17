@@ -60,10 +60,24 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
                 // 3.1 sheets: "whatsnew", "sheet:watermark|bates|lock|clean|compress|ocr|crop".
                 if showcase == "whatsnew" { self.showWhatsNew(nil) }
                 // Ask panel: "ask" opens it empty; "ask:<question>|summarize" also runs the on-device model.
-                if showcase == "ask" || showcase.hasPrefix("ask:") {
+                // "askdemo:answer|thread|missing|working" fills it with canned turns (no model).
+                if showcase == "ask" || showcase.hasPrefix("ask:") || showcase.hasPrefix("askdemo:") {
                     self.toggleAsk(nil)
-                    let q = String(showcase.dropFirst(4))
-                    if !q.isEmpty { self.runAsk(q == "summarize" ? "__summarize__" : q) }
+                    if showcase.hasPrefix("ask:") {
+                        let q = String(showcase.dropFirst(4))
+                        if q == "summarize" { self.askPanel.ask(starter: .summarize) } else { self.askPanel.ask(question: q) }
+                    } else if showcase == "askdemo:jump" {
+                        // A real click on the first citation chip ("p. 1") from page 3: lands on page 1.
+                        self.askPanel.showcase("thread")
+                        if let last = self.pdfView.document?.page(at: 2) { self.pdfView.go(to: last) }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                            let clicked = self.askPanel.showcaseClickFirstChip()
+                            let page = self.pdfView.currentPage.flatMap { self.pdfView.document?.index(for: $0) }.map { $0 + 1 } ?? 0
+                            try? "clicked=\(clicked) page=\(page)".write(toFile: "/tmp/jack-askjump.txt", atomically: true, encoding: .utf8)
+                        }
+                    } else if showcase.hasPrefix("askdemo:") {
+                        self.askPanel.showcase(String(showcase.dropFirst(8)))
+                    }
                 }
                 if showcase.hasPrefix("sheet:") {
                     switch showcase.dropFirst(6) {
@@ -222,12 +236,8 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     // Ask panel (on-device model; only exists when Apple Intelligence is available)
     private var askVisible = false
     private let askWidth: CGFloat = 320
-    private let askPanel = NSView()
-    private let askQuestion = NSTextField()
-    private let askAnswer = NSTextView()
-    private let askSpinner = NSProgressIndicator()
+    private let askPanel = AskPanelView()
     private var askButton: NSButton?
-    private var askRunning = false
 
     // Markup row controls (Size/Remove appear only while a stamp is selected)
     private let sizeSlider = NSSlider()
@@ -884,119 +894,33 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         askVisible.toggle()
         askButton?.state = askVisible ? .on : .off
         layoutViews()
-        if askVisible { window?.makeFirstResponder(askQuestion) }
+        if askVisible { askPanel.refresh(); window?.makeFirstResponder(askPanel.composerTextView) }
     }
 
     private func buildAskPanel() {
-        let w = askWidth
-        let h: CGFloat = 700
-        // The container MUST have this frame before children are added — autoresizing
-        // springs are computed against it (zero-frame parent flings everything off-view).
-        askPanel.frame = NSRect(x: 0, y: 0, width: w, height: h)
-        askPanel.wantsLayer = true
-        askPanel.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
-
-        let divider = NSBox(frame: NSRect(x: 0, y: 0, width: 1, height: h))
-        divider.boxType = .separator
-        divider.autoresizingMask = [.height]
-        askPanel.addSubview(divider)
-
-        let title = NSTextField(labelWithString: "Ask this PDF")
-        title.font = Chrome.titleFont
-        title.frame = NSRect(x: 16, y: h - 34, width: w - 60, height: 20)
-        title.autoresizingMask = [.minYMargin]
-        askPanel.addSubview(title)
-
-        askSpinner.style = .spinning
-        askSpinner.controlSize = .small
-        askSpinner.isDisplayedWhenStopped = false
-        askSpinner.frame = NSRect(x: w - 36, y: h - 34, width: 18, height: 18)
-        askSpinner.autoresizingMask = [.minYMargin]
-        askPanel.addSubview(askSpinner)
-
-        let privacy = NSTextField(labelWithString: "Answers on this Mac. Nothing is uploaded.")
-        privacy.font = Chrome.metaFont
-        privacy.textColor = .tertiaryLabelColor
-        privacy.frame = NSRect(x: 16, y: h - 52, width: w - 32, height: 14)
-        privacy.autoresizingMask = [.minYMargin]
-        askPanel.addSubview(privacy)
-
-        func quick(_ label: String, _ q: String, x: CGFloat, width: CGFloat) -> NSButton {
-            let b = NSButton(title: label, target: self, action: #selector(quickAsk(_:)))
-            b.bezelStyle = .rounded
-            b.controlSize = .small
-            b.frame = NSRect(x: x, y: h - 84, width: width, height: 24)
-            b.autoresizingMask = [.minYMargin]
-            b.toolTip = q
-            b.identifier = NSUserInterfaceItemIdentifier(q)
-            askPanel.addSubview(b)
-            return b
+        askPanel.frame = NSRect(x: 0, y: 0, width: askWidth, height: 700)
+        askPanel.documentProvider = { [weak self] in self?.pdfView.document }
+        askPanel.titleProvider = { [weak self] in
+            guard let self else { return "this document" }
+            return (self.document as? NSDocument)?.fileURL == nil
+                ? ((self.document as? NSDocument)?.displayName ?? "this document")
+                : self.pdfURL.deletingPathExtension().lastPathComponent
         }
-        _ = quick("Summarize", "__summarize__", x: 16, width: 92)
-        _ = quick("Key dates", "List every date and deadline mentioned in the document.", x: 112, width: 92)
-        _ = quick("Amounts", "List every dollar amount mentioned and what it is for.", x: 208, width: 92)
-
-        askQuestion.placeholderString = "Ask a question about this document…"
-        askQuestion.font = .systemFont(ofSize: 12)
-        askQuestion.frame = NSRect(x: 16, y: h - 118, width: w - 88, height: 24)
-        askQuestion.autoresizingMask = [.minYMargin]
-        askQuestion.target = self
-        askQuestion.action = #selector(askSubmitted(_:))
-        askPanel.addSubview(askQuestion)
-
-        let go = NSButton(title: "Ask", target: self, action: #selector(askSubmitted(_:)))
-        go.bezelStyle = .rounded
-        go.frame = NSRect(x: w - 66, y: h - 121, width: 50, height: 28)
-        go.autoresizingMask = [.minYMargin]
-        askPanel.addSubview(go)
-
-        let scroll = NSScrollView(frame: NSRect(x: 16, y: 14, width: w - 32, height: h - 146))
-        scroll.autoresizingMask = [.height]
-        scroll.hasVerticalScroller = true
-        scroll.drawsBackground = false
-        askAnswer.frame = scroll.bounds
-        askAnswer.isEditable = false
-        askAnswer.font = .systemFont(ofSize: 12.5)
-        askAnswer.drawsBackground = false
-        askAnswer.textContainerInset = NSSize(width: 0, height: 4)
-        askAnswer.autoresizingMask = [.width]
-        scroll.documentView = askAnswer
-        askPanel.addSubview(scroll)
+        askPanel.onGoToPage = { [weak self] n in self?.goToCitedPage(n) }
     }
 
-    @objc private func quickAsk(_ sender: NSButton) {
-        runAsk(sender.identifier?.rawValue ?? "")
-    }
-
-    @objc private func askSubmitted(_ sender: Any?) {
-        let q = askQuestion.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !q.isEmpty else { return }
-        runAsk(q)
-    }
-
-    private func runAsk(_ question: String) {
-        guard !askRunning, let doc = pdfView.document else { return }
-        askRunning = true
-        askSpinner.startAnimation(nil)
-        askAnswer.string = question == "__summarize__" ? "Summarizing…" : "Thinking…"
-        Task { [weak self] in
-            var result: String
-            do {
-                if question == "__summarize__" {
-                    result = try await AskEngine.summarize(doc: doc) { done, total in
-                        DispatchQueue.main.async { self?.askAnswer.string = "Reading page group \(done) of \(total)…" }
-                    }
-                } else {
-                    result = try await AskEngine.answer(question: question, doc: doc)
-                }
-            } catch {
-                result = "Couldn’t get an answer: \(error.localizedDescription)"
-            }
-            await MainActor.run {
-                self?.askAnswer.string = result
-                self?.askSpinner.stopAnimation(nil)
-                self?.askRunning = false
-            }
+    /// A citation chip: go to the page and outline it briefly so the jump is visible.
+    private func goToCitedPage(_ number: Int) {
+        guard let doc = pdfView.document, number >= 1, number <= doc.pageCount, let page = doc.page(at: number - 1) else { return }
+        pdfView.go(to: page)
+        pdfView.layoutDocumentView()
+        let flash = PageFlashView(frame: pdfView.convert(page.bounds(for: pdfView.displayBox), from: page).insetBy(dx: -3, dy: -3))
+        pdfView.addSubview(flash)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : 0.3
+                flash.animator().alphaValue = 0
+            }, completionHandler: { flash.removeFromSuperview() })
         }
     }
 
@@ -4562,6 +4486,14 @@ extension DocumentWindowController {
         var docReloads = 0
         let token = NotificationCenter.default.addObserver(forName: .PDFViewDocumentChanged, object: pdfView,
                                                            queue: nil) { _ in docReloads += 1 }
+        // macOS swaps overlay/legacy scroll bars live when input switches between trackpad and
+        // mouse ("Show scroll bars: Automatically"); a 17 pt bar re-centers the page by 8.5 pt.
+        var styleChanges = 0
+        let styleToken = NotificationCenter.default.addObserver(forName: NSScroller.preferredScrollerStyleDidChangeNotification,
+                                                                object: nil, queue: nil) { _ in
+            styleChanges += 1
+            EventLog.note("system scroll-bar style changed -> \(NSScroller.preferredScrollerStyle == .legacy ? "legacy" : "overlay")")
+        }
         let steps: [(String, () -> Void)] = [
             ("mode markup", { self.setMode(.markup) }),
             ("tool typewriter on", { self.toggleTypewriter() }),
@@ -4598,12 +4530,13 @@ extension DocumentWindowController {
         func next() {
             guard i < steps.count else {
                 NotificationCenter.default.removeObserver(token)
+                NotificationCenter.default.removeObserver(styleToken)
                 behaviorChecks()
                 return
             }
             let (name, act) = steps[i]; i += 1
             let before = Set(views(modeRow).map(ObjectIdentifier.init))
-            let f0 = pdfView.frame, s0 = pdfView.scaleFactor, c0 = clipOrigin(), d0 = docReloads
+            let f0 = pdfView.frame, s0 = pdfView.scaleFactor, c0 = clipOrigin(), d0 = docReloads, st0 = styleChanges
             act()
             window.layoutIfNeeded()
             window.displayIfNeeded()
@@ -4622,12 +4555,14 @@ extension DocumentWindowController {
                 let frameMoved = self.pdfView.frame != f0
                 let scaled = abs(self.pdfView.scaleFactor - s0) > 0.0001
                 let c1 = clipOrigin()
-                let scrolled = c1 != c0
+                // A sideways re-center while the SYSTEM changed scroll-bar style is the environment, not Jack.
+                let systemRecenter = c1 != c0 && c1.y == c0.y && styleChanges != st0
+                let scrolled = c1 != c0 && !systemRecenter
                 if scrolled { EventLog.note("scroll during \(name): \(c0) -> \(c1) pressedButtons=\(NSEvent.pressedMouseButtons)") }
                 let reloads = docReloads - d0
                 let bad = removed > 0 || added > 0 || frameMoved || scaled || scrolled || reloads > 0
                 if bad { failures += 1 }
-                log += "\(bad ? "FAIL" : "ok  ") \(name): rowViewsRemoved=\(removed) rowViewsAdded=\(added) rowAnimations=\(anims) pageFrameMoved=\(frameMoved) scaleChanged=\(scaled) scrolled=\(scrolled)\(scrolled ? " (x \(c0.x)->\(c1.x), y \(c0.y)->\(c1.y))" : "") docReloads=\(reloads)\n"
+                log += "\(bad ? "FAIL" : "ok  ") \(name): rowViewsRemoved=\(removed) rowViewsAdded=\(added) rowAnimations=\(anims) pageFrameMoved=\(frameMoved) scaleChanged=\(scaled) scrolled=\(scrolled)\(scrolled ? " (x \(c0.x)->\(c1.x), y \(c0.y)->\(c1.y))" : "")\(systemRecenter ? " (system scroll-bar style change re-centered x \(c0.x)->\(c1.x))" : "") docReloads=\(reloads)\n"
                 next()
             }
         }

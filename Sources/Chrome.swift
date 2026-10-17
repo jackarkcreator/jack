@@ -41,6 +41,9 @@ enum Chrome {
     /// 3.1 launcher: a SOLID panel (glass washed out over white pages) with solid tiles.
     static let panelFill = dynamic("JackPanel", light: rgb(0xFBFBFC), dark: rgb(0x26262A))
     static let panelTile = dynamic("JackPanelTile", light: rgb(0xEFF1F3), dark: rgb(0x33333A))
+    /// v3.2 Ask panel: the question bubble and the question field.
+    static let askBubble = dynamic("JackAskBubble", light: rgb(0xE9EDF0), dark: rgb(0x34343A))
+    static let askField = dynamic("JackAskField", light: .white, dark: rgb(0x1A1A1D))
     static let separator = dynamic("JackSeparator", light: NSColor(white: 0, alpha: 0.08), dark: NSColor(white: 1, alpha: 0.09))
 
     /// Tool labels: dark text on light reads heavier than light on dark, so light mode draws
@@ -196,7 +199,9 @@ func tinted(_ image: NSImage, _ color: NSColor) -> NSImage {
     let out = NSImage(size: image.size, flipped: false) { rect in
         image.draw(in: rect)
         color.set()
-        rect.fill(using: .sourceAtop)
+        // sourceIn, not sourceAtop: a translucent color (tertiaryLabel) must REPLACE the black
+        // template, not blend over it — sourceAtop drew disabled icons nearly black.
+        rect.fill(using: .sourceIn)
         return true
     }
     out.isTemplate = false

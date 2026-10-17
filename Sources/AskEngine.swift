@@ -85,7 +85,7 @@ enum AskEngine {
         let session = LanguageModelSession(instructions:
             "You answer questions about a PDF document using ONLY the excerpts provided. " +
             "Cite the page number(s) you used, like (p. 3). If the excerpts don't contain the answer, " +
-            "say the document doesn't appear to contain it. Be concise.")
+            "reply with exactly \(missingToken) and nothing else. Never guess. Be concise.")
         let prompt = "Excerpts from the document:\n\n\(excerpts)\nQuestion: \(question)"
         return try await session.respond(to: prompt).content
         #else
@@ -101,12 +101,15 @@ enum AskEngine {
         let capped = Array(all.prefix(12))
         var notes: [String] = []
         for (i, c) in capped.enumerated() {
+            try Task.checkCancellation()
             progress(i + 1, capped.count)
             let s = LanguageModelSession(instructions:
                 "Summarize the excerpt in 1-2 dense sentences. Keep names, amounts, and dates.")
             let r = try await s.respond(to: "[Page \(c.page)]\n\(c.text)")
             notes.append("(p. \(c.page)) " + r.content)
         }
+        try Task.checkCancellation()
+        progress(capped.count + 1, capped.count)   // "Combining page notes"
         let final = LanguageModelSession(instructions:
             "Combine the page notes into a clear summary of the whole document: a short paragraph, " +
             "then up to 5 bullet points with the key facts, keeping page citations.")
@@ -121,5 +124,5 @@ enum AskEngine {
     }
 
     static let unavailableMessage = "Ask needs Apple Intelligence (macOS 26 or later)."
-    static let noTextMessage = "This document has no readable text — run Tools → Make Searchable (OCR)… first, then ask again."
+    static let noTextMessage = "This document has no readable text yet. Run Make Searchable (Tools menu) first, then ask again."
 }
