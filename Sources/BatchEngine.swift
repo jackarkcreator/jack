@@ -68,7 +68,15 @@ enum BatchEngine {
             case .watermark(let text, let opacity):
                 ok = StampEngine.watermark(doc, to: out, text: text, opacity: opacity)
             case .compress:
-                ok = CompressEngine.compress(doc, to: out).0
+                // Image repack first (full resolution, verified); scanned-page path otherwise.
+                if let src = try? Data(contentsOf: url), let r = ImageRepackEngine.repack(src),
+                   r.data.count < src.count * 95 / 100,
+                   ImageRepackEngine.verify(candidate: r.data, original: src).isEmpty,
+                   (try? r.data.write(to: out)) != nil {
+                    ok = true
+                } else {
+                    ok = CompressEngine.compress(doc, to: out).0
+                }
             }
             if ok {
                 summary.processed.append(url.lastPathComponent)

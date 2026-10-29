@@ -275,6 +275,21 @@ final class JackDocument: NSDocument, PDFDocumentDelegate {
     /// The file this document was opened from, remembered before the first save moved us.
     private var originalURLForReveal: URL?
 
+    // MARK: Compress (image repack) — whole-file byte swap
+
+    /// The bytes the live document IS right now: no unsaved edits, no form widgets (those
+    /// always save through the full rewrite, which would undo a repack). nil = not eligible.
+    var unmodifiedBytes: Data? {
+        guard !isDocumentEdited, let live = pdf, let b = incrementalBaseline, !FormFieldEngine.hasWidgets(live),
+              let d = IncrementalSave.build(current: live, baseline: b), d == b.data else { return nil }
+        return b.data
+    }
+
+    /// After Compress swaps every page for its repacked twin, the save baseline moves to the
+    /// repacked bytes: the pages match it again, so ⌘S writes exactly those bytes.
+    var saveBaseline: IncrementalSave.Baseline? { incrementalBaseline }
+    func adoptSaveBaseline(_ b: IncrementalSave.Baseline?) { incrementalBaseline = b }
+
     /// Snapshot for the incremental save: the file's original bytes plus what each page looked
     /// like at load. Refreshed after every successful save so ⌘S chains further increments.
     private var incrementalBaseline: IncrementalSave.Baseline?

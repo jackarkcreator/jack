@@ -155,6 +155,16 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             }
             return
         }
+        // Compress self-test (JACK_COMPRESS_SELFTEST=<out.pdf>): image repack end to end.
+        if let out = ProcessInfo.processInfo.environment["JACK_COMPRESS_SELFTEST"] {
+            guard !modeSelfTestStarted else { return }
+            modeSelfTestStarted = true
+            window?.alphaValue = 0
+            window?.ignoresMouseEvents = true
+            window?.orderFrontRegardless()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in self?.runCompressSelfTest(out: out) }
+            return
+        }
         // Self-test (JACK_MODE_SELFTEST=1): runs in an invisible window, never takes focus.
         if ProcessInfo.processInfo.environment["JACK_MODE_SELFTEST"] != nil {
             guard !modeSelfTestStarted else { return }
@@ -3920,7 +3930,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         bar.isHidden = true
         sheet.addRow("Size now", big)
         sheet.addRow("Working", bar)
-        sheet.setMessage("Scanned pages are re-saved at 150 dpi. Pages with text are left alone.", .hint)
+        sheet.setMessage("Images are repacked at full resolution. Scanned pages are re-saved at 150 dpi.", .hint)
         var finished = false
         sheet.onPrimary = { [weak self, weak sheet] in
             guard let self, let sheet else { return }
@@ -3935,8 +3945,20 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             bar.startAnimation(nil)
             sheet.setMessage(nil)
             let out = self.tempWorkURL("compress")
+            // Image repack first (text pages with bloated images — the case the scan path
+            // never touches). Only on a document with no unsaved edits: it swaps the file's bytes.
+            let repackSource = (self.document as? JackDocument)?.unmodifiedBytes
             DispatchQueue.global(qos: .userInitiated).async {
-                let (ok, changed) = CompressEngine.compress(workCopy, to: out)
+                var repacked: ImageRepackEngine.Result?
+                if let src = repackSource, let r = ImageRepackEngine.repack(src),
+                   r.data.count < src.count * 95 / 100 {
+                    let issues = ImageRepackEngine.verify(candidate: r.data, original: src)
+                    if issues.isEmpty { repacked = r }
+                    else { NSLog("Jack compress: repack failed verification — \(issues.joined(separator: " | "))") }
+                } else if repackSource != nil, !ImageRepackEngine.lastBailReason.isEmpty {
+                    NSLog("Jack compress: repack skipped — \(ImageRepackEngine.lastBailReason)")
+                }
+                let (ok, changed) = repacked == nil ? CompressEngine.compress(workCopy, to: out) : (true, [])
                 let producedSize = (try? Data(contentsOf: out).count) ?? 0
                 DispatchQueue.main.async {
                     defer { try? FileManager.default.removeItem(at: out) }
@@ -3944,10 +3966,23 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
                     bar.isHidden = true
                     finished = true
                     sheet.setPrimary("Done")
-                    if !ok || producedSize == 0 {
+                    if let r = repacked {
+                        guard self.applyRepackedBytes(r.data) else {
+                            sheet.setMessage("The compressed file couldn\u{2019}t be applied. The document was not modified.", .error)
+                            sheet.layout()
+                            return
+                        }
+                        NSSound(named: "Glass")?.play()
+                        let saved = 100 - r.data.count * 100 / max(1, originalSize)
+                        let n = r.imagesRepacked
+                        big.stringValue = "\(fmt.string(fromByteCount: Int64(originalSize))) \u{2192} \(fmt.string(fromByteCount: Int64(r.data.count)))"
+                        sheet.setMessage("\(saved)% smaller \u{00B7} \(n) image\(n == 1 ? "" : "s") repacked at full resolution", .ok)
+                    } else if !ok || producedSize == 0 {
                         sheet.setMessage("Couldn\u{2019}t compress this document. Nothing was changed.", .error)
                     } else if producedSize >= originalSize || changed.isEmpty {
-                        sheet.setMessage("Already compact. Compressing wouldn\u{2019}t make it smaller, so nothing was changed.", .hint)
+                        sheet.setMessage(repackSource == nil
+                            ? "Nothing to compress in the pages as edited. Save first, then Compress again to shrink the images inside them."
+                            : "Already compact. Compressing wouldn\u{2019}t make it smaller, so nothing was changed.", .hint)
                     } else if !self.swapTransformedPages(from: out, changed: changed, name: "Compress") {
                         sheet.setMessage("The compressed pages couldn\u{2019}t be applied. The document was not modified.", .error)
                     } else {
@@ -3964,6 +3999,61 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             }
         }
         showSheet(sheet)
+    }
+
+    /// Image repack lands as a whole-file swap: every page is replaced by its twin from the
+    /// repacked bytes, and the save baseline moves to those bytes, so ⌘S writes them as-is.
+    /// Undo swaps the pages AND the baseline back. Returns false without modifying anything.
+    private func applyRepackedBytes(_ data: Data) -> Bool {
+        guard let doc = pdfView.document, let jd = document as? JackDocument,
+              let produced = PDFDocument(data: data), produced.pageCount == doc.pageCount else { return false }
+        var swaps: [(Int, PDFPage, PDFPage)] = []
+        for i in 0..<doc.pageCount {
+            guard let old = doc.page(at: i), let new = produced.page(at: i) else { return false }
+            new.retainBackingDocument(produced)   // else it copies as blank when saved
+            swaps.append((i, old, new))
+        }
+        let oldBaseline = jd.saveBaseline
+        withPreservedPosition(anchorIndex: lastKnownPageIndex) {
+            for (i, _, new) in swaps {
+                doc.removePage(at: i)
+                doc.insert(new, at: i)
+            }
+        }
+        let newBaseline = IncrementalSave.baseline(for: doc, data: data)
+        jd.adoptSaveBaseline(newBaseline)
+        // This runs from a main.async after the background pass, outside any event. With
+        // groupsByEvent on, beginUndoGrouping() there silently opens an OUTER automatic group
+        // (measured: level 0 → 1 after begin/end) that only closes when the run loop idles —
+        // >3s behind a re-tiling 10800px sheet, so Save stayed dark. Pausing auto-grouping for
+        // this one registration makes the group really close, and AppKit marks the document
+        // exactly once (markDirty on top double-counted: still "Edited" after ⌘Z).
+        let outsideEvent = docUndo.groupingLevel == 0
+        if outsideEvent { docUndo.groupsByEvent = false }
+        docUndo.beginUndoGrouping()
+        registerRepackUndo(swaps, baselines: (oldBaseline, newBaseline), restoreOld: true)
+        docUndo.endUndoGrouping()
+        if outsideEvent { docUndo.groupsByEvent = true }
+        sidebar.reload()
+        return true
+    }
+
+    private func registerRepackUndo(_ swaps: [(Int, PDFPage, PDFPage)],
+                                    baselines: (old: IncrementalSave.Baseline?, new: IncrementalSave.Baseline?),
+                                    restoreOld: Bool) {
+        docUndo.registerUndo(withTarget: self) { me in
+            guard let doc = me.pdfView.document else { return }
+            me.withPreservedPosition(anchorIndex: me.lastKnownPageIndex) {
+                for (i, old, new) in swaps {
+                    doc.removePage(at: i)
+                    doc.insert(restoreOld ? old : new, at: i)
+                }
+            }
+            (me.document as? JackDocument)?.adoptSaveBaseline(restoreOld ? baselines.old : baselines.new)
+            me.registerRepackUndo(swaps, baselines: baselines, restoreOld: !restoreOld)
+            me.sidebar.reload()
+        }
+        docUndo.setActionName("Compress")
     }
 
     /// Swap ONLY the pages an engine transformed into the live document, with page-identity
@@ -4456,6 +4546,70 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         guard !matches.isEmpty else { return }
         matchIndex = (matchIndex - 1 + matches.count) % matches.count
         showMatch()
+    }
+}
+
+// MARK: - Compress self-test
+//
+// JACK_COMPRESS_SELFTEST=<out.pdf> Jack.app/Contents/MacOS/Jack <file.pdf>: repack, verify,
+// apply through the real page swap, then prove ⌘S writes the repacked bytes, ⌘Z restores the
+// original bytes and ⌘⇧Z the repacked ones again. Log: /tmp/jack-compress-selftest.log.
+extension DocumentWindowController {
+    func runCompressSelfTest(out: String) {
+        var log = "jack compress self-test · \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] ?? "?") · \(Date())\n"
+        var failures = 0
+        func check(_ name: String, _ ok: Bool, _ detail: String = "") {
+            if !ok { failures += 1 }
+            log += "\(ok ? "ok  " : "FAIL") \(name)\(detail.isEmpty ? "" : " — \(detail)")\n"
+        }
+        func finish() {
+            log += failures == 0 ? "PASS\n" : "FAIL (\(failures) step(s))\n"
+            try? log.write(toFile: "/tmp/jack-compress-selftest.log", atomically: true, encoding: .utf8)
+            exit(failures == 0 ? 0 : 1)
+        }
+        guard let jd = document as? JackDocument, let src = jd.unmodifiedBytes else {
+            check("document eligible for repack", false); finish(); return
+        }
+        check("document eligible for repack", true, "\(src.count) bytes")
+        let t0 = Date()
+        guard let r = ImageRepackEngine.repack(src) else {
+            check("repack", false, ImageRepackEngine.lastBailReason); finish(); return
+        }
+        check("repack", r.data.count < src.count * 95 / 100,
+              String(format: "%d images, %d → %d bytes, %.1fs", r.imagesRepacked, src.count, r.data.count, Date().timeIntervalSince(t0)))
+        let issues = ImageRepackEngine.verify(candidate: r.data, original: src)
+        check("verify", issues.isEmpty, issues.joined(separator: " | "))
+        check("apply", applyRepackedBytes(r.data))
+        func saved() -> Data? { try? jd.data(ofType: "com.adobe.pdf") }
+        // The edited flag lands when AppKit closes the undo group at the end of a run-loop pass;
+        // while PDFView re-tiles giant images that pass can run long. Poll, and report the lag.
+        let applied = Date()
+        func whenEdited(_ then: @escaping () -> Void) {
+            if jd.isDocumentEdited || Date().timeIntervalSince(applied) > 3 {
+                check("document marked edited", jd.isDocumentEdited,
+                      String(format: "after %.2fs", Date().timeIntervalSince(applied)))
+                then()
+            } else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { whenEdited(then) }
+            }
+        }
+        whenEdited {
+            let s1 = saved()
+            check("save writes the repacked bytes", s1 == r.data, "saved \(s1?.count ?? -1) bytes")
+            if let s1 { try? s1.write(to: URL(fileURLWithPath: out)) }
+            self.docUndo.undo()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                let s2 = saved()
+                check("undo restores the original bytes", s2 == src, "saved \(s2?.count ?? -1) bytes")
+                check("undo leaves the document clean", !jd.isDocumentEdited)
+                self.docUndo.redo()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    let s3 = saved()
+                    check("redo re-applies the repack", s3 == r.data, "saved \(s3?.count ?? -1) bytes")
+                    finish()
+                }
+            }
+        }
     }
 }
 
