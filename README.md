@@ -32,6 +32,10 @@ signed `.exe` — ideal for PDQ fleet deployment. Built + signed in CI on every 
    The zip feeds Sparkle auto-update; the DMG is the client install link:
    `https://github.com/jackarkcreator/jack/releases/latest/download/Jack-mac.dmg`
 4. The tag triggers CI, which builds + signs `Jack-win-x64.exe` and attaches it to the same release.
+5. `./intune.sh` → pushes `build/Jack-mac.dmg` to every Microsoft Intune tenant that deploys Jack as a
+   managed app (or `./intune.sh vX.Y.Z` for a published release; `DRY=1` to preview). Managed Macs run
+   Jack with Sparkle silenced, because standard users can't approve its admin prompt, so Intune is their
+   update channel and this step is what upgrades them. The tenant list lives outside this repo.
 
 ## Brand
 Navy `#0A2540` · Teal `#0E6E6E`→`#14B8A6` · Amber `#F5A623` · Page white. © ThinkOpen Inc.
