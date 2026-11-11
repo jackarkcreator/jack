@@ -21,15 +21,37 @@ final class JackFinderSync: FIFinderSync {
 
     override func menu(for menuKind: FIMenuKind) -> NSMenu? {
         guard menuKind == .contextualMenuForItems,
-              let items = FIFinderSyncController.default().selectedItemURLs(),
-              items.contains(where: { convertible.contains($0.pathExtension.lowercased()) })
-        else { return nil }
+              let items = FIFinderSyncController.default().selectedItemURLs() else { return nil }
         let menu = NSMenu(title: "")
-        let mi = NSMenuItem(title: "Convert to PDF with Jack",
-                            action: #selector(convertSelection(_:)), keyEquivalent: "")
-        mi.target = self
-        menu.addItem(mi)
-        return menu
+        if items.contains(where: { convertible.contains($0.pathExtension.lowercased()) }) {
+            let mi = NSMenuItem(title: "Convert to PDF with Jack",
+                                action: #selector(convertSelection(_:)), keyEquivalent: "")
+            mi.target = self
+            menu.addItem(mi)
+        }
+        // Save as Word (W1): PDFs open in Jack with the Save as Word sheet up.
+        if items.contains(where: { $0.pathExtension.lowercased() == "pdf" }) {
+            let mi = NSMenuItem(title: "Convert to Word with Jack",
+                                action: #selector(wordSelection(_:)), keyEquivalent: "")
+            mi.target = self
+            menu.addItem(mi)
+        }
+        return menu.items.isEmpty ? nil : menu
+    }
+
+    @objc private func wordSelection(_ sender: Any?) {
+        let items = (FIFinderSyncController.default().selectedItemURLs() ?? [])
+            .filter { $0.pathExtension.lowercased() == "pdf" }
+        send(items, host: "toword")
+    }
+
+    private func send(_ items: [URL], host: String) {
+        guard !items.isEmpty else { return }
+        var comps = URLComponents()
+        comps.scheme = "jack"
+        comps.host = host
+        comps.queryItems = items.map { URLQueryItem(name: "p", value: Data($0.path.utf8).base64EncodedString()) }
+        if let url = comps.url { NSWorkspace.shared.open(url) }
     }
 
     @objc private func convertSelection(_ sender: Any?) {

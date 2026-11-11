@@ -18,7 +18,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             ?? FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
             ?? FileManager.default.homeDirectoryForCurrentUser
     }
-    private let pdfView = SigningPDFView()
+    private(set) var pdfView = SigningPDFView()
     private var uiBuilt = false
 
     // Custom title control (v1.8 look Keno approved): title + ⌄ + subtitle as one unit.
@@ -153,6 +153,17 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
                 try? "\(window.windowNumber)".write(toFile: "/tmp/jack-showcase.id", atomically: true, encoding: .utf8)
                 DispatchQueue.main.asyncAfter(deadline: .now() + (showcase.hasPrefix("ask:") ? 60 : 8)) { exit(0) }
             }
+            return
+        }
+        // Save as Word sheet self-test (JACK_WORD_SHEET_SELFTEST=<dir>): drives the REAL sheet in an
+        // invisible window — options, press the primary, wait for the result — capturing each state.
+        if let dir = ProcessInfo.processInfo.environment["JACK_WORD_SHEET_SELFTEST"] {
+            guard !modeSelfTestStarted else { return }
+            modeSelfTestStarted = true
+            window?.alphaValue = 0
+            window?.ignoresMouseEvents = true
+            window?.orderFrontRegardless()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in self?.runWordSheetSelfTest(dir: dir) }
             return
         }
         // Compress self-test (JACK_COMPRESS_SELFTEST=<out.pdf>): image repack end to end.
@@ -1602,6 +1613,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         m.addItem(.separator())
         add("Save a Clean Copy\u{2026}", "sparkles", #selector(cleanForSharing(_:)))
         add("Save a Locked Copy\u{2026}", "lock", #selector(lockForSharing(_:)))
+        m.addItem(.separator())
+        add("Save as Word\u{2026}", "doc.richtext", #selector(saveAsWord(_:)))
+        if let w = m.items.last { w.keyEquivalent = "W"; w.keyEquivalentModifierMask = [.command, .shift] }
         m.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 4), in: sender)
     }
 
@@ -4181,13 +4195,13 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     private var activeSheet: ToolSheet?
     private var activeWatcher: TextChangeWatcher?
     private static let editNote = (symbol: "arrow.uturn.backward", text: "Shows now \u{00B7} written when you save \u{00B7} \u{2318}Z undoes")
-    private static let copyNote = (symbol: "doc.on.doc", text: "Saves a copy \u{00B7} this file stays as it is")
+    static let copyNote = (symbol: "doc.on.doc", text: "Saves a copy \u{00B7} this file stays as it is")
 
     private func formWarning(_ what: String) -> String {
         "This PDF has fillable fields. Saving with \(what) finalizes them: they keep their values but stop being fillable."
     }
 
-    private func showSheet(_ sheet: ToolSheet, watcher: TextChangeWatcher? = nil) {
+    func showSheet(_ sheet: ToolSheet, watcher: TextChangeWatcher? = nil) {
         guard let window else { return }
         activeSheet = sheet
         activeWatcher = watcher
@@ -4197,7 +4211,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         sheet.present(on: window)
     }
 
-    private func finishSheet(_ sheet: ToolSheet) {
+    func finishSheet(_ sheet: ToolSheet) {
         sheet.close()
         activeSheet = nil
         activeWatcher = nil
@@ -4206,7 +4220,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     /// The real first page, scaled into the sheet's preview, with the tool's mark drawn on top.
     /// `focus` (page space) zooms the preview into one region — Bates uses its corner, because
     /// a whole-page preview shrinks the number to an unreadable 2 pt.
-    private func toolPreview(_ page: PDFPage, overlay: PDFAnnotation? = nil, crop: CGRect? = nil, focus: CGRect? = nil) -> NSImage {
+    func toolPreview(_ page: PDFPage, overlay: PDFAnnotation? = nil, crop: CGRect? = nil, focus: CGRect? = nil) -> NSImage {
         let box = page.bounds(for: .mediaBox)
         var size = box.size
         if page.rotation % 180 != 0 { size = CGSize(width: size.height, height: size.width) }
@@ -4620,6 +4634,43 @@ extension DocumentWindowController {
 // JACK_MODE_SELFTEST=1 Jack.app/Contents/MacOS/Jack <file.pdf>; results land in
 // /tmp/jack-mode-selftest.log and the app exits.
 extension DocumentWindowController {
+    func runWordSheetSelfTest(dir: String) {
+        var log = "Save as Word sheet self-test\n"
+        func capture(_ name: String) {
+            guard let v = activeSheet?.window.contentView,
+                  let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) else { log += "no sheet to capture for \(name)\n"; return }
+            v.cacheDisplay(in: v.bounds, to: rep)
+            try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: "\(dir)/\(name).png"))
+            log += "captured \(name) (primary: \(activeSheet?.primaryButton.title ?? "-"), cancel: \(activeSheet?.cancelButton.isHidden == false ? activeSheet!.cancelButton.title : "hidden"))\n"
+        }
+        func finish(_ ok: Bool) {
+            log += ok ? "PASS\n" : "FAIL\n"
+            print(log)
+            try? log.write(toFile: "\(dir)/sheet-selftest.log", atomically: true, encoding: .utf8)
+            exit(ok ? 0 : 1)
+        }
+        saveAsWord(nil)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            guard let self, let sheet = self.activeSheet else { log += "sheet did not open\n"; finish(false); return }
+            capture("1-options")
+            sheet.primaryButton.performClick(nil)
+            var waited = 0.0
+            func poll() {
+                let t = sheet.primaryButton.title
+                if t == "Open in Word" || t == "Copy Text" || t == "Done" {
+                    capture(t == "Open in Word" ? "2-result" : t == "Copy Text" ? "2-refused" : "2-failed")
+                    finish(t != "Done")
+                    return
+                }
+                if waited == 0 { capture("1b-working") }
+                waited += 0.5
+                if waited > 180 { log += "timed out\n"; finish(false); return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { poll() }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { poll() }
+        }
+    }
+
     func runModeSelfTest() {
         guard let window else { return }
         func views(_ v: NSView) -> [NSView] { [v] + v.subviews.flatMap(views) }

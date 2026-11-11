@@ -93,6 +93,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         // files, so it ferries the selection over the URL scheme and the app does the work.
         var files: [URL] = []
         for u in urls {
+            // jack://toword?p=… — Finder's "Convert to Word with Jack": open each PDF with the
+            // Save as Word sheet already up (the user still sees options, progress and the result).
+            if u.scheme == "jack", u.host == "toword" {
+                let comps = URLComponents(url: u, resolvingAgainstBaseURL: false)
+                for q in comps?.queryItems ?? [] where q.name == "p" {
+                    if let v = q.value, let data = Data(base64Encoded: v),
+                       let path = String(data: data, encoding: .utf8), isPDFURL(URL(fileURLWithPath: path)) {
+                        openDocument(URL(fileURLWithPath: path), word: true)
+                    }
+                }
+                continue
+            }
             if u.scheme == "jack", u.host == "convert" {
                 let comps = URLComponents(url: u, resolvingAgainstBaseURL: false)
                 for q in comps?.queryItems ?? [] where q.name == "p" {
@@ -559,7 +571,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     // MARK: - Open flows
 
-    private func openDocument(_ url: URL, markup: Bool = false) {
+    private func openDocument(_ url: URL, markup: Bool = false, word: Bool = false) {
         NSDocumentController.shared.openDocument(withContentsOf: url, display: true) { doc, _, error in
             if let error = error {
                 infoAlert("Couldn’t open PDF", error.localizedDescription)
@@ -568,6 +580,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             NSApp.activate(ignoringOtherApps: true)
             if markup, let wc = (doc as? JackDocument)?.windowControllers.first as? DocumentWindowController {
                 wc.openInMarkup()
+            }
+            if word {
+                // Let the window finish appearing before the sheet attaches to it.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                    if let wc = (doc as? JackDocument)?.windowControllers.first as? DocumentWindowController {
+                        wc.window?.makeKeyAndOrderFront(nil)
+                        wc.saveAsWord(nil)
+                    }
+                }
             }
         }
     }
@@ -646,6 +667,7 @@ func desktopURL(name: String) -> URL {
 }
 
 let app = NSApplication.shared
+WordExportEngine.runSelfTestIfRequested()   // headless; exits when JACK_WORD_SELFTEST is set
 let delegate = AppDelegate()
 app.delegate = delegate
 app.setActivationPolicy(.accessory)

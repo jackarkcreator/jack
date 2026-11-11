@@ -45,6 +45,7 @@ enum MainMenu {
         file.addItem(item("Export Flattened…", #selector(DocumentWindowController.exportFlattened(_:)), "e"))
         file.addItem(item("Clean for Sharing…", #selector(DocumentWindowController.cleanForSharing(_:)), "L"))
         file.addItem(item("Lock for Sharing…", #selector(DocumentWindowController.lockForSharing(_:)), "l"))
+        file.addItem(item("Export as Word…", #selector(DocumentWindowController.saveAsWord(_:)), "W"))
         file.addItem(.separator())
         file.addItem(item("Print…", #selector(DocumentWindowController.printDocument(_:)), "p"))
         fileItem.submenu = file
