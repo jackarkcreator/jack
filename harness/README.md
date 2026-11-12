@@ -9,7 +9,7 @@ One corpus and one scoring script for every Save as Word engine: the shipping Ma
 | `make_corpus.swift` | Builds the synthetic corpus in `corpus/`. Each made-up document comes as a text PDF and a 200 DPI skewed, noisy scan; some also get a rougher 150 DPI scan. `manifest.json` holds the true body words in reading order and what the converter should do (refuse or not, pages, checkboxes, signatures, letterhead, page numbers). |
 | `run_engine.py` | Runs an engine over a folder of PDFs and writes `<stem>.docx`, `<stem>.json` (status, reason, seconds) and `<stem>.log`. Use `--mac` for Jack.app (headless self-test, no window) or `--cmd` for any command-line engine. |
 | `score.py` | Scores the results. It reports recall and precision of words in order, honesty (wrong words that were highlighted), false highlights, refusals and layout features. With `--baseline` it gates a candidate against a recorded run. Standard-library Python only. |
-| `baseline-mac.json` | Scores of the shipping Mac engine on this corpus: the bar for the Windows port. |
+| `baseline-mac.json` | Scores of the shipping Mac engine (Jack 3.5.1, notarized) on this corpus: the bar for the Windows port. Re-record it from the notarized build on every engine release. |
 
 ## Run it
 ```bash
