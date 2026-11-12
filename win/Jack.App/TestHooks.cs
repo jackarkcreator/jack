@@ -32,8 +32,8 @@ internal static class TestHooks
                 if (w.Content is not FrameworkElement root || root.ActualWidth <= 0) { last.Remove(w); return; }   // not laid out yet: next render
                 double dpi = VisualTreeHelper.GetDpi(root).PixelsPerDip;
                 // The panel sits inside a margin (shadow room) that offsets it when rendered: include it.
-                double w = root.ActualWidth + root.Margin.Left + root.Margin.Right, h = root.ActualHeight + root.Margin.Top + root.Margin.Bottom;
-                var bmp = new RenderTargetBitmap((int)Math.Ceiling(w * dpi), (int)Math.Ceiling(h * dpi), 96 * dpi, 96 * dpi, PixelFormats.Pbgra32);
+                double bw = root.ActualWidth + root.Margin.Left + root.Margin.Right, bh = root.ActualHeight + root.Margin.Top + root.Margin.Bottom;
+                var bmp = new RenderTargetBitmap((int)Math.Ceiling(bw * dpi), (int)Math.Ceiling(bh * dpi), 96 * dpi, 96 * dpi, PixelFormats.Pbgra32);
                 bmp.Render(root);
                 var enc = new PngBitmapEncoder();
                 enc.Frames.Add(BitmapFrame.Create(bmp));
