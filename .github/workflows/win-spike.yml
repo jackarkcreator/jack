@@ -1,0 +1,110 @@
+name: Windows spike
+
+# Phase 1 spike for Jack for Windows: runs JackProbe on real Windows x64 and ARM64 and reports
+# whether PDFium, Windows OCR and Tesseract work from .NET 8. Never publishes or signs anything.
+
+on:
+  push:
+    branches: [win-spike]
+    paths: ['win/spike/**', '.github/workflows/win-spike.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PDFIUM_TAG: chromium/8152
+  PDFIUM_SHA_X64: cee2b0e9990bc67c0721774932961b9dbf2766046c10eec925acd4cfba6fdfe3
+  PDFIUM_SHA_ARM64: 8614b10c6a780acc3ae9fdd425d6b61f9d22ae84301b19e1ac82f573930c217c
+  TESSDATA_COMMIT: 87416418657359cb625c412a48b6e1d6d41c29bd
+  TESSDATA_SHA: 7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2
+
+jobs:
+  probe:
+    name: probe (${{ matrix.label }})
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: x64 on x64, runner: windows-latest, rid: win-x64, pdfium: x64 }
+          - { label: arm64 on arm64, runner: windows-11-arm, rid: win-arm64, pdfium: arm64 }
+          - { label: x64 emulated on arm64, runner: windows-11-arm, rid: win-x64, pdfium: x64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Publish probe
+        run: dotnet publish win/spike/JackProbe/JackProbe.csproj -c Release -r ${{ matrix.rid }} --self-contained true -o probe
+
+      - name: Fetch PDFium (pinned tag, SHA-256 checked)
+        shell: pwsh
+        run: |
+          $sha = if ('${{ matrix.pdfium }}' -eq 'arm64') { $env:PDFIUM_SHA_ARM64 } else { $env:PDFIUM_SHA_X64 }
+          Invoke-WebRequest "https://github.com/bblanchon/pdfium-binaries/releases/download/$env:PDFIUM_TAG/pdfium-win-${{ matrix.pdfium }}.tgz" -OutFile pdfium.tgz
+          $got = (Get-FileHash pdfium.tgz -Algorithm SHA256).Hash.ToLower()
+          if ($got -ne $sha) { throw "PDFium hash mismatch: $got" }
+          New-Item -ItemType Directory pdfium | Out-Null
+          tar -xzf pdfium.tgz -C pdfium
+          Copy-Item pdfium/bin/pdfium.dll probe/
+
+      - name: Fetch Tesseract English model (pinned commit, SHA-256 checked)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory tessdata | Out-Null
+          Invoke-WebRequest "https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/$env:TESSDATA_COMMIT/eng.traineddata" -OutFile tessdata/eng.traineddata
+          $got = (Get-FileHash tessdata/eng.traineddata -Algorithm SHA256).Hash.ToLower()
+          if ($got -ne $env:TESSDATA_SHA) { throw "tessdata hash mismatch: $got" }
+
+      - name: Fetch a real public PDF (IRS Form W-9)
+        shell: pwsh
+        continue-on-error: true
+        run: Invoke-WebRequest https://www.irs.gov/pub/irs-pdf/fw9.pdf -OutFile fw9.pdf
+
+      - name: Windows OCR languages installed
+        shell: pwsh
+        continue-on-error: true
+        run: Get-WindowsCapability -Online | Where-Object Name -like 'Language.OCR*' | Format-Table Name, State -AutoSize | Out-String -Width 200
+
+      - name: Run probe (machine as it comes)
+        id: first
+        shell: pwsh
+        run: |
+          ./probe/JackProbe.exe --out results/as-is --tessdata tessdata --real fw9.pdf
+          $code = $LASTEXITCODE
+          Get-Content results/as-is/summary.md >> $env:GITHUB_STEP_SUMMARY
+          $r = Get-Content results/as-is/results.json | ConvertFrom-Json
+          $winOcr = ($r.checks | Where-Object Name -eq 'windows_ocr').Ok
+          "winocr=$winOcr" >> $env:GITHUB_OUTPUT
+          "code=$code" >> $env:GITHUB_OUTPUT
+          exit 0
+
+      - name: Install the en-US OCR language and run again (only if Windows OCR was missing)
+        if: steps.first.outputs.winocr != 'True'
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          Add-WindowsCapability -Online -Name 'Language.OCR~~~en-US~0.0.1.0' | Format-List | Out-String
+          ./probe/JackProbe.exe --out results/with-ocr-language --tessdata tessdata --real fw9.pdf
+          "#### After installing the en-US OCR language" >> $env:GITHUB_STEP_SUMMARY
+          Get-Content results/with-ocr-language/summary.md >> $env:GITHUB_STEP_SUMMARY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: probe-${{ matrix.rid }}-${{ matrix.runner }}
+          path: results/
+          if-no-files-found: warn
+
+      - name: Fail if a required check failed
+        if: steps.first.outputs.code != '0'
+        shell: pwsh
+        run: |
+          Write-Host "Required checks failed on the first run (exit $env:CODE); see the summary."
+          exit 1
+        env:
+          CODE: ${{ steps.first.outputs.code }}
