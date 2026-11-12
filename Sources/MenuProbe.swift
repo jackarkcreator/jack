@@ -76,6 +76,22 @@ enum MenuProbe {
                 let w = file.item(withTitle: "Export as Word…")
                 log("[auto] File ▸ Export as Word… enabled=\(w?.isEnabled ?? false) key=\(w?.keyEquivalent ?? "") mods=\(w?.keyEquivalentModifierMask.rawValue ?? 0)")
             }
+            // 3.5 C5: right-click menus on the page and on a thumbnail lead with Save as Word….
+            if let w = NSApp.keyWindow, let root = w.contentView {
+                func all(_ v: NSView) -> [NSView] { [v] + v.subviews.flatMap(all) }
+                for v in all(root) where v is SigningPDFView || v is SidebarCollectionView {
+                    var pt = NSPoint(x: v.bounds.midX, y: v is SidebarCollectionView ? 60 : v.bounds.midY)
+                    pt = v.convert(pt, to: nil)
+                    if let e = NSEvent.mouseEvent(with: .rightMouseDown, location: pt, modifierFlags: [], timestamp: 0,
+                                                  windowNumber: w.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1),
+                       let m = v.menu(for: e), let first = m.items.first {
+                        let t = NSApp.target(forAction: first.action ?? Selector(("x")), to: first.target, from: v)
+                        log("[auto] \(type(of: v)) right-click first='\(first.title)' resolves=\(t.map { "\(type(of: $0))" } ?? "nil") items=\(m.items.count)")
+                    } else {
+                        log("[auto] \(type(of: v)) right-click: no menu")
+                    }
+                }
+            }
             guard let win = NSApp.keyWindow ?? NSApp.mainWindow,
                   let ev = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [.command, .shift],
                                             timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: win.windowNumber,

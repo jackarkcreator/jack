@@ -162,6 +162,9 @@ final class PageSidebarController: NSObject, NSCollectionViewDataSource, NSColle
         let targets = selected.contains(clicked) ? selected : [clicked]
 
         let menu = NSMenu()
+        // 3.5 C5: Save as Word… first (the whole document; nil target reaches the window's controller).
+        menu.addItem(SigningPDFView.saveAsWordItem())
+        menu.addItem(.separator())
         let noun = targets.count == 1 ? "Page" : "\(targets.count) Pages"
         menu.addItem(action("Rotate \(noun)") { [weak self] in self?.rotate(targets) })
         menu.addItem(action("Extract \(noun) to New PDF…") { [weak self] in self?.delegate?.sidebarRequestsExtract(targets) })

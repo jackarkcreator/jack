@@ -98,6 +98,12 @@ final class SigningPDFView: PDFView {
     var formFieldMenuItems: ((PDFAnnotation) -> [NSMenuItem])?
     var annotateMenuItems: ((PDFPage?, CGPoint) -> [NSMenuItem])?
 
+    static func saveAsWordItem() -> NSMenuItem {
+        let it = NSMenuItem(title: "Save as Word\u{2026}", action: #selector(DocumentWindowController.saveAsWord(_:)), keyEquivalent: "")
+        it.image = Chrome.symbol(["doc.richtext"], "Save as Word", Chrome.menuSymbol)
+        return it
+    }
+
     // Right-click → annotate/comment directly from the context menu (page + point captured).
     override func menu(for event: NSEvent) -> NSMenu? {
         let base = super.menu(for: event)
@@ -111,10 +117,14 @@ final class SigningPDFView: PDFView {
             items.forEach { menu.addItem($0) }
             return menu
         }
-        guard let extra = annotateMenuItems?(page, pagePoint), !extra.isEmpty else { return base }
         let menu = base ?? NSMenu()
+        if let extra = annotateMenuItems?(page, pagePoint), !extra.isEmpty {
+            if menu.items.isEmpty == false { menu.insertItem(.separator(), at: 0) }
+            for item in extra.reversed() { menu.insertItem(item, at: 0) }
+        }
+        // 3.5 C5: Save as Word… leads every page right-click (nil target: the window's controller).
         if menu.items.isEmpty == false { menu.insertItem(.separator(), at: 0) }
-        for item in extra.reversed() { menu.insertItem(item, at: 0) }
+        menu.insertItem(SigningPDFView.saveAsWordItem(), at: 0)
         return menu
     }
     private var dragging: ImageStampAnnotation?

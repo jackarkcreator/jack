@@ -20,14 +20,19 @@ final class DropShelf {
     }
 
     private let onDrop: ([URL]) -> Void
+    private let onConvert: ([URL]) -> Void
+    private var zones: [ShelfZoneView] = []
+    private var heading: NSTextField?
+    private var panelSplit: Bool?
     private var panel: NSPanel?
-    private var zone: ShelfZoneView?
     private var timer: Timer?
     private var lastChange = NSPasteboard(name: .drag).changeCount
     private var pendingShow: DispatchWorkItem?
 
-    init(onDrop: @escaping ([URL]) -> Void) {
+    /// `onDrop` routes a drop the classic way; `onConvert` gets the PDFs dropped on Convert to Word (3.5 C1).
+    init(onDrop: @escaping ([URL]) -> Void, onConvert: @escaping ([URL]) -> Void) {
         self.onDrop = onDrop
+        self.onConvert = onConvert
         // 5Hz pasteboard watch is effectively free; it also polices dismissal.
         timer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
             self?.tick()
@@ -71,7 +76,14 @@ final class DropShelf {
 
     // MARK: What a drop will do — the label is the contract (mock variants, 1:1)
 
-    struct Content { let action: String; let detail: String }
+    /// One half of a split shelf (3.5 C1): where you let go is the answer.
+    struct Zone { let action: String; let detail: String; let glyph: CardGlyph.Kind; let toWord: Bool }
+    struct Content {
+        let action: String
+        let detail: String
+        var split: (left: Zone, right: Zone)? = nil
+        var heading = ""
+    }
 
 
     static func classify(_ urls: [URL]) -> Content? {
@@ -95,7 +107,16 @@ final class DropShelf {
                 : Content(action: "Convert \(docs.count) documents to PDF", detail: "each saved beside its original")
         }
         if pdfs.count == 1, photos.isEmpty, docs.isEmpty {
-            return Content(action: "Open in Jack", detail: pdfs[0].lastPathComponent)
+            return Content(action: "Open in Jack", detail: pdfs[0].lastPathComponent,
+                           split: (Zone(action: "Open in Jack", detail: "read \u{00B7} mark up \u{00B7} sign", glyph: .open, toWord: false),
+                                   Zone(action: "Convert to Word", detail: ".docx saved beside it", glyph: .word, toWord: true)),
+                           heading: pdfs[0].lastPathComponent)
+        }
+        if pdfs.count > 1, photos.isEmpty, docs.isEmpty {
+            return Content(action: "Organize \(pdfs.count) items into one PDF", detail: "\(pdfs.count) PDFs, in order",
+                           split: (Zone(action: "Organize into one PDF", detail: "in order", glyph: .organize, toWord: false),
+                                   Zone(action: "Convert each to Word", detail: "\(pdfs.count) .docx files, beside each", glyph: .word, toWord: true)),
+                           heading: "\(pdfs.count) PDFs")
         }
         if !photos.isEmpty, pdfs.isEmpty, docs.isEmpty {
             return photos.count == 1
@@ -119,10 +140,21 @@ final class DropShelf {
     // MARK: Show / hide
 
     private func show(_ content: Content) {
-        if panel == nil { buildPanel() }
-        guard let panel, let zone else { return }
-        zone.actLabel.stringValue = content.action
-        zone.detLabel.stringValue = content.detail
+        let split = content.split != nil
+        if panel == nil || panelSplit != split { panel?.orderOut(nil); buildPanel(split: split) }
+        guard let panel else { return }
+        if let sp = content.split, zones.count == 2 {
+            for (z, spec) in zip(zones, [sp.left, sp.right]) {
+                z.actLabel.stringValue = spec.action
+                z.detLabel.stringValue = spec.detail
+                z.glyphKind = spec.glyph
+                z.toWord = spec.toWord
+            }
+            heading?.stringValue = content.heading
+        } else if let zone = zones.first {
+            zone.actLabel.stringValue = content.action
+            zone.detLabel.stringValue = content.detail
+        }
         // Corner of whichever screen holds the cursor (mock: bottom-right, 22pt in).
         let mouse = NSEvent.mouseLocation
         let screen = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) } ?? NSScreen.main
@@ -143,17 +175,24 @@ final class DropShelf {
         }
     }
 
+    /// Self-test only: show the shelf for these files without a drag and hand back its view.
+    func showcase(_ urls: [URL]) -> NSView? {
+        guard let c = Self.classify(urls) else { return nil }
+        show(c)
+        return panel?.contentView
+    }
+
     func hide() {
         pendingShow?.cancel()
         panel?.orderOut(nil)
-        zone?.setHot(false)
+        zones.forEach { $0.setHot(false) }
     }
 
     // MARK: The panel — 1:1 with the approved mock
 
-    private func buildPanel() {
-        let width: CGFloat = 248
-        let height: CGFloat = 168
+    private func buildPanel(split: Bool) {
+        let width: CGFloat = split ? 352 : 248
+        let height: CGFloat = split ? 214 : 168
         let p = NSPanel(contentRect: NSRect(x: 0, y: 0, width: width, height: height),
                         styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         p.level = .floating
@@ -162,7 +201,6 @@ final class DropShelf {
         p.hasShadow = true
         p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         p.appearance = NSAppearance(named: .aqua)   // the mock's light frost, everywhere
-
         let frost = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: width, height: height))
         frost.material = .popover
         frost.blendingMode = .behindWindow
@@ -172,24 +210,41 @@ final class DropShelf {
         frost.layer?.masksToBounds = true
         frost.layer?.borderWidth = 0.5
         frost.layer?.borderColor = NSColor.white.withAlphaComponent(0.5).cgColor
-
-        let z = ShelfZoneView(frame: NSRect(x: 16, y: 30, width: width - 32, height: height - 46))
-        z.onDrop = { [weak self] urls in
-            self?.hide()
-            self?.onDrop(urls)
+        var made: [ShelfZoneView] = []
+        let frames: [NSRect] = split
+            ? [NSRect(x: 16, y: 30, width: (width - 44) / 2, height: 128),
+               NSRect(x: 16 + (width - 44) / 2 + 12, y: 30, width: (width - 44) / 2, height: 128)]
+            : [NSRect(x: 16, y: 30, width: width - 32, height: height - 46)]
+        for f in frames {
+            let z = ShelfZoneView(frame: f)
+            z.onDrop = { [weak self, weak z] urls in
+                self?.hide()
+                if z?.toWord == true { self?.onConvert(urls.filter(isPDFURL)) } else { self?.onDrop(urls) }
+            }
+            frost.addSubview(z)
+            made.append(z)
         }
-        frost.addSubview(z)
-
+        heading = nil
+        if split {
+            let h = NSTextField(labelWithString: "")
+            h.font = .systemFont(ofSize: 11.5)
+            h.textColor = NSColor(calibratedRed: 0.357, green: 0.373, blue: 0.404, alpha: 1)
+            h.alignment = .center
+            h.lineBreakMode = .byTruncatingMiddle
+            h.frame = NSRect(x: 16, y: height - 14 - 15, width: width - 32, height: 15)
+            frost.addSubview(h)
+            heading = h
+        }
         let esc = NSTextField(labelWithString: "release anywhere else to dismiss")
         esc.font = .systemFont(ofSize: 10)
-        esc.textColor = NSColor(calibratedRed: 0.604, green: 0.604, blue: 0.627, alpha: 1)
+        esc.textColor = NSColor(calibratedRed: 0.435, green: 0.439, blue: 0.463, alpha: 1)
         esc.alignment = .center
         esc.frame = NSRect(x: 0, y: 9, width: width, height: 13)
         frost.addSubview(esc)
-
         p.contentView = frost
         panel = p
-        zone = z
+        zones = made
+        panelSplit = split
     }
 }
 
@@ -197,6 +252,10 @@ final class DropShelf {
 /// teal-gradient glyph (up-arrow into a tray), action + detail labels — the mock, in AppKit.
 final class ShelfZoneView: NSView {
     var onDrop: (([URL]) -> Void)?
+    /// Split shelf: this zone converts to Word instead of opening/organizing.
+    var toWord = false
+    var glyphKind: CardGlyph.Kind = .open { didSet { glyph.kind = glyphKind; glyph.needsDisplay = true } }
+    private let glyph = CardGlyph(kind: .open)
     let actLabel = NSTextField(labelWithString: "")
     let detLabel = NSTextField(labelWithString: "")
     private let border = CAShapeLayer()
@@ -221,7 +280,7 @@ final class ShelfZoneView: NSView {
         border.lineDashPattern = [6, 5]
         layer?.addSublayer(border)
 
-        let glyph = ShelfGlyphView(frame: NSRect(x: bounds.midX - 17, y: bounds.height - 16 - 34, width: 34, height: 34))
+        glyph.frame = NSRect(x: bounds.midX - 17, y: bounds.height - 16 - 34, width: 34, height: 34)
         addSubview(glyph)
 
         actLabel.font = .systemFont(ofSize: 13.5, weight: .semibold)
@@ -265,34 +324,5 @@ final class ShelfZoneView: NSView {
         guard !u.isEmpty else { return false }
         onDrop?(u)
         return true
-    }
-}
-
-/// The mock's glyph: teal gradient square (radius 9), white up-arrow feeding a tray.
-final class ShelfGlyphView: NSView {
-    override func draw(_ dirtyRect: NSRect) {
-        guard let ctx = NSGraphicsContext.current?.cgContext else { return }
-        let r = bounds
-        let path = CGPath(roundedRect: r, cornerWidth: 9, cornerHeight: 9, transform: nil)
-        ctx.addPath(path)
-        ctx.clip()
-        let colors = [NSColor(calibratedRed: 0.055, green: 0.431, blue: 0.431, alpha: 1).cgColor,
-                      NSColor(calibratedRed: 0.078, green: 0.722, blue: 0.651, alpha: 1).cgColor] as CFArray
-        if let grad = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: [0, 1]) {
-            ctx.drawLinearGradient(grad, start: CGPoint(x: 0, y: r.height), end: CGPoint(x: r.width, y: 0), options: [])
-        }
-        // White strokes, scaled from the mock's 24pt grid (SVG is y-down; AppKit is y-up).
-        let s = r.width / 24
-        func pt(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: x * s, y: (24 - y) * s) }
-        ctx.setStrokeColor(NSColor.white.cgColor)
-        ctx.setLineWidth(1.9 * s)
-        ctx.setLineCap(.round)
-        ctx.setLineJoin(.round)
-        ctx.move(to: pt(12, 3)); ctx.addLine(to: pt(12, 15))
-        ctx.move(to: pt(8, 7)); ctx.addLine(to: pt(12, 3)); ctx.addLine(to: pt(16, 7))
-        ctx.strokePath()
-        let tray = CGRect(x: 4 * s, y: (24 - 21) * s, width: 16 * s, height: 6 * s)
-        ctx.addPath(CGPath(roundedRect: tray, cornerWidth: 2 * s, cornerHeight: 2 * s, transform: nil))
-        ctx.strokePath()
     }
 }

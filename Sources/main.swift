@@ -98,6 +98,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
     }
 
+    /// The last app (not Jack) that was in front: where focus goes back after a hand-off.
+    static var lastOtherApp: NSRunningApplication?
+    private var activationWatch: Any?
+
     private var statusItem: NSStatusItem!
     private var dropShelf: DropShelf?
     private let popover = NSPopover()
@@ -108,18 +112,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     // Drop files on the menu bar icon / "Open With… Jack". Coalesce split open calls.
     func application(_ application: NSApplication, open urls: [URL]) {
         didHandleOpen = true
+        if ProcessInfo.processInfo.environment["JACK_CONVERT_SELFTEST"] != nil || ProcessInfo.processInfo.environment["JACK_ICONDROP_PROBE"] != nil { return }
         // jack://convert?p=<base64 path>&p=… — the sandboxed Finder extension can't touch
         // files, so it ferries the selection over the URL scheme and the app does the work.
         var files: [URL] = []
         for u in urls {
-            // jack://toword?p=… — Finder's "Convert to Word with Jack": open each PDF with the
-            // Save as Word sheet already up (the user still sees options, progress and the result).
+            // jack://toword?p=… — Finder's "Convert to Word with Jack" (3.5 C5): straight to the
+            // corner card with the 3.4 defaults, no PDF window; Options… on the card opens the sheet.
             if u.scheme == "jack", u.host == "toword" {
                 let comps = URLComponents(url: u, resolvingAgainstBaseURL: false)
+                var pdfs: [URL] = []
                 for q in comps?.queryItems ?? [] where q.name == "p" {
                     if let v = q.value, let data = Data(base64Encoded: v),
                        let path = String(data: data, encoding: .utf8), isPDFURL(URL(fileURLWithPath: path)) {
-                        openDocument(URL(fileURLWithPath: path), word: true)
+                        pdfs.append(URL(fileURLWithPath: path))
+                    }
+                }
+                WordConvertCard.shared.convert(pdfs)
+                // The URL hand-off made Jack active with nothing to show: give the keyboard back
+                // to the app the user right-clicked in (the card never needs focus).
+                if AppDelegate.documents.isEmpty && AppDelegate.organizers.isEmpty && AppDelegate.batchers.isEmpty {
+                    // NSApp.deactivate() is a no-op on macOS 27 (measured); activating that app works.
+                    DispatchQueue.main.async {
+                        AppDelegate.lastOtherApp?.activate(options: [])
+                        MenuProbe.log("toword: gave focus back to \(AppDelegate.lastOtherApp?.bundleIdentifier ?? "nil")")
                     }
                 }
                 continue
@@ -136,6 +152,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 files.append(u)
             }
         }
+        // A jack://toword hand-off carries no files to route: routing [] would pop the launcher.
+        guard !files.isEmpty else { return }
         pending.append(contentsOf: files)
         guard !scheduled else { return }
         scheduled = true
@@ -148,6 +166,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         MenuProbe.install()
+        if let front = NSWorkspace.shared.frontmostApplication, front.processIdentifier != getpid() {
+            AppDelegate.lastOtherApp = front
+        }
+        activationWatch = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { n in
+            if let app = n.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+               app.processIdentifier != getpid(), app.activationPolicy == .regular {
+                AppDelegate.lastOtherApp = app
+            }
+        }
+        // The corner card's Open in Jack / Options… (full Save as Word sheet).
+        WordConvertCard.openInJack = { [weak self] url, word in self?.openDocument(url, word: word) }
+        if WordConvertCard.runSelfTestIfRequested() { return }
         // v2.5: autosave-in-place is off, so a crash would otherwise lose the session's edits.
         // Autosave-elsewhere writes a scratch copy under ~/Library/Autosave Information and
         // NEVER the user's original; macOS offers it back on the next launch.
@@ -157,7 +188,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         NSApp.servicesProvider = self
         NSUpdateDynamicServices()
         // The Drop Shelf: a corner target that exists only while a file drag is in flight.
-        dropShelf = DropShelf(onDrop: { [weak self] urls in self?.route(urls) })
+        dropShelf = DropShelf(onDrop: { [weak self] urls in self?.route(urls) },
+                              onConvert: { urls in WordConvertCard.shared.convert(urls) })
         configureLoginOnFirstRun()
         enforceDefaultIfWanted()
         MainMenu.install(newAction: #selector(newDocumentAction),
@@ -166,6 +198,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                          updateAction: #selector(checkUpdatesAction),
                          target: self)
         runWindowShowcaseIfRequested()
+        // Dev probe for C6 (JACK_ICONDROP_PROBE=1 Jack a.pdf …): the menu-bar drop handler, without a drag.
+        if ProcessInfo.processInfo.environment["JACK_ICONDROP_PROBE"] != nil {
+            let files = CommandLine.arguments.dropFirst().filter { $0.lowercased().hasSuffix(".pdf") }.map { URL(fileURLWithPath: $0) }
+            var token: Any?
+            token = NotificationCenter.default.addObserver(forName: NSMenu.didBeginTrackingNotification, object: nil, queue: .main) { [weak self] n in
+                guard let m = n.object as? NSMenu, m.items.contains(where: { $0.action == #selector(AppDelegate.iconDropChoice(_:)) }) else { return }
+                MenuProbe.log("[icondrop] menu shown: " + m.items.map { "\($0.title)\($0.isEnabled ? "" : "(disabled)")" }.joined(separator: " | "))
+                if let t = token { NotificationCenter.default.removeObserver(t) }
+                let word = m.items.first { $0.tag == 1 && $0.action == #selector(AppDelegate.iconDropChoice(_:)) }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                    m.cancelTracking()
+                    if let word { self?.iconDropChoice(word) }
+                    MenuProbe.log("[icondrop] chose \(word?.title ?? "nil")")
+                }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.dropOnIcon(files) }
+            return
+        }
         checkForUpdate()
         // Dev-only test hook: `Jack --organize a.pdf b.pdf` opens the organizer directly.
         if let flag = CommandLine.arguments.firstIndex(of: "--organize"),
@@ -276,6 +326,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     // MARK: - Menu bar item & popover
 
+    /// 3.5 C6: PDFs dropped on the menu-bar icon (or the launcher it springs open) get the Drop
+    /// Shelf's two choices in a small menu at the icon. Anything else routes as before.
+    private var pendingIconDrop: [URL] = []
+    private func dropOnIcon(_ urls: [URL]) {
+        popover.performClose(nil)
+        let pdfs = urls.filter(isPDFURL)
+        guard !pdfs.isEmpty, pdfs.count == urls.count, statusItem.button != nil else { route(urls); return }
+        pendingIconDrop = pdfs
+        let m = NSMenu()
+        m.autoenablesItems = false
+        let head = NSMenuItem(title: pdfs.count == 1 ? pdfs[0].lastPathComponent : "\(pdfs.count) PDFs", action: nil, keyEquivalent: "")
+        head.isEnabled = false
+        m.addItem(head)
+        let first = NSMenuItem(title: pdfs.count == 1 ? "Open in Jack" : "Organize into One PDF",
+                               action: #selector(iconDropChoice(_:)), keyEquivalent: "")
+        first.image = Chrome.symbol([pdfs.count == 1 ? "arrow.up.doc" : "doc.on.doc", "doc"], first.title, Chrome.menuSymbol)
+        let word = NSMenuItem(title: pdfs.count == 1 ? "Convert to Word" : "Convert Each to Word",
+                              action: #selector(iconDropChoice(_:)), keyEquivalent: "")
+        word.image = Chrome.symbol(["doc.richtext"], word.title, Chrome.menuSymbol)
+        word.tag = 1
+        for it in [first, word] { it.target = self; m.addItem(it) }
+        // After the drag session has ended: a menu opened inside performDragOperation stalls it.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let button = self.statusItem.button else { return }
+            self.statusItem.menu = m
+            button.performClick(nil)
+            self.statusItem.menu = nil
+        }
+    }
+
+    @objc fileprivate func iconDropChoice(_ sender: NSMenuItem) {
+        let urls = pendingIconDrop
+        pendingIconDrop = []
+        if sender.tag == 1 { WordConvertCard.shared.convert(urls) } else { route(urls) }
+    }
+
     private func setupStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         guard let button = statusItem.button else { return }
@@ -302,7 +388,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         let overlay = StatusDropView(frame: button.bounds)
         overlay.autoresizingMask = [.width, .height]
         overlay.onClick = { [weak self] in self?.togglePopover() }
-        overlay.onDrop = { [weak self] urls in self?.popover.performClose(nil); self?.route(urls) }
+        overlay.onDrop = { [weak self] urls in self?.dropOnIcon(urls) }
         overlay.onDragHover = { [weak self] in self?.showPopover(activating: false) }
         button.addSubview(overlay)
     }
@@ -315,7 +401,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         popoverVC.onSign = { [weak self] in self?.popover.performClose(nil); self?.pickSign() }
         popoverVC.onOrganize = { [weak self] in self?.popover.performClose(nil); self?.pickOrganize() }
         popoverVC.onBatch = { [weak self] in self?.popover.performClose(nil); self?.pickBatchFolder() }
-        popoverVC.onFilesDropped = { [weak self] urls in self?.popover.performClose(nil); self?.route(urls) }
+        popoverVC.onFilesDropped = { [weak self] urls in self?.dropOnIcon(urls) }
         popoverVC.onQuit = { NSApp.terminate(nil) }
         popoverVC.onUpdate = { [weak self] in self?.popover.performClose(nil); self?.updater.checkForUpdates(nil) }
         popoverVC.onToggleLogin = { [weak self] on in self?.setLogin(on) }
