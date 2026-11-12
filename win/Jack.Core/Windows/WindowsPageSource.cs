@@ -35,7 +35,7 @@ public sealed class WindowsPageSource : IPageSource
         Pdfium.Init();
         stem = Path.GetFileNameWithoutExtension(pdfPath);
         doc = Pdfium.FPDF_LoadDocument(pdfPath, null);
-        if (doc == IntPtr.Zero) throw new InvalidOperationException($"PDFium could not open {Path.GetFileName(pdfPath)} (error {Pdfium.FPDF_GetLastError()})");
+        if (doc == IntPtr.Zero) throw new PdfOpenException(Path.GetFileName(pdfPath), Pdfium.FPDF_GetLastError());
         pageCount = Pdfium.FPDF_GetPageCount(doc);
         ocr = OcrEngine.TryCreateFromLanguage(new global::Windows.Globalization.Language("en-US"))
               ?? OcrEngine.TryCreateFromUserProfileLanguages()

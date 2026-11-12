@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Jack for Windows: the tray app. Tray icon, drop window, corner card, Explorer verbs.
+       Runs the Jack.Core engines (Save as Word, Make Searchable) and photos-to-PDF. x64 only.
+       WPF built in code (styles parsed at run time from Theme.cs); WinForms only for the tray icon. -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>Jack</AssemblyName>
+    <RootNamespace>Jack.App</RootNamespace>
+    <StartupObject>Jack.App.Program</StartupObject>
+    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">win-x64</RuntimeIdentifier>
+    <ApplicationIcon>..\Jack\jack.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Product>Jack</Product>
+    <AssemblyTitle>Jack</AssemblyTitle>
+    <Company>ThinkOpen Inc.</Company>
+    <Copyright>© 2026 ThinkOpen Inc.</Copyright>
+    <Version>0.4.0</Version>
+    <NoWarn>$(NoWarn);WFAC010</NoWarn>  <!-- WinForms DPI analyzer; WPF takes DPI awareness from app.manifest -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Jack.Core\Jack.Core.csproj" />
+    <PackageReference Include="PdfSharp" Version="6.1.1" />
+  </ItemGroup>
+
+</Project>

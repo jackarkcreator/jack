@@ -17,6 +17,14 @@ internal struct FileWrite { public int Version; public IntPtr WriteBlock; }
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal delegate int WriteBlockFn(IntPtr self, IntPtr data, uint size);
 
+/// PDFium could not open the file. `Code` is FPDF_GetLastError (4 = needs a password).
+public sealed class PdfOpenException : InvalidOperationException
+{
+    public readonly uint Code;
+    public bool NeedsPassword => Code == 4;
+    public PdfOpenException(string file, uint code) : base($"PDFium could not open {file} (error {code})") { Code = code; }
+}
+
 internal static class Pdfium
 {
     const string D = "pdfium";
@@ -76,7 +84,7 @@ internal static class Pdfium
     {
         Init();
         var doc = FPDF_LoadDocument(path, null);
-        if (doc == IntPtr.Zero) throw new InvalidOperationException($"PDFium could not open {Path.GetFileName(path)} (error {FPDF_GetLastError()})");
+        if (doc == IntPtr.Zero) throw new PdfOpenException(Path.GetFileName(path), FPDF_GetLastError());
         return doc;
     }
 

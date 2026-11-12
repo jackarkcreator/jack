@@ -12,7 +12,7 @@ name: Windows Save as Word + Make Searchable gate
 on:
   push:
     branches: [win-phase1]
-    paths: ['win/Jack.Core/**', 'win/Jack.Cli/**', 'harness/**', '.github/workflows/win-phase1.yml']
+    paths: ['win/Jack.Core/**', 'win/Jack.Cli/**', 'win/Jack.App/**', 'harness/**', '.github/workflows/win-phase1.yml']
   workflow_dispatch:
 
 permissions:
@@ -139,6 +139,26 @@ jobs:
           $code = $LASTEXITCODE
           Get-Content results-ocr/summary.md >> $env:GITHUB_STEP_SUMMARY
           exit $code
+
+      - name: Publish the tray app (win-x64) with PDFium and the Tesseract model
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          dotnet publish win/Jack.App/Jack.App.csproj -c Release -r win-x64 --self-contained true -o app
+          Copy-Item pdfium/bin/pdfium.dll app/
+          Copy-Item tessdata app/tessdata -Recurse
+
+      - name: Tray app smoke test (Explorer-style launches, cards, drop window, verbs)
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: ./harness/app_smoke.ps1 -App app -Corpus harness/corpus -Out app-results
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: win-app-results
+          path: app-results/
+          if-no-files-found: warn
 
       - uses: actions/upload-artifact@v4
         if: always()

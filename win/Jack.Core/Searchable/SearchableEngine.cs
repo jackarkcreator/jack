@@ -105,6 +105,7 @@ public static class SearchableEngine
                     pd.Deskew != 0 ? WordExportEngine.F(", read straightened {0:F2}°", pd.Deskew) : ""));
             }
             foreach (var w in src.Warnings) report.Debug.Add("warning: " + w);
+            progress?.Invoke(src.PageCount, src.PageCount);   // reading done: writing and checking
         }
         if (plans.Count == 0)
         {
