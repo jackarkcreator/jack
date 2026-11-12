@@ -50,8 +50,9 @@ internal static class PhotosToPdf
             outDir ??= Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
             var outPath = Path.Combine(outDir, $"Jack_{DateTime.Now:yyyy-MM-dd_HHmmss}.pdf");
             for (int n = 2; File.Exists(outPath); n++) outPath = Path.Combine(outDir, $"Jack_{DateTime.Now:yyyy-MM-dd_HHmmss} {n}.pdf");
+            int pages = doc.PageCount;      // PDFsharp 6 locks the document once it is saved
             doc.Save(outPath);
-            return new Result(outPath, doc.PageCount, skipped);
+            return new Result(outPath, pages, skipped);
         }
         finally
         {
