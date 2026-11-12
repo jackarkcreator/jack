@@ -20,6 +20,7 @@ public sealed class WindowsPageSource : IPageSource
 {
     readonly IntPtr doc;
     readonly int pageCount;
+    readonly string stem;
     readonly OcrEngine ocr;
     readonly Tesseract.TesseractEngine? tess;
     readonly Dictionary<int, (GrayImage Image, List<OcrLine> Lines)> tessCache = new();
@@ -32,6 +33,7 @@ public sealed class WindowsPageSource : IPageSource
         if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
             throw new PlatformNotSupportedException("Save as Word on Windows runs as an x64 process.");
         Pdfium.Init();
+        stem = Path.GetFileNameWithoutExtension(pdfPath);
         doc = Pdfium.FPDF_LoadDocument(pdfPath, null);
         if (doc == IntPtr.Zero) throw new InvalidOperationException($"PDFium could not open {Path.GetFileName(pdfPath)} (error {Pdfium.FPDF_GetLastError()})");
         pageCount = Pdfium.FPDF_GetPageCount(doc);
@@ -146,7 +148,7 @@ public sealed class WindowsPageSource : IPageSource
     {
         var tl = TesseractLines(index, g);
         if (!correction) return tl ?? new List<OcrLine>();
-        var lines = WindowsOcr(g);
+        var lines = WindowsOcr(g, index);
         // Windows OCR gives no confidence. A line's confidence is the mean confidence Tesseract
         // gave the words it read inside that line (handwriting and smudges score low there too).
         if (tl == null) return lines;
@@ -171,7 +173,7 @@ public sealed class WindowsPageSource : IPageSource
         return ix * iy / area > 0.5;
     }
 
-    List<OcrLine> WindowsOcr(GrayImage g)
+    List<OcrLine> WindowsOcr(GrayImage g, int index)
     {
         // Windows OCR takes at most MaxImageDimension pixels a side (2600 on current builds).
         double f = Math.Min(1.0, OcrEngine.MaxImageDimension / (double)Math.Max(g.W, g.H));
@@ -191,6 +193,18 @@ public sealed class WindowsPageSource : IPageSource
                 w.BoundingRect.Y / sy, (w.BoundingRect.Y + w.BoundingRect.Height) / sy)).ToList();
             if (words.Count == 0) continue;
             lines.Add(new OcrLine(l.Text, words.Min(w => w.X0), words.Max(w => w.X1), words.Min(w => w.Y0), words.Max(w => w.Y1), 1.0f, words));
+        }
+        // Calibration aid: JACK_WINOCR_DUMP=<dir> writes Windows OCR's raw lines and word boxes
+        // (points, top-left origin) as <stem>-p<N>.json, to compare with the Mac's Vision dump.
+        if (Environment.GetEnvironmentVariable("JACK_WINOCR_DUMP") is { Length: > 0 } dumpDir)
+        {
+            Directory.CreateDirectory(dumpDir);
+            var json = System.Text.Json.JsonSerializer.Serialize(lines.Select(l => new
+            {
+                text = l.Text, x0 = l.X0, x1 = l.X1, y0 = l.Y0, y1 = l.Y1,
+                words = l.Words.Select(w => new { text = w.Text, x0 = w.X0, x1 = w.X1, y0 = w.Y0, y1 = w.Y1 })
+            }));
+            File.WriteAllText(Path.Combine(dumpDir, $"{stem}-p{index + 1}.json"), json);
         }
         return lines;
     }

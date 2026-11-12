@@ -61,6 +61,7 @@ jobs:
         run: |
           $exe = (Resolve-Path jack/Jack.exe).Path
           $td = (Resolve-Path tessdata).Path
+          $env:JACK_WINOCR_DUMP = (Join-Path (Get-Location) 'results/winocr')
           # Runner paths have no spaces; run_engine.py splits non-POSIX on Windows, which would keep quotes.
           python harness/run_engine.py --cmd "$exe word {in} {out} --tessdata $td" --pdfs harness/corpus --out results
 
