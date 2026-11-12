@@ -31,6 +31,8 @@ internal static class Pdfium
     [DllImport(D)] public static extern void FPDFText_ClosePage(IntPtr text);
     [DllImport(D)] public static extern int FPDFText_CountChars(IntPtr text);
     [DllImport(D)] public static extern int FPDFText_GetText(IntPtr text, int start, int count, [Out] ushort[] result);
+    [DllImport(D)] public static extern uint FPDFText_GetUnicode(IntPtr text, int index);
+    [DllImport(D)] public static extern int FPDFText_GetCharBox(IntPtr text, int index, out double left, out double right, out double bottom, out double top);
 
     [DllImport(D)] public static extern int FPDFPage_CountObjects(IntPtr page);
     [DllImport(D)] public static extern IntPtr FPDFPage_GetObject(IntPtr page, int index);

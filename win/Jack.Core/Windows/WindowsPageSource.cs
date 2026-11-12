@@ -149,6 +149,10 @@ public sealed class WindowsPageSource : IPageSource
         var tl = TesseractLines(index, g);
         if (!correction) return tl ?? new List<OcrLine>();
         var lines = WindowsOcr(g, index);
+        var info = Page(index);
+        bool trustedLayer = info.TextLayer.Trim().Length > 20 && !info.IsScanPage;   // the engine's own rule
+        if (trustedLayer) lines = FromTextLayer(lines, TextLayerWords(index));
+        else if (tl != null) lines = FillFromTesseract(lines, tl);
         // Windows OCR gives no confidence. A line's confidence is the mean confidence Tesseract
         // gave the words it read inside that line (handwriting and smudges score low there too).
         if (tl == null) return lines;
@@ -165,6 +169,131 @@ public sealed class WindowsPageSource : IPageSource
                 : inside.Where(t => Overlaps(t.w, w)).Select(t => t.conf).DefaultIfEmpty(0.5f).Average()).ToList();
             return l with { Confidence = per.Average() };
         }).ToList();
+    }
+
+    static string Key(string t) => new string(t.Where(char.IsLetterOrDigit).ToArray()).ToLowerInvariant();
+
+    /// The page's own words with their boxes (points, top-left origin). Text pages are never
+    /// straightened, so these line up with the page image the OCR read.
+    List<OcrWord> TextLayerWords(int index) => WithPage(index, page =>
+    {
+        var box = MediaBox(page);
+        var words = new List<OcrWord>();
+        var tp = Pdfium.FPDFText_LoadPage(page);
+        if (tp == IntPtr.Zero) return words;
+        try
+        {
+            int n = Pdfium.FPDFText_CountChars(tp);
+            var sb = new System.Text.StringBuilder();
+            double l = 0, r = 0, t = 0, b = 0;
+            void Flush()
+            {
+                if (sb.Length > 0) words.Add(new OcrWord(sb.ToString(), l - box.X, r - box.X, box.Y + box.H - t, box.Y + box.H - b));
+                sb.Clear();
+            }
+            for (int i = 0; i < n; i++)
+            {
+                uint u = Pdfium.FPDFText_GetUnicode(tp, i);
+                if (u is ' ' or '\r' or '\n' or '\t' or 0 or 2 or 0xFFFE || char.IsWhiteSpace((char)Math.Min(u, 0xFFFF))) { Flush(); continue; }
+                if (Pdfium.FPDFText_GetCharBox(tp, i, out var cl, out var cr, out var cb, out var ct) == 0) continue;
+                if (sb.Length == 0) { l = cl; r = cr; b = cb; t = ct; }
+                else { l = Math.Min(l, cl); r = Math.Max(r, cr); b = Math.Min(b, cb); t = Math.Max(t, ct); }
+                sb.Append(u <= 0xFFFF ? ((char)u).ToString() : char.ConvertFromUtf32((int)u));
+            }
+            Flush();
+        }
+        finally { Pdfium.FPDFText_ClosePage(tp); }
+        return words;
+    });
+
+    /// On a page with a trustworthy text layer the PDF's own words are exact, while Windows OCR
+    /// misreads some ("1" as "l", "7:00" as "7") and skips short isolated labels ("RE:"). Each
+    /// OCR word takes the layer's words under it when they plausibly say the same thing, and layer
+    /// words no OCR line covered become lines of their own. Layout still comes from the OCR lines.
+    /// A layer that disagrees with OCR on most words (broken font encodings) is not used at all.
+    internal static List<OcrLine> FromTextLayer(List<OcrLine> lines, List<OcrWord> layer)
+    {
+        if (layer.Count == 0) return lines;
+        static (double, double) C(OcrWord w) => ((w.X0 + w.X1) / 2, (w.Y0 + w.Y1) / 2);
+        var used = new bool[layer.Count];
+        var plans = new List<(OcrLine Line, List<OcrWord> Words)>();
+        int ocrWords = 0, exact = 0;
+        foreach (var line in lines)
+        {
+            var outWords = new List<OcrWord>();
+            foreach (var w in line.Words)
+            {
+                ocrWords++;
+                var under = new List<int>();
+                for (int i = 0; i < layer.Count; i++)
+                {
+                    if (used[i]) continue;
+                    var (cx, cy) = C(layer[i]);
+                    if (cx >= w.X0 - 1 && cx <= w.X1 + 1 && cy >= line.Y0 && cy <= line.Y1) under.Add(i);
+                }
+                string got = Key(w.Text), say = Key(string.Concat(under.Select(i => layer[i].Text)));
+                if (under.Count > 0 && got == say) exact++;
+                bool plausible = under.Count > 0 && say.Length > 0 &&
+                    (got == say || say.Contains(got) || got.Contains(say) || got.Length <= 2 || Similar(got, say) >= 0.5);
+                if (plausible)
+                {
+                    foreach (var i in under) { used[i] = true; outWords.Add(layer[i] with { Y0 = line.Y0, Y1 = line.Y1 }); }
+                }
+                else outWords.Add(w);
+            }
+            plans.Add((line, outWords));
+        }
+        if (ocrWords == 0 || exact < ocrWords * 0.6) return lines;     // not a layer to trust
+        var result = plans.Select(p => p.Line with
+        {
+            Text = string.Join(" ", p.Words.Select(w => w.Text)),
+            X0 = p.Words.Min(w => w.X0), X1 = p.Words.Max(w => w.X1),
+            Words = p.Words
+        }).ToList();
+        // Layer words no OCR line covered (the isolated "RE:"): group them into lines of their own.
+        var rest = Enumerable.Range(0, layer.Count).Where(i => !used[i] && !result.Any(l => Inside(layer[i], l)))
+            .Select(i => layer[i]).OrderBy(w => (w.Y0 + w.Y1) / 2).ThenBy(w => w.X0).ToList();
+        var groups = new List<List<OcrWord>>();
+        foreach (var w in rest)
+        {
+            var g = groups.FirstOrDefault(g => Math.Abs((g[0].Y0 + g[0].Y1) / 2 - (w.Y0 + w.Y1) / 2) < (g[0].Y1 - g[0].Y0) * 0.5);
+            if (g == null) groups.Add(new List<OcrWord> { w }); else g.Add(w);
+        }
+        foreach (var g in groups.Where(g => g.Any(w => Key(w.Text).Length > 0)))
+        {
+            var words = VisionLike(g.OrderBy(w => w.X0).ToList());
+            result.Add(new OcrLine(string.Join(" ", words.Select(w => w.Text)), words.Min(w => w.X0), words.Max(w => w.X1),
+                words.Min(w => w.Y0), words.Max(w => w.Y1), 1.0f, words));
+        }
+        return result;
+    }
+
+    /// Scans: a line Tesseract reads confidently where Windows OCR read nothing at all (Windows OCR
+    /// skips short isolated labels) is added, with Tesseract's own confidence.
+    internal static List<OcrLine> FillFromTesseract(List<OcrLine> lines, List<OcrLine> tess)
+    {
+        var result = new List<OcrLine>(lines);
+        foreach (var t in tess)
+        {
+            if (t.Confidence < 0.85f || Key(t.Text).Length < 2) continue;
+            if (t.Words.Any(tw => lines.Any(l => l.Words.Any(w => Overlaps(tw, w))))) continue;
+            var words = VisionLike(t.Words.ToList());
+            result.Add(new OcrLine(string.Join(" ", words.Select(w => w.Text)), words.Min(w => w.X0), words.Max(w => w.X1),
+                words.Min(w => w.Y0), words.Max(w => w.Y1), t.Confidence, words));
+        }
+        return result;
+    }
+
+    static double Similar(string a, string b)
+    {
+        if (a.Length == 0 || b.Length == 0) return 0;
+        var d = new int[a.Length + 1, b.Length + 1];
+        for (int i = 0; i <= a.Length; i++) d[i, 0] = i;
+        for (int j = 0; j <= b.Length; j++) d[0, j] = j;
+        for (int i = 1; i <= a.Length; i++)
+            for (int j = 1; j <= b.Length; j++)
+                d[i, j] = Math.Min(Math.Min(d[i - 1, j] + 1, d[i, j - 1] + 1), d[i - 1, j - 1] + (a[i - 1] == b[j - 1] ? 0 : 1));
+        return 1.0 - (double)d[a.Length, b.Length] / Math.Max(a.Length, b.Length);
     }
 
     // Tesseract word confidences, kept beside the lines (OcrWord carries no confidence).

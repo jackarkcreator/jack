@@ -440,7 +440,7 @@ public static class WordExportEngine
             foreach (var l in p.Lines)
             {
                 if (!(l.Y1 < p.Height * 0.17)) continue;
-                var k = Norm(l.Text);
+                var k = HeaderKey(l.Text);
                 if (SwiftText.Count(k) >= 3) seen.Add(k);
             }
             foreach (var k in seen) counts[k] = counts.GetValueOrDefault(k) + 1;
@@ -450,7 +450,7 @@ public static class WordExportEngine
         if (hf.HeaderKeys.Count == 0) return hf;
         foreach (var p in pages)
         {
-            var hl = p.Lines.Where(l => l.Y1 < p.Height * 0.17 && hf.HeaderKeys.Contains(Norm(l.Text))).ToList();
+            var hl = p.Lines.Where(l => l.Y1 < p.Height * 0.17 && hf.HeaderKeys.Contains(HeaderKey(l.Text))).ToList();
             if (hl.Count == 0) continue;
             double bottom = hl.Select(l => l.Y1).Max();
             hf.HeaderBottom[p.Index] = bottom + 3;
@@ -891,7 +891,7 @@ public static class WordExportEngine
         {
             var l = p.Lines[li];
             if (hf.FooterLineIDs.Contains($"{p.Index}:{li}")) continue;
-            if (keepLetterhead && hb > 0 && l.Y1 <= hb && hf.HeaderKeys.Contains(Norm(l.Text))) continue;
+            if (keepLetterhead && hb > 0 && l.Y1 <= hb && hf.HeaderKeys.Contains(HeaderKey(l.Text))) continue;
             if (keepLetterhead && hb > 0 && l.Y1 <= hb) continue;   // anything else inside the letterhead block
             items.AddRange(l.Items);
         }
@@ -1348,6 +1348,12 @@ public static class WordExportEngine
     }
 
     /// Lowercased letters/marks/numbers only, ASCII digits as '#'.
+    /// A letterhead line's identity across pages: its words of 3+ letters/digits. Separators and
+    /// stray marks ("|" read as "1" on one page and "•l" on the next) must not make the same
+    /// printed line look different from page to page. (Swift: headerKey.)
+    public static string HeaderKey(string s) =>
+        string.Join(" ", s.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries).Select(Norm).Where(t => t.Length >= 3));
+
     public static string Norm(string s)
     {
         var sb = new StringBuilder(s.Length);

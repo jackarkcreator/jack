@@ -468,7 +468,7 @@ enum WordExportEngine {
         for p in pages {
             var seen = Set<String>()
             for l in p.lines where l.y1 < p.height * 0.17 {
-                let k = norm(l.text)
+                let k = headerKey(l.text)
                 if k.count >= 3 { seen.insert(k) }
             }
             for k in seen { counts[k, default: 0] += 1 }
@@ -477,7 +477,7 @@ enum WordExportEngine {
         hf.headerKeys = Set(counts.filter { $0.value >= need }.map { $0.key })
         guard !hf.headerKeys.isEmpty else { return hf }
         for p in pages {
-            let hl = p.lines.filter { $0.y1 < p.height * 0.17 && hf.headerKeys.contains(norm($0.text)) }
+            let hl = p.lines.filter { $0.y1 < p.height * 0.17 && hf.headerKeys.contains(headerKey($0.text)) }
             guard let bottom = hl.map({ $0.y1 }).max() else { continue }
             hf.headerBottom[p.index] = bottom + 3
             if hf.letterhead == nil, let g = p.gray {
@@ -876,7 +876,7 @@ enum WordExportEngine {
         let hb = keepLetterhead ? (hf.headerBottom[p.index] ?? 0) : 0
         for (li, l) in p.lines.enumerated() {
             if hf.footerLineIDs.contains("\(p.index):\(li)") { continue }
-            if keepLetterhead && hb > 0 && l.y1 <= hb && hf.headerKeys.contains(norm(l.text)) { continue }
+            if keepLetterhead && hb > 0 && l.y1 <= hb && hf.headerKeys.contains(headerKey(l.text)) { continue }
             if keepLetterhead && hb > 0 && l.y1 <= hb { continue }   // anything else inside the letterhead block
             items.append(contentsOf: l.items)
         }
@@ -1249,6 +1249,13 @@ enum WordExportEngine {
             else if dp[i + 1][j] >= dp[i][j + 1] { i += 1 } else { j += 1 }
         }
         return out
+    }
+
+    /// A letterhead line's identity across pages: its words of 3+ letters/digits. Separators and
+    /// stray marks ("|" read as "1" on one page and "•l" on the next) must not make the same
+    /// printed line look different from page to page.
+    static func headerKey(_ s: String) -> String {
+        s.split(whereSeparator: { $0 == " " || $0 == "\t" }).map { norm(String($0)) }.filter { $0.count >= 3 }.joined(separator: " ")
     }
 
     static func norm(_ s: String) -> String {
