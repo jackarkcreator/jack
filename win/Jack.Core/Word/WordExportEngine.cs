@@ -557,6 +557,9 @@ public static class WordExportEngine
                 foreach (var w in words)
                 {
                     if (!(w.X0 < cb.X1 - 1 && w.X1 > cb.X1 + 4 && Math.Abs(w.Cy - cb.Cy) < Math.Max(cb.Y1 - cb.Y0, w.H))) continue;
+                    // Only a word level with the box (half its height overlapping): a title on the line
+                    // above a "☐ Individual" box is not its label, and lost its "I" as a "tick".
+                    if (!(Math.Min(w.Y1, cb.Y1) - Math.Max(w.Y0, cb.Y0) > 0.5 * Math.Min(w.H, cb.Y1 - cb.Y0))) continue;
                     // Strip the tick that OCR glued onto the label ("√Comprehensive", "VGeneral").
                     var t = SwiftText.Characters(w.Text);
                     int start = 0;
@@ -1101,6 +1104,7 @@ public static class WordExportEngine
             }
             double normalGap = Math.Max(0, Median(pitches) - lineH);
 
+            Row? above = null;
             foreach (var r in rows)
             {
                 r.Segments = SegmentsOf(r).Count;
@@ -1110,6 +1114,14 @@ public static class WordExportEngine
                 double lg = rx0 - L, rg = R - rx1;
                 r.Centered = r.Segments == 1 && Math.Abs(mid - (L + R) / 2) < W * 0.06 && Math.Abs(lg - rg) < W * 0.08
                     && lg > W * 0.12 && rg > W * 0.1 && (rx1 - rx0) < W * 0.75;
+                // ...unless it is the wrapped end of the full line above it, starting where that
+                // line's text starts (an indented list item's last line looks centered on its own).
+                if (r.Centered && above is Row a && !a.Centered && a.Words.Count > 0 && a.X1 > R - W * 0.13)
+                {
+                    double ax = IsMarker(a) && a.Items.Count > 1 ? a.Items[1].X0 : a.X0;
+                    if (Math.Abs(r.X0 - ax) < lineH * 0.5) r.Centered = false;
+                }
+                above = r;
             }
 
             var groups = new List<List<Row>>();
@@ -1123,7 +1135,10 @@ public static class WordExportEngine
                     var g = groups[^1];
                     var P = rows[k - 1];
                     double gap = r.Y0 - P.Y1;
-                    bool pFull = P.X1 > R - W * 0.13;
+                    // The line above is full, or it broke early only because this row's first word
+                    // would not have fitted after it (word wrap, not a paragraph end).
+                    double firstW = r.Words.Count > 0 ? r.Words[0].X1 - r.Words[0].X0 : 0;
+                    bool pFull = P.X1 > R - W * 0.13 || (firstW > 0 && R - P.X1 < firstW + lineH * 0.3);
                     double firstX = g[0].X0;
                     double textX = markers[^1] && g[0].Items.Count > 1 ? g[0].Items[1].X0 : firstX;
                     bool cont = !marker && !r.Centered && !P.Centered && r.Segments == 1 && P.Segments <= 1

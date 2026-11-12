@@ -581,7 +581,10 @@ enum WordExportEngine {
                 // (The label may start INSIDE the box: a tick that overshoots gets read as its first letter.)
                 let labelled = words.contains { $0.x1 > cb.x1 + 4 && $0.x0 < cb.x1 + 40 && abs($0.cy - cb.cy) < max(cb.y1 - cb.y0, $0.h) }
                 guard labelled else { continue }
-                for w in words where w.x0 < cb.x1 - 1 && w.x1 > cb.x1 + 4 && abs(w.cy - cb.cy) < max(cb.y1 - cb.y0, w.h) {
+                // Only a word level with the box (half its height overlapping): a title on the line
+                // above a "☐ Individual" box is not its label, and lost its "I" as a "tick".
+                for w in words where w.x0 < cb.x1 - 1 && w.x1 > cb.x1 + 4 && abs(w.cy - cb.cy) < max(cb.y1 - cb.y0, w.h)
+                    && min(w.y1, cb.y1) - max(w.y0, cb.y0) > 0.5 * min(w.h, cb.y1 - cb.y0) {
                     // Strip the tick that Vision glued onto the label ("√Comprehensive", "VGeneral").
                     let tickish = Set("√✓✔/|\\VvJjIl1")
                     var t = Substring(w.text)
@@ -1056,6 +1059,7 @@ enum WordExportEngine {
             }
             let normalGap = max(0, median(pitches) - lineH)
 
+            var above: Row? = nil
             for r in rows {
                 r.segments = segmentsOf(r).count
                 let mid = (r.x0 + r.x1) / 2
@@ -1063,6 +1067,13 @@ enum WordExportEngine {
                 let lg = r.x0 - L, rg = R - r.x1
                 r.centered = r.segments == 1 && abs(mid - (L + R) / 2) < W * 0.06 && abs(lg - rg) < W * 0.08
                     && lg > W * 0.12 && rg > W * 0.1 && (r.x1 - r.x0) < W * 0.75
+                // ...unless it is the wrapped end of the full line above it, starting where that
+                // line's text starts (an indented list item's last line looks centered on its own).
+                if r.centered, let a = above, !a.centered, !a.words.isEmpty, a.x1 > R - W * 0.13 {
+                    let ax = isMarker(a) && a.items.count > 1 ? a.items[1].x0 : a.x0
+                    if abs(r.x0 - ax) < lineH * 0.5 { r.centered = false }
+                }
+                above = r
             }
 
             var groups: [[Row]] = []
@@ -1072,7 +1083,10 @@ enum WordExportEngine {
                 if k > 0, var g = groups.last {
                     let P = rows[k - 1]
                     let gap = r.y0 - P.y1
-                    let pFull = P.x1 > R - W * 0.13
+                    // The line above is full, or it broke early only because this row's first word
+                    // would not have fitted after it (word wrap, not a paragraph end).
+                    let firstW = r.words.first.map { $0.x1 - $0.x0 } ?? 0
+                    let pFull = P.x1 > R - W * 0.13 || (firstW > 0 && R - P.x1 < firstW + lineH * 0.3)
                     let firstX = g[0].x0
                     let textX = markers[markers.count - 1] && g[0].items.count > 1 ? g[0].items[1].x0 : firstX
                     let cont = !marker && !r.centered && !P.centered && r.segments == 1 && P.segments <= 1
