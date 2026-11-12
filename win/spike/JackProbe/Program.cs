@@ -212,7 +212,8 @@ static class Program
         }
         catch (Exception e)
         {
-            var detail = $"{e.GetType().Name}: {e.Message}";
+            var root = e; while (root.InnerException != null) root = root.InnerException;
+            var detail = root == e ? $"{e.GetType().Name}: {e.Message}" : $"{e.GetType().Name} -> {root.GetType().Name}: {root.Message}";
             Checks.Add(new Check(name, false, required, detail, sw.ElapsedMilliseconds));
             Console.WriteLine($"FAIL {name}: {detail}");
             return false;
@@ -230,7 +231,8 @@ static class Program
         }
         catch (Exception e)
         {
-            var detail = $"{e.GetType().Name}: {e.Message}";
+            var root = e; while (root.InnerException != null) root = root.InnerException;
+            var detail = root == e ? $"{e.GetType().Name}: {e.Message}" : $"{e.GetType().Name} -> {root.GetType().Name}: {root.Message}";
             Checks.Add(new Check(name, false, required, detail, sw.ElapsedMilliseconds));
             Console.WriteLine($"FAIL {name}: {detail}");
         }
@@ -359,6 +361,10 @@ static class Pdf
             P.FPDFTextObj_SetTextRenderMode(obj, P.TextRenderInvisible);
             P.FPDFPageObj_GetBounds(obj, out var l, out _, out var r, out _);
             double natural = r - l;
+            // A real space after every word: without it, extractors glue close OCR boxes into one
+            // word ("payableon"). The scale above is measured on the word alone, so glyphs still
+            // line up with the scan.
+            P.FPDFText_SetText(obj, w.Text + " ");
             double sx = natural > 0.01 ? (w.R - w.L) / natural : 1;
             P.FPDFPageObj_Transform(obj, sx, 0, 0, 1, w.L - l * sx, w.B + 0.2 * h);
             P.FPDFPage_InsertObject(page, obj);
