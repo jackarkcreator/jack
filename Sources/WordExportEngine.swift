@@ -234,8 +234,19 @@ enum WordExportEngine {
         // independent reading is the PDF's own text layer when it has a trustworthy one, or a
         // second Vision pass without language correction when it's a scan.
         let textLayer = existing.count > 20 && !isScanPage(page)
-        guard let g = pd.gray else { return pd }
-        if !textLayer { pd.isScan = true; report.scannedPages += 1 }
+        guard var g = pd.gray else { return pd }
+        if !textLayer {
+            pd.isScan = true; report.scannedPages += 1
+            // A scan fed in at an angle: straighten it before anything reads it, or neighbouring
+            // lines drift into each other and their words get woven together. Every word would
+            // still read right, so the two readings could not catch it.
+            let skew = estimateSkew(g)
+            if abs(skew) >= 0.15, let straight = rotated(g, degrees: skew) {
+                g = straight
+                pd.gray = straight
+                report.debug.append(String(format: "p%d deskewed %.2f° (left %.2f°)", index + 1, skew, estimateSkew(straight)))
+            }
+        }
         let first = recognize(g, W: box.width, H: box.height, correction: true)
         var kept: [Line] = []
         for l in first {
@@ -304,6 +315,76 @@ enum WordExportEngine {
             for r in 0..<h { memcpy(dst.baseAddress! + r * w, data + r * bpr, w) }   // row 0 = top of page
         }
         return GrayImage(w: w, h: h, scale: s, px: px, cg: cg)
+    }
+
+    /// The page's tilt in degrees (positive = text lines fall to the right), from a projection
+    /// profile: lines of text make the sharpest row histogram when they are counted along their
+    /// own slope. Returns 0 when there is too little ink or no clear peak (a photo, a blank page).
+    static func estimateSkew(_ g: GrayImage) -> CGFloat {
+        let step = 3
+        var xs: [Float] = [], ys: [Float] = []
+        for r in stride(from: 0, to: g.h, by: step) {
+            let base = r * g.w
+            for c in stride(from: 0, to: g.w, by: step) where g.px[base + c] < 150 {
+                xs.append(Float(c)); ys.append(Float(r))
+            }
+        }
+        guard xs.count > 1500 else { return 0 }
+        // One bin per sampled row. A bin height that is not the sampling step aliases: at exactly
+        // 0° some bins are always empty, which inflates the score there and hides tilts under ~1°.
+        let binH = Float(step)
+        let off = Float(g.w) * 0.08                          // room for a 4° slope
+        let nb = Int((Float(g.h) + 2 * off) / binH) + 2
+        var bins = [Int32](repeating: 0, count: nb)
+        func score(_ deg: Float) -> Double {
+            let t = tanf(deg * .pi / 180)
+            for i in bins.indices { bins[i] = 0 }
+            for i in xs.indices {
+                let b = Int((ys[i] - xs[i] * t + off) / binH)
+                if b >= 0 && b < nb { bins[b] += 1 }
+            }
+            var s = 0.0
+            for v in bins { s += Double(v) * Double(v) }
+            return s
+        }
+        let flat = score(0)
+        var best: Float = 0, bestScore = flat
+        for k in -40...40 where k != 0 {
+            let d = Float(k) * 0.1, sc = score(d)
+            if sc > bestScore { bestScore = sc; best = d }
+        }
+        var fine = best
+        for k in -9...9 where k != 0 {
+            let d = best + Float(k) * 0.01, sc = score(d)
+            if sc > bestScore { bestScore = sc; fine = d }
+        }
+        if ProcessInfo.processInfo.environment["JACK_WORD_DEBUG_SKEW"] != nil {
+            print(String(format: "skew: points %d best %.2f° ratio %.4f", xs.count, fine, bestScore / flat))
+        }
+        guard bestScore > flat * 1.03 else { return 0 }
+        return CGFloat(fine)
+    }
+
+    /// `g` turned by `degrees` (counter-clockwise as seen) about its centre, on white.
+    static func rotated(_ g: GrayImage, degrees: CGFloat) -> GrayImage? {
+        let w = g.w, h = g.h
+        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue)
+        else { return nil }
+        ctx.setFillColor(gray: 1, alpha: 1)
+        ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+        ctx.interpolationQuality = .high
+        ctx.translateBy(x: CGFloat(w) / 2, y: CGFloat(h) / 2)
+        ctx.rotate(by: degrees * .pi / 180)
+        ctx.translateBy(x: -CGFloat(w) / 2, y: -CGFloat(h) / 2)
+        ctx.draw(g.cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+        guard let cg = ctx.makeImage(), let data = ctx.data else { return nil }
+        let bpr = ctx.bytesPerRow
+        var px = [UInt8](repeating: 255, count: w * h)
+        px.withUnsafeMutableBytes { dst in
+            for r in 0..<h { memcpy(dst.baseAddress! + r * w, data + r * bpr, w) }   // row 0 = top
+        }
+        return GrayImage(w: w, h: h, scale: g.scale, px: px, cg: cg)
     }
 
     static func recognize(_ g: GrayImage, W: CGFloat, H: CGFloat, correction: Bool) -> [Line] {
@@ -465,6 +546,25 @@ enum WordExportEngine {
         // Checkboxes first, so a box OCR'd as a letter can be dropped.
         if p.isScan || true {
             for cb in findSquares(g) where cb.y0 > floorY {
+                // A square made of a word's own lettering is a letter, not a box: the bowl of a bold
+                // "o", "a" or "P" in a heading draws a closed outline, and strokes of two lines of
+                // tight text can close one too. Either the word starts well before the square, or the
+                // square is much shorter or much taller than the word it sits in (a real box is about
+                // as tall as its label, even when Vision glues the tick onto the label).
+                let bw = cb.x1 - cb.x0, bh = cb.y1 - cb.y0
+                let inLettering = words.contains { w in
+                    w.text.count > 2 && w.x0 < cb.x1 - bw * 0.5 && w.x1 > cb.x1 + 1
+                        && min(w.y1, cb.y1) - max(w.y0, cb.y0) > min(bh, w.h) * 0.5
+                        && (w.x0 < cb.x0 - max(2, bw * 0.3) || bh < w.h * 0.6 || bh > w.h * 1.6)
+                }
+                if inLettering { continue }
+                // A real box sits on light paper. Light text on a dark band (a cover banner) turns
+                // the gaps between letters into "outlines": the ring around them is mostly ink.
+                let outer = CGRect(x: cb.x0 - 3, y: cb.y0 - 3, width: bw + 6, height: bh + 6)
+                let outerArea = outer.width * outer.height, boxArea = bw * bh
+                let ringInk = (inkFraction(g, outer) * Double(outerArea) - inkFraction(g, CGRect(x: cb.x0, y: cb.y0, width: bw, height: bh)) * Double(boxArea))
+                    / Double(max(1, outerArea - boxArea))
+                if ringInk > 0.45 { continue }      // measured: real boxes ≤ 0.36, banner gaps mostly 0.45–0.95
                 // A real checkbox has its label right after it; logo shapes and frames don't.
                 // (The label may start INSIDE the box: a tick that overshoots gets read as its first letter.)
                 let labelled = words.contains { $0.x1 > cb.x1 + 4 && $0.x0 < cb.x1 + 40 && abs($0.cy - cb.cy) < max(cb.y1 - cb.y0, $0.h) }
@@ -791,12 +891,19 @@ enum WordExportEngine {
                 // The label's row starts at the first word left of it on the same line.
                 let rowWords = items.filter { $0.kind == .word && abs($0.cy - lab.cy) < lab.h * 0.6 && $0.x1 <= lab.x1 }
                 let rx0 = rowWords.map { $0.x0 }.min() ?? lab.x0
-                let above = items.filter { $0.kind == .word && $0.y1 < lab.y0 - 1 && $0.x1 > rx0 - 10 && $0.x0 < rx0 + 240 }
+                // A scrawl Vision read as a stray word ("n", "~") is part of the signature, not a
+                // line of text above it: it must not cap the search, and it is not copied.
+                let isScrawl: (Item) -> Bool = { w in
+                    w.kind == .word && w.y0 > lab.y0 - 48 && w.y1 < lab.y0 - 1 && w.x1 > rx0 - 10 && w.x0 < rx0 + 240
+                        && (w.text.count <= 2 || looksGarbled(w.text))
+                }
+                let above = items.filter { $0.kind == .word && $0.y1 < lab.y0 - 1 && $0.x1 > rx0 - 10 && $0.x0 < rx0 + 240 && !isScrawl($0) }
                 let top = max((above.map { $0.y1 }.max() ?? lab.y0 - 48) + 1, lab.y0 - 48)
                 let region = CGRect(x: rx0 - 8, y: top, width: 250, height: max(0, lab.y0 - 2 - top))
                 guard region.height > 8 else { continue }
                 let ruleYs = p.rules.map { $0.y }
                 if inkFractionExcludingRules(g, region, ruleYs: ruleYs) > 0.012 {
+                    items.removeAll { isScrawl($0) && $0.y0 >= top - 1 }
                     let note = Item(.note, "Signed on executed original", rx0, rx0 + 150, lab.y0 - 14, lab.y0 - 3)
                     items.append(note)
                     report.signaturePlaceholders += 1
