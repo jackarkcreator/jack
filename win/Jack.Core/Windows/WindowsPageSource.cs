@@ -152,18 +152,27 @@ public sealed class WindowsPageSource : IPageSource
         // Windows OCR gives no confidence. A line's confidence is the mean confidence Tesseract
         // gave the words it read inside that line (handwriting and smudges score low there too).
         if (tl == null) return lines;
+        // A word both engines read the same way is printed text whatever Tesseract's own score says
+        // (measured: unsure Tesseract scores dropped correct words like "Email" next to a checkbox).
         var tw = tl.SelectMany(l => l.Words.Select((w, k) => (w, conf: WordConf(l, k)))).ToList();
+        static string N(string t) => new string(t.Where(char.IsLetterOrDigit).ToArray()).ToLowerInvariant();
         return lines.Select(l =>
         {
-            var inside = tw.Where(t => Inside(t.w, l)).Select(t => t.conf).ToList();
-            float c = inside.Count == 0 ? 0.5f : inside.Average();
-            return l with { Confidence = c };
+            var inside = tw.Where(t => Inside(t.w, l)).ToList();
+            if (inside.Count == 0) return l with { Confidence = 0.5f };
+            var said = new HashSet<string>(inside.Select(t => N(t.w.Text)).Where(t => t.Length > 0));
+            var per = l.Words.Select(w => said.Contains(N(w.Text)) && N(w.Text).Length > 0 ? 1f
+                : inside.Where(t => Overlaps(t.w, w)).Select(t => t.conf).DefaultIfEmpty(0.5f).Average()).ToList();
+            return l with { Confidence = per.Average() };
         }).ToList();
     }
 
     // Tesseract word confidences, kept beside the lines (OcrWord carries no confidence).
     readonly Dictionary<OcrLine, float[]> wordConf = new(ReferenceEqualityComparer.Instance);
     float WordConf(OcrLine l, int k) => wordConf.TryGetValue(l, out var a) && k < a.Length ? a[k] : l.Confidence;
+
+    static bool Overlaps(OcrWord a, OcrWord b) =>
+        Math.Min(a.X1, b.X1) - Math.Max(a.X0, b.X0) > 0 && Math.Min(a.Y1, b.Y1) - Math.Max(a.Y0, b.Y0) > 0;
 
     static bool Inside(OcrWord w, OcrLine l)
     {
@@ -186,27 +195,55 @@ public sealed class WindowsPageSource : IPageSource
         var result = ocr.RecognizeAsync(bmp).AsTask().GetAwaiter().GetResult();
         double sx = g.Scale * bw / g.W, sy = g.Scale * bh / g.H;     // pixels of the OCR'd bitmap per point
         var lines = new List<OcrLine>();
+        var rawForDump = new List<List<OcrWord>>();
         foreach (var l in result.Lines)
         {
-            var words = l.Words.Select(w => new OcrWord(w.Text,
+            var raw = l.Words.Select(w => new OcrWord(w.Text,
                 w.BoundingRect.X / sx, (w.BoundingRect.X + w.BoundingRect.Width) / sx,
                 w.BoundingRect.Y / sy, (w.BoundingRect.Y + w.BoundingRect.Height) / sy)).ToList();
-            if (words.Count == 0) continue;
-            lines.Add(new OcrLine(l.Text, words.Min(w => w.X0), words.Max(w => w.X1), words.Min(w => w.Y0), words.Max(w => w.Y1), 1.0f, words));
+            if (raw.Count == 0) continue;
+            rawForDump.Add(raw);
+            var words = VisionLike(raw);
+            lines.Add(new OcrLine(string.Join(" ", words.Select(w => w.Text)), words.Min(w => w.X0), words.Max(w => w.X1),
+                words.Min(w => w.Y0), words.Max(w => w.Y1), 1.0f, words));
         }
         // Calibration aid: JACK_WINOCR_DUMP=<dir> writes Windows OCR's raw lines and word boxes
         // (points, top-left origin) as <stem>-p<N>.json, to compare with the Mac's Vision dump.
         if (Environment.GetEnvironmentVariable("JACK_WINOCR_DUMP") is { Length: > 0 } dumpDir)
         {
             Directory.CreateDirectory(dumpDir);
-            var json = System.Text.Json.JsonSerializer.Serialize(lines.Select(l => new
+            var json = System.Text.Json.JsonSerializer.Serialize(rawForDump.Select(ws => new
             {
-                text = l.Text, x0 = l.X0, x1 = l.X1, y0 = l.Y0, y1 = l.Y1,
-                words = l.Words.Select(w => new { text = w.Text, x0 = w.X0, x1 = w.X1, y0 = w.Y0, y1 = w.Y1 })
+                text = string.Join(" ", ws.Select(w => w.Text)), x0 = ws.Min(w => w.X0), x1 = ws.Max(w => w.X1),
+                y0 = ws.Min(w => w.Y0), y1 = ws.Max(w => w.Y1),
+                words = ws.Select(w => new { text = w.Text, x0 = w.X0, x1 = w.X1, y0 = w.Y0, y1 = w.Y1 })
             }));
             File.WriteAllText(Path.Combine(dumpDir, $"{stem}-p{index + 1}.json"), json);
         }
         return lines;
+    }
+
+    /// Windows OCR boxes each word tightly around its own ink and splits a number or a label at
+    /// punctuation ("$1" ",250.00,"). The engine was built on Vision, which gives every word of a
+    /// line the line's own box and keeps "$1,250.00," whole. Measured on the harness corpus
+    /// (441 lines matched against the Mac's Vision dump): Vision's line top = the ink top (median
+    /// offset 0.000), its bottom = ink bottom + 0.164 x ink height; every split piece starts with
+    /// punctuation, while gap size alone overlaps real word gaps (pieces 0.17-0.22 h, words from 0.10 h).
+    internal static List<OcrWord> VisionLike(List<OcrWord> raw)
+    {
+        double top = raw.Min(w => w.Y0), ink = raw.Max(w => w.Y1) - top;
+        double bottom = top + ink * 1.164;
+        var merged = new List<OcrWord>();
+        foreach (var w in raw)
+        {
+            if (merged.Count > 0 && w.Text.Length > 0 && ",.:;)%".Contains(w.Text[0]) && w.X0 - merged[^1].X1 < ink * 0.35)
+            {
+                var a = merged[^1];
+                merged[^1] = a with { Text = a.Text + w.Text, X1 = Math.Max(a.X1, w.X1) };
+            }
+            else merged.Add(w);
+        }
+        return merged.Select(w => w with { Y0 = top, Y1 = bottom }).ToList();
     }
 
     static byte[] Downscale(GrayImage g, int bw, int bh)

@@ -74,7 +74,8 @@
         "checked": 0,
         "signatures": 0,
         "letterhead": false,
-        "pageNumbers": false
+        "pageNumbers": false,
+        "baseSize": 11.0
       }
     },
     {
@@ -112,7 +113,8 @@
         "checked": 0,
         "signatures": 0,
         "letterhead": false,
-        "pageNumbers": false
+        "pageNumbers": false,
+        "baseSize": 11.0
       }
     },
     {
@@ -150,7 +152,8 @@
         "checked": 0,
         "signatures": 0,
         "letterhead": false,
-        "pageNumbers": false
+        "pageNumbers": false,
+        "baseSize": 11.0
       }
     },
     {
@@ -188,7 +191,8 @@
         "checked": 0,
         "signatures": 0,
         "letterhead": true,
-        "pageNumbers": true
+        "pageNumbers": true,
+        "baseSize": 10.0
       }
     },
     {
@@ -226,7 +230,8 @@
         "checked": 0,
         "signatures": 0,
         "letterhead": true,
-        "pageNumbers": true
+        "pageNumbers": true,
+        "baseSize": 11.0
       }
     },
     {
@@ -264,7 +269,8 @@
         "checked": 0,
         "signatures": 0,
         "letterhead": false,
-        "pageNumbers": false
+        "pageNumbers": false,
+        "baseSize": 11.0
       }
     },
     {
@@ -304,7 +310,8 @@
         "checked": 0,
         "signatures": 0,
         "letterhead": false,
-        "pageNumbers": false
+        "pageNumbers": false,
+        "baseSize": 11.0
       }
     },
     {
@@ -346,7 +353,8 @@
         "checked": 3,
         "signatures": 1,
         "letterhead": false,
-        "pageNumbers": false
+        "pageNumbers": false,
+        "baseSize": 11.0
       }
     },
     {
@@ -384,7 +392,8 @@
         "checked": 3,
         "signatures": 1,
         "letterhead": false,
-        "pageNumbers": false
+        "pageNumbers": false,
+        "baseSize": 10.0
       }
     },
     {
@@ -422,7 +431,8 @@
         "checked": 3,
         "signatures": 1,
         "letterhead": false,
-        "pageNumbers": false
+        "pageNumbers": false,
+        "baseSize": 10.0
       }
     },
     {
@@ -460,7 +470,8 @@
         "checked": 0,
         "signatures": 2,
         "letterhead": false,
-        "pageNumbers": false
+        "pageNumbers": false,
+        "baseSize": 10.0
       }
     },
     {
@@ -498,7 +509,8 @@
         "checked": 0,
         "signatures": 2,
         "letterhead": false,
-        "pageNumbers": false
+        "pageNumbers": false,
+        "baseSize": 11.0
       }
     },
     {
@@ -536,7 +548,8 @@
         "checked": 0,
         "signatures": 2,
         "letterhead": false,
-        "pageNumbers": false
+        "pageNumbers": false,
+        "baseSize": 11.0
       }
     },
     {
@@ -578,7 +591,8 @@
         "checked": 0,
         "signatures": 0,
         "letterhead": false,
-        "pageNumbers": false
+        "pageNumbers": false,
+        "baseSize": 8.0
       }
     },
     {
@@ -616,7 +630,8 @@
         "checked": 0,
         "signatures": 0,
         "letterhead": false,
-        "pageNumbers": false
+        "pageNumbers": false,
+        "baseSize": 8.0
       }
     },
     {
@@ -654,7 +669,8 @@
         "checked": 0,
         "signatures": 0,
         "letterhead": false,
-        "pageNumbers": false
+        "pageNumbers": false,
+        "baseSize": 10.0
       }
     },
     {
@@ -692,7 +708,8 @@
         "checked": 0,
         "signatures": 0,
         "letterhead": false,
-        "pageNumbers": false
+        "pageNumbers": false,
+        "baseSize": 11.0
       }
     },
     {

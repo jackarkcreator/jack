@@ -25,6 +25,7 @@ Metrics, per case:
   misplaced  real words in the wrong order (merged lines, crossed columns); reading twice cannot catch these
   false_flag share of all .docx words highlighted although they are right
   features   pages, checkboxes (and ticked), signature placeholders, letterhead, page-number footer
+  baseSize   body text size in points; the gate fails if it differs from the baseline by more than 0.5 pt
 """
 import argparse
 import json
@@ -81,6 +82,7 @@ def read_docx(path):
         names = z.namelist()
         doc = ET.fromstring(z.read("word/document.xml"))
         footers = [z.read(n).decode("utf-8", "replace") for n in names if re.match(r"word/footer\d*\.xml$", n)]
+        styles = z.read("word/styles.xml").decode("utf-8", "replace") if "word/styles.xml" in names else ""
         headers = [z.read(n).decode("utf-8", "replace") for n in names if re.match(r"word/header\d*\.xml$", n)]
     body = doc.find(W + "body")
     words, flags, signatures = [], [], 0
@@ -122,7 +124,14 @@ def read_docx(path):
         "signatures": signatures,
         "letterhead": any("<w:drawing" in h or "<pic:" in h for h in headers),
         "pageNumbers": any("NUMPAGES" in f for f in footers),
+        "baseSize": base_size(styles),
     }
+
+
+def base_size(styles):
+    """Body text size in points: the document default run size (half-points in w:sz)."""
+    m = re.search(r"<w:docDefaults>.*?<w:sz w:val=\"(\d+)\"", styles, re.S)
+    return int(m.group(1)) / 2 if m else None
 
 
 def sidecar(results, stem):
@@ -191,7 +200,7 @@ def score_manifest(manifest_path, results):
                         "letterhead": got["letterhead"] == exp["letterhead"],
                         "pageNumbers": got["pageNumbers"] == exp["pageNumbers"],
                     }
-                    case["found"] = {k: got[k] for k in ("pages", "checkboxes", "checked", "signatures", "letterhead", "pageNumbers")}
+                    case["found"] = {k: got[k] for k in ("pages", "checkboxes", "checked", "signatures", "letterhead", "pageNumbers", "baseSize")}
             cases.append(case)
     return cases
 
@@ -259,6 +268,10 @@ def gate(cases, tot, baseline, tol):
         for k, ok in c.get("features", {}).items():
             if b.get("features", {}).get(k) and not ok:
                 problems.append(f"{c['case']}: lost feature '{k}'")
+        # Body text size must match the reference engine's (a wrong size reflows the whole document).
+        cs, bs = (c.get("found") or {}).get("baseSize"), (b.get("found") or {}).get("baseSize")
+        if cs is not None and bs is not None and abs(cs - bs) > 0.5:
+            problems.append(f"{c['case']}: body text {cs}pt vs baseline {bs}pt")
     for kind, t in tot.items():
         b = baseline["totals"].get(kind)
         if not b or t["recall"] is None or b["recall"] is None:
