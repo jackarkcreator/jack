@@ -65,7 +65,8 @@ final class DropShelf {
             }
         }
         // Mouse released anywhere (including Esc-cancelled drags): the show is over.
-        if panel != nil, NSEvent.pressedMouseButtons == 0 { hide() }
+        // (Only while shown: hiding an already-hidden panel 5x a second forever was log spam.)
+        if panel?.isVisible == true, NSEvent.pressedMouseButtons == 0 { hide() }
     }
 
     // MARK: What a drop will do — the label is the contract (mock variants, 1:1)

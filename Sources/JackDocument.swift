@@ -178,6 +178,13 @@ final class JackDocument: NSDocument, PDFDocumentDelegate {
         addWindowController(wc)
     }
 
+    /// The window showing this document. Use this, not `windowControllers`: the controller's
+    /// init sets `document` itself, so addWindowController treats it as already attached and
+    /// never lists it — `windowControllers` has been empty since v2.0 (proven 2026-11-11).
+    var jackWindowController: DocumentWindowController? {
+        AppDelegate.documents.first { $0.document === self }
+    }
+
     // MARK: - Save routing (v2.5)
 
     // ⌘S on a PDF Jack did not produce saves a COPY the first time, with the panel pre-filled

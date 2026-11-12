@@ -74,8 +74,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     static func updateActivationPolicy() {
         let openDocs = documents.count + organizers.count + batchers.count
         if openDocs > 0 && NSApp.activationPolicy() != .regular {
+            let wasActive = NSApp.isActive
             NSApp.setActivationPolicy(.regular)
+            MenuProbe.log("policy -> regular (wasActive=\(wasActive))")
+            if wasActive { reactivateAsRegular() } else { NSApp.activate(ignoringOtherApps: true) }
+        }
+    }
+
+    // 🧨 A file opened into the RUNNING menu-bar Jack (double-click, Finder item, drop) makes
+    // macOS bring it front while it is still .accessory. LaunchServices records that front
+    // process as a UI element (log: "SETFRONT: pid=… foreground=0"), and switching to .regular
+    // afterwards does not update it: Jack's menu bar is drawn but takes no clicks. Only a fresh
+    // activation as .regular registers it as a real foreground app (foreground=1).
+    private static func reactivateAsRegular() {
+        // Hand activation to the Dock for an instant, then take it back as a regular app.
+        // Measured on macOS 27: plain activate and deactivate+activate both stay foreground=0.
+        let key = NSApp.keyWindow
+        NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first?.activate(options: [])
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
             NSApp.activate(ignoringOtherApps: true)
+            key?.makeKeyAndOrderFront(nil)
+            MenuProbe.log("reactivated as regular")
         }
     }
 
@@ -128,6 +147,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        MenuProbe.install()
         // v2.5: autosave-in-place is off, so a crash would otherwise lose the session's edits.
         // Autosave-elsewhere writes a scratch copy under ~/Library/Autosave Information and
         // NEVER the user's original; macOS offers it back on the next launch.
@@ -578,13 +598,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 return
             }
             NSApp.activate(ignoringOtherApps: true)
-            if markup, let wc = (doc as? JackDocument)?.windowControllers.first as? DocumentWindowController {
+            if markup, let wc = (doc as? JackDocument)?.jackWindowController {
                 wc.openInMarkup()
             }
             if word {
                 // Let the window finish appearing before the sheet attaches to it.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                    if let wc = (doc as? JackDocument)?.windowControllers.first as? DocumentWindowController {
+                    let wc = (doc as? JackDocument)?.jackWindowController
+                    MenuProbe.log("word: sheet route wc=\(wc != nil)")
+                    if let wc {
                         wc.window?.makeKeyAndOrderFront(nil)
                         wc.saveAsWord(nil)
                     }
