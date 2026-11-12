@@ -221,16 +221,27 @@ public sealed class WindowsPageSource : IPageSource
         foreach (var line in lines)
         {
             var outWords = new List<OcrWord>();
-            foreach (var w in line.Words)
+            // Each layer word in this line's band goes to the OCR word it overlaps most horizontally
+            // (a layer "7:00" is wider than an OCR "7", so its centre can fall outside that box).
+            var owner = new Dictionary<int, int>();
+            for (int i = 0; i < layer.Count; i++)
             {
-                ocrWords++;
-                var under = new List<int>();
-                for (int i = 0; i < layer.Count; i++)
+                if (used[i]) continue;
+                var (_, cy) = C(layer[i]);
+                if (cy < line.Y0 || cy > line.Y1) continue;
+                int best = -1; double bestOv = 0;
+                for (int k = 0; k < line.Words.Count; k++)
                 {
-                    if (used[i]) continue;
-                    var (cx, cy) = C(layer[i]);
-                    if (cx >= w.X0 - 1 && cx <= w.X1 + 1 && cy >= line.Y0 && cy <= line.Y1) under.Add(i);
+                    double ov = Math.Min(layer[i].X1, line.Words[k].X1) - Math.Max(layer[i].X0, line.Words[k].X0);
+                    if (ov > bestOv) { bestOv = ov; best = k; }
                 }
+                if (best >= 0) owner[i] = best;
+            }
+            for (int k = 0; k < line.Words.Count; k++)
+            {
+                var w = line.Words[k];
+                ocrWords++;
+                var under = owner.Where(o => o.Value == k).Select(o => o.Key).OrderBy(i => layer[i].X0).ToList();
                 string got = Key(w.Text), say = Key(string.Concat(under.Select(i => layer[i].Text)));
                 if (under.Count > 0 && got == say) exact++;
                 bool plausible = under.Count > 0 && say.Length > 0 &&
@@ -270,16 +281,33 @@ public sealed class WindowsPageSource : IPageSource
 
     /// Scans: a line Tesseract reads confidently where Windows OCR read nothing at all (Windows OCR
     /// skips short isolated labels) is added, with Tesseract's own confidence.
-    internal static List<OcrLine> FillFromTesseract(List<OcrLine> lines, List<OcrLine> tess)
+    List<OcrLine> FillFromTesseract(List<OcrLine> lines, List<OcrLine> tess)
     {
+        // Word by word: Tesseract often reads a label and its value as one line ("RE: Parking lot
+        // resurfacing") where Windows OCR read only the value. Runs of confident Tesseract words
+        // (>= 0.85) with no Windows word under them become lines of their own.
         var result = new List<OcrLine>(lines);
         foreach (var t in tess)
         {
-            if (t.Confidence < 0.85f || Key(t.Text).Length < 2) continue;
-            if (t.Words.Any(tw => lines.Any(l => l.Words.Any(w => Overlaps(tw, w))))) continue;
-            var words = VisionLike(t.Words.ToList());
-            result.Add(new OcrLine(string.Join(" ", words.Select(w => w.Text)), words.Min(w => w.X0), words.Max(w => w.X1),
-                words.Min(w => w.Y0), words.Max(w => w.Y1), t.Confidence, words));
+            var run = new List<(OcrWord W, float C)>();
+            void Close()
+            {
+                if (run.Count > 0 && Key(string.Concat(run.Select(r => r.W.Text))).Length >= 2)
+                {
+                    var words = VisionLike(run.Select(r => r.W).ToList());
+                    result.Add(new OcrLine(string.Join(" ", words.Select(w => w.Text)), words.Min(w => w.X0), words.Max(w => w.X1),
+                        words.Min(w => w.Y0), words.Max(w => w.Y1), run.Average(r => r.C), words));
+                }
+                run.Clear();
+            }
+            for (int k = 0; k < t.Words.Count; k++)
+            {
+                var tw = t.Words[k];
+                float c = WordConf(t, k);
+                bool free = !lines.Any(l => l.Words.Any(w => Overlaps(tw, w)));
+                if (free && c >= 0.85f && Key(tw.Text).Length > 0) run.Add((tw, c)); else Close();
+            }
+            Close();
         }
         return result;
     }

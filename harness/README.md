@@ -25,7 +25,8 @@ python3 harness/score.py --manifest harness/corpus/manifest.json --results <its 
 The exit code is 1 if any of these happens:
 - a refusal differs from the Mac's
 - recall drops more than 1 point on any file or kind
-- honesty drops more than 1 point on any kind
+- a kind has more than 2 misread words left unhighlighted beyond the Mac's count
+- body text size differs from the Mac's by more than 0.5 pt
 - a layout feature the Mac got right is lost
 
 ## Replay: the Windows engine on the Mac's own inputs

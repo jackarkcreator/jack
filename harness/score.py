@@ -253,7 +253,8 @@ def totals(cases):
 
 def gate(cases, tot, baseline, tol):
     """Phase 1 exit criteria against a baseline run: same refusals per case, recall within `tol`
-    points per case and per kind, honesty (caught) not lower per kind, no feature lost."""
+    points per case and per kind, at most 2 more unflagged misreads per kind, no feature lost,
+    body text size within 0.5 pt."""
     problems = []
     base_cases = {c["case"]: c for c in baseline["cases"]}
     for c in cases:
@@ -278,8 +279,13 @@ def gate(cases, tot, baseline, tol):
             continue
         if t["recall"] < b["recall"] - tol / 100:
             problems.append(f"{kind}: mean recall {t['recall']:.1%} vs baseline {b['recall']:.1%}")
-        if t["caught"] < b["caught"] - tol / 100:
-            problems.append(f"{kind}: caught {t['caught']:.1%} of misread words vs baseline {b['caught']:.1%}")
+        # Honesty is counted, not rated: with 0-2 misreads in a kind a catch RATE is noise (one
+        # unflagged misread out of ~5,000 words reads as "0% vs 100%"). A candidate may leave at
+        # most 2 more unflagged misreads per kind than the baseline left.
+        t_un = t["misread_words"] - round(t["caught"] * t["misread_words"])
+        b_un = b["misread_words"] - round(b["caught"] * b["misread_words"])
+        if t_un > b_un + 2:
+            problems.append(f"{kind}: {t_un} misread words not highlighted vs baseline {b_un}")
     return problems
 
 
