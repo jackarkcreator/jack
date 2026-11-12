@@ -1,0 +1,83 @@
+name: Windows Save as Word gate
+
+# Jack for Windows Phase 1: builds the C# Save as Word engine, runs it with real Windows OCR and
+# Tesseract over the public harness corpus, and gates it against the notarized Mac baseline
+# (harness/baseline-mac.json): same refusals, recall within 1 point, honesty not lower, no lost
+# layout feature. Never publishes or signs anything.
+
+on:
+  push:
+    branches: [win-phase1]
+    paths: ['win/Jack.Core/**', 'win/Jack.Cli/**', 'harness/**', '.github/workflows/win-phase1.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PDFIUM_TAG: chromium/8152
+  PDFIUM_SHA_X64: cee2b0e9990bc67c0721774932961b9dbf2766046c10eec925acd4cfba6fdfe3
+  TESSDATA_COMMIT: 87416418657359cb625c412a48b6e1d6d41c29bd
+  TESSDATA_SHA: 7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2
+
+jobs:
+  gate:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Publish Jack CLI (win-x64)
+        run: dotnet publish win/Jack.Cli/Jack.Cli.csproj -c Release -r win-x64 --self-contained true -o jack
+
+      - name: Fetch PDFium (pinned tag, SHA-256 checked)
+        shell: pwsh
+        run: |
+          Invoke-WebRequest "https://github.com/bblanchon/pdfium-binaries/releases/download/$env:PDFIUM_TAG/pdfium-win-x64.tgz" -OutFile pdfium.tgz
+          $got = (Get-FileHash pdfium.tgz -Algorithm SHA256).Hash.ToLower()
+          if ($got -ne $env:PDFIUM_SHA_X64) { throw "PDFium hash mismatch: $got" }
+          New-Item -ItemType Directory pdfium | Out-Null
+          tar -xzf pdfium.tgz -C pdfium
+          Copy-Item pdfium/bin/pdfium.dll jack/
+
+      - name: Fetch Tesseract English model (pinned commit, SHA-256 checked)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory tessdata | Out-Null
+          Invoke-WebRequest "https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/$env:TESSDATA_COMMIT/eng.traineddata" -OutFile tessdata/eng.traineddata
+          $got = (Get-FileHash tessdata/eng.traineddata -Algorithm SHA256).Hash.ToLower()
+          if ($got -ne $env:TESSDATA_SHA) { throw "tessdata hash mismatch: $got" }
+
+      - name: Run the engine over the corpus
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path jack/Jack.exe).Path
+          $td = (Resolve-Path tessdata).Path
+          # Runner paths have no spaces; run_engine.py splits non-POSIX on Windows, which would keep quotes.
+          python harness/run_engine.py --cmd "$exe word {in} {out} --tessdata $td" --pdfs harness/corpus --out results
+
+      - name: Score and gate against the Mac baseline
+        id: gate
+        shell: pwsh
+        run: |
+          python harness/score.py --manifest harness/corpus/manifest.json --results results `
+            --engine "Jack for Windows (CI)" --baseline harness/baseline-mac.json `
+            --json results/scores.json --summary results/summary.md
+          $code = $LASTEXITCODE
+          Get-Content results/summary.md >> $env:GITHUB_STEP_SUMMARY
+          exit $code
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: win-word-results
+          path: results/
+          if-no-files-found: warn
