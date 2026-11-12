@@ -12,6 +12,7 @@
 //   • Tables and multi-column pages are REFUSED with a reason rather than mangled.
 //   • Before the file is kept it is reopened and every written word must read back in order.
 import AppKit
+import ImageIO
 import PDFKit
 import Vision
 
@@ -152,6 +153,7 @@ enum WordExportEngine {
         var report = Report()
         report.pages = doc.pageCount
         guard doc.pageCount > 0 else { throw ExportError.noText }
+        WordDump.begin(pageCount: doc.pageCount)
 
         // 1. Read every page.
         var pages: [PageData] = []
@@ -235,19 +237,23 @@ enum WordExportEngine {
         // second Vision pass without language correction when it's a scan.
         let textLayer = existing.count > 20 && !isScanPage(page)
         guard var g = pd.gray else { return pd }
+        let dump = WordDump.dir == nil ? nil : WordDump.Page(index: index, page: page, box: box, rendered: g)   // debug only
         if !textLayer {
             pd.isScan = true; report.scannedPages += 1
             // A scan fed in at an angle: straighten it before anything reads it, or neighbouring
             // lines drift into each other and their words get woven together. Every word would
             // still read right, so the two readings could not catch it.
             let skew = estimateSkew(g)
+            dump?.skew = skew
             if abs(skew) >= 0.15, let straight = rotated(g, degrees: skew) {
                 g = straight
                 pd.gray = straight
+                dump?.deskewed = straight
                 report.debug.append(String(format: "p%d deskewed %.2f° (left %.2f°)", index + 1, skew, estimateSkew(straight)))
             }
         }
         let first = recognize(g, W: box.width, H: box.height, correction: true)
+        dump?.first = WordDump.lastRecognized
         var kept: [Line] = []
         for l in first {
             // Handwriting and smudges come back at low confidence: never copy them.
@@ -258,6 +264,8 @@ enum WordExportEngine {
         let second: [String] = textLayer
             ? existing.components(separatedBy: .whitespacesAndNewlines).map { norm($0) }.filter { !$0.isEmpty }
             : recognize(g, W: box.width, H: box.height, correction: false).filter { $0.confidence >= 0.35 }.flatMap { $0.items }.map { norm($0.text) }
+        if !textLayer { dump?.second = WordDump.lastRecognized }
+        dump?.write()
         let agreed = lcsMatches(a.map { norm($0.text) }, second)
         for (i, w) in a.enumerated() {
             let n = norm(w.text)
@@ -420,8 +428,10 @@ enum WordExportEngine {
             }
             lines.append(Line(text: text, x0: lx0, x1: lx1, y0: ly0, y1: ly1, confidence: cand.confidence, items: items))
         }
+        let unsorted = WordDump.dir == nil ? [] : lines   // debug only
         // Reading order: top to bottom, then left to right.
         lines.sort { abs($0.y0 - $1.y0) > min($0.y1 - $0.y0, $1.y1 - $1.y0) * 0.5 ? $0.y0 < $1.y0 : $0.x0 < $1.x0 }
+        if WordDump.dir != nil { WordDump.lastRecognized = WordDump.recognized(unsorted, sorted: lines) }
         return lines
     }
 
@@ -523,6 +533,7 @@ enum WordExportEngine {
         guard let cg = ctx.makeImage() else { return nil }
         // Paper is never pure white in a scan — lift near-white to white so the header sits clean.
         let rep = NSBitmapImageRep(cgImage: cg)
+        if WordDump.dir != nil { WordDump.letterheadRaw(cg, rep: rep, page: lh.page, rect: r, w: w, h: h) }   // debug only
         if let p = rep.bitmapData, rep.bitsPerPixel == 32 {
             let n = rep.pixelsWide * rep.pixelsHigh
             for i in 0..<n {
@@ -532,6 +543,7 @@ enum WordExportEngine {
             }
         }
         guard let png = rep.representation(using: .png, properties: [:]) else { return nil }
+        if WordDump.dir != nil { WordDump.letterheadFinal(png, rep: rep) }   // debug only
         return (png, r.size)
     }
 
@@ -1296,5 +1308,116 @@ enum WordExportEngine {
         print(log)
         try? log.write(toFile: "/tmp/jack-word-selftest.log", atomically: true, encoding: .utf8)
         exit(ok ? 0 : 1)
+    }
+}
+
+// MARK: - Debug dump (JACK_WORD_DUMP=<dir>)
+
+/// What the engine read, page by page, so another engine (the Windows port) can replay exactly
+/// the same inputs without OCR: page size, scan test, text layer, the gray image before and after
+/// deskew, both Vision readings (in Vision's own order, plus the order the engine sorted them
+/// into) and the letterhead crop. Debug only: nothing here feeds back into the conversion.
+/// Numbers are written with Swift's shortest round-trip description, so they parse back exactly.
+enum WordDump {
+    static let dir: String? = {
+        guard let d = ProcessInfo.processInfo.environment["JACK_WORD_DUMP"], !d.isEmpty else { return nil }
+        return d
+    }()
+    static var lastRecognized = "null"
+
+    static func begin(pageCount: Int) {
+        guard let d = dir else { return }
+        try? FileManager.default.createDirectory(atPath: d, withIntermediateDirectories: true)
+        try? "{\"pageCount\":\(pageCount),\"renderScale\":\(WordExportEngine.renderScale)}\n"
+            .write(toFile: d + "/meta.json", atomically: true, encoding: .utf8)
+    }
+
+    final class Page {
+        let index: Int
+        var json: [String] = []
+        var skew: CGFloat? = nil
+        var deskewed: WordExportEngine.GrayImage? = nil
+        var first = "null", second = "null"
+        init(index: Int, page: PDFPage, box: CGRect, rendered: WordExportEngine.GrayImage) {
+            self.index = index
+            json.append("\"index\":\(index)")
+            json.append("\"width\":\(box.width),\"height\":\(box.height)")
+            json.append("\"pageString\":" + str(page.string ?? ""))
+            json.append("\"isScanPage\":\(WordExportEngine.isScanPage(page))")
+            json.append("\"render\":" + WordDump.gray(rendered, name: "p\(index + 1)-render.png"))
+        }
+        func write() {
+            guard let d = dir else { return }
+            var parts = json
+            parts.append("\"skew\":" + (skew.map { "\($0)" } ?? "null"))
+            parts.append("\"deskewed\":" + (deskewed.map { WordDump.gray($0, name: "p\(index + 1)-deskew.png") } ?? "null"))
+            parts.append("\"first\":" + first)
+            parts.append("\"second\":" + second)
+            try? ("{" + parts.joined(separator: ",\n") + "}\n").write(toFile: d + "/p\(index + 1).json", atomically: true, encoding: .utf8)
+        }
+    }
+
+    static func str(_ s: String) -> String {
+        var o = "\""
+        for u in s.unicodeScalars {
+            switch u {
+            case "\"": o += "\\\""
+            case "\\": o += "\\\\"
+            case "\n": o += "\\n"
+            case "\r": o += "\\r"
+            case "\t": o += "\\t"
+            default:
+                if u.value < 0x20 { o += String(format: "\\u%04x", u.value) } else { o.unicodeScalars.append(u) }
+            }
+        }
+        return o + "\""
+    }
+
+    static func fnv(_ p: UnsafeRawBufferPointer) -> String {
+        var h: UInt64 = 0xcbf29ce484222325
+        for b in p { h = (h ^ UInt64(b)) &* 0x100000001b3 }
+        return String(format: "%016llx", h)
+    }
+
+    static func savePNG(_ cg: CGImage, _ name: String) {
+        guard let d = dir, let dest = CGImageDestinationCreateWithURL(URL(fileURLWithPath: d + "/" + name) as CFURL, "public.png" as CFString, 1, nil) else { return }
+        CGImageDestinationAddImage(dest, cg, nil)
+        CGImageDestinationFinalize(dest)
+    }
+
+    static func gray(_ g: WordExportEngine.GrayImage, name: String) -> String {
+        savePNG(g.cg, name)
+        let h = g.px.withUnsafeBytes { fnv($0) }
+        return "{\"file\":\(str(name)),\"w\":\(g.w),\"h\":\(g.h),\"scale\":\(g.scale),\"fnv\":\"\(h)\"}"
+    }
+
+    static func recognized(_ unsorted: [WordExportEngine.Line], sorted: [WordExportEngine.Line]) -> String {
+        let lines = unsorted.map { l -> String in
+            let items = l.items.map { "{\"text\":\(str($0.text)),\"x0\":\($0.x0),\"x1\":\($0.x1),\"y0\":\($0.y0),\"y1\":\($0.y1)}" }
+            return "{\"text\":\(str(l.text)),\"x0\":\(l.x0),\"x1\":\(l.x1),\"y0\":\(l.y0),\"y1\":\(l.y1),\"confidence\":\(l.confidence),\"items\":[" + items.joined(separator: ",") + "]}"
+        }
+        // Where each sorted line came from, so the port can check its sort reproduces Swift's.
+        let order = sorted.map { s in unsorted.firstIndex { $0.items.first === s.items.first && $0.text == s.text && $0.x0 == s.x0 && $0.y0 == s.y0 } ?? -1 }
+        return "{\"lines\":[\n" + lines.joined(separator: ",\n") + "],\n\"sortedOrder\":[" + order.map { "\($0)" }.joined(separator: ",") + "]}"
+    }
+
+    private static var letterheadJSON: [String] = []
+
+    static func letterheadRaw(_ cg: CGImage, rep: NSBitmapImageRep, page: Int, rect: CGRect, w: Int, h: Int) {
+        savePNG(cg, "letterhead-raw.png")
+        var hash = ""
+        if let p = rep.bitmapData, rep.bitsPerPixel == 32 { hash = fnv(UnsafeRawBufferPointer(start: p, count: rep.pixelsWide * rep.pixelsHigh * 4)) }
+        letterheadJSON = ["\"page\":\(page)", "\"x\":\(rect.origin.x),\"y\":\(rect.origin.y),\"width\":\(rect.size.width),\"height\":\(rect.size.height)",
+                          "\"w\":\(w),\"h\":\(h),\"bitsPerPixel\":\(rep.bitsPerPixel),\"bytesPerRow\":\(rep.bytesPerRow)",
+                          "\"raw\":\"letterhead-raw.png\",\"rawFnv\":\"\(hash)\""]
+    }
+
+    static func letterheadFinal(_ png: Data, rep: NSBitmapImageRep) {
+        guard let d = dir else { return }
+        try? png.write(to: URL(fileURLWithPath: d + "/letterhead.png"))
+        var hash = ""
+        if let p = rep.bitmapData, rep.bitsPerPixel == 32 { hash = fnv(UnsafeRawBufferPointer(start: p, count: rep.pixelsWide * rep.pixelsHigh * 4)) }
+        let parts = letterheadJSON + ["\"png\":\"letterhead.png\",\"liftedFnv\":\"\(hash)\""]
+        try? ("{" + parts.joined(separator: ",\n") + "}\n").write(toFile: d + "/letterhead.json", atomically: true, encoding: .utf8)
     }
 }

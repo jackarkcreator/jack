@@ -7,6 +7,9 @@
   # any command-line engine (the Windows CLI later); {in} and {out} are substituted
   python3 harness/run_engine.py --cmd "Jack.exe word {in} {out}" --pdfs harness/corpus --out out/win
 
+  # Mac, also dumping what the engine read (page images, both OCR readings) for replay
+  python3 harness/run_engine.py --mac JackDev.app --pdfs harness/corpus --out out/mac --dump out/dump
+
 For each <stem>.pdf it writes <stem>.docx (when the engine made one), <stem>.json with
 {"status", "reason", "seconds", "engine"} and <stem>.log with the engine's own output.
 
@@ -52,7 +55,10 @@ def main():
     ap.add_argument("--out", required=True, help="results folder")
     ap.add_argument("--timeout", type=int, default=300)
     ap.add_argument("--only", help="substring filter on file names")
+    ap.add_argument("--dump", help="with --mac: folder for the engine's input dump (JACK_WORD_DUMP), one subfolder per PDF")
     a = ap.parse_args()
+    if a.dump and not a.mac:
+        ap.error("--dump needs --mac")
 
     os.makedirs(a.out, exist_ok=True)
     pdfs = sorted(f for f in os.listdir(a.pdfs) if f.lower().endswith(".pdf") and (not a.only or a.only in f))
@@ -75,6 +81,9 @@ def main():
         try:
             if a.mac:
                 env = dict(os.environ, JACK_WORD_SELFTEST=docx, JACK_WORD_SELFTEST_PDF=src)
+                env.pop("JACK_WORD_DUMP", None)
+                if a.dump:
+                    env["JACK_WORD_DUMP"] = os.path.abspath(os.path.join(a.dump, stem))
                 p = subprocess.run([exe], env=env, capture_output=True, text=True, timeout=a.timeout)
             else:
                 cmd = [part.replace("{in}", src).replace("{out}", docx) for part in shlex.split(a.cmd, posix=os.name != "nt")]

@@ -28,6 +28,21 @@ The exit code is 1 if any of these happens:
 - honesty drops more than 1 point on any kind
 - a layout feature the Mac got right is lost
 
+## Replay: the Windows engine on the Mac's own inputs
+`--dump DIR` (with `--mac`) makes the Mac engine write what it read for every PDF: page size, scan
+test, text layer, the gray page image before and after deskew, both Vision readings in Vision's own
+order, and the letterhead crop (`JACK_WORD_DUMP`, debug only; the .docx is unchanged). The C#
+engine replays that with no OCR and no PDFium, so any difference is a porting bug:
+```bash
+python3 harness/run_engine.py --mac JackDev.app --pdfs harness/corpus --out /tmp/jack-h/mac --dump /tmp/jack-h/dump
+dotnet build win/Jack.Cli -r osx-arm64 -c Release -o /tmp/jack-h/cli
+python3 harness/run_engine.py --cmd "dotnet /tmp/jack-h/cli/Jack.dll word {in} {out} --replay /tmp/jack-h/dump" \
+    --pdfs harness/corpus --out /tmp/jack-h/replay
+python3 harness/score.py --reference /tmp/jack-h/mac --results /tmp/jack-h/replay
+```
+`--own-rotation` deskews with the Windows rotation instead of the Mac's pixels. Each log ends with
+the replay checks (line order against the Mac's, image hashes); any warning means the run diverged.
+
 ## Command-line engine contract
 `--cmd "<exe> word {in} {out}"`:
 - exit **0** and write `{out}`: converted
