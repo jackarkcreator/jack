@@ -44,6 +44,24 @@ python3 harness/score.py --reference /tmp/jack-h/mac --results /tmp/jack-h/repla
 `--own-rotation` deskews with the Windows rotation instead of the Mac's pixels. Each log ends with
 the replay checks (line order against the Mac's, image hashes); any warning means the run diverged.
 
+## Make Searchable (Windows)
+`score_searchable.py` scores the searchable PDF copies. It reads each copy's text layer with
+`Jack text {pdf}` (PDFium: what search and copy see), scores it against the manifest's body
+words in order and order-free, and checks every original is byte-identical afterwards:
+```bash
+python3 harness/score_searchable.py hash --pdfs harness/corpus --out out/originals.json
+python3 harness/run_engine.py --cmd "Jack.exe ocr {in} {out}" --ext .pdf --pdfs harness/corpus --out out/ocr
+python3 harness/score_searchable.py score --manifest harness/corpus/manifest.json --results out/ocr \
+    --text-cmd "Jack.exe text {pdf}" --originals out/originals.json --pdfs harness/corpus \
+    --word-scores out/word/scores.json
+```
+Text PDFs must be refused (every page already has text, nothing is written). Each scan must
+come back searchable, with in-order recall within 1 point of Save as Word's on the same run and
+at least 98% of its words searchable anywhere (tables and columns included).
+
+`Jack ocr` exits 0 when it wrote the copy, 3 when there was nothing to do (`REFUSED:` line), and
+anything else on failure. It never writes over an existing file and never writes the input.
+
 ## Command-line engine contract
 `--cmd "<exe> word {in} {out}"`:
 - exit **0** and write `{out}`: converted

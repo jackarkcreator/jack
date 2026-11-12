@@ -51,6 +51,9 @@ public sealed class WindowsPageSource : IPageSource
 
     public int PageCount => pageCount;
 
+    /// The page's /Rotate in quarter turns (0-3).
+    public int Rotation(int index) => WithPage(index, page => Pdfium.FPDFPage_GetRotation(page));
+
     T WithPage<T>(int index, Func<IntPtr, T> body)
     {
         var page = Pdfium.FPDF_LoadPage(doc, index);
@@ -71,22 +74,7 @@ public sealed class WindowsPageSource : IPageSource
         return new PageInfo(box.W, box.H, TextLayer(page), IsScanPage(page, box.W, box.H));
     });
 
-    static string TextLayer(IntPtr page)
-    {
-        var tp = Pdfium.FPDFText_LoadPage(page);
-        if (tp == IntPtr.Zero) return "";
-        try
-        {
-            int n = Pdfium.FPDFText_CountChars(tp);
-            if (n <= 0) return "";
-            var buf = new ushort[n + 1];
-            int got = Pdfium.FPDFText_GetText(tp, 0, n, buf);
-            var chars = new char[Math.Max(0, got - 1)];
-            for (int i = 0; i < chars.Length; i++) chars[i] = (char)buf[i];
-            return new string(chars);
-        }
-        finally { Pdfium.FPDFText_ClosePage(tp); }
-    }
+    static string TextLayer(IntPtr page) => Pdfium.PageText(page);
 
     /// Mirror of the Mac rule: an image at least 1.4 px per point of page width whose aspect ratio
     /// is the page's (within 0.08) makes the page a scan. The Mac walks the page's XObject

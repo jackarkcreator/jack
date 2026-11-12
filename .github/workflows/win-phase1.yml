@@ -1,9 +1,13 @@
-name: Windows Save as Word gate
+name: Windows Save as Word + Make Searchable gate
 
-# Jack for Windows Phase 1: builds the C# Save as Word engine, runs it with real Windows OCR and
-# Tesseract over the public harness corpus, and gates it against the notarized Mac baseline
-# (harness/baseline-mac.json): same refusals, recall within 1 point, honesty not lower, no lost
-# layout feature. Never publishes or signs anything.
+# Jack for Windows Phase 1: builds the C# engines, runs them with real Windows OCR and Tesseract
+# over the public harness corpus, and gates them:
+#   - Save as Word against the notarized Mac baseline (harness/baseline-mac.json): same refusals,
+#     recall within 1 point, honesty not lower, no lost layout feature;
+#   - Make Searchable against the corpus truth (harness/score_searchable.py): text PDFs left alone,
+#     every scan made searchable, recall within 1 point of Save as Word's, every original
+#     byte-identical afterwards.
+# Never publishes or signs anything.
 
 on:
   push:
@@ -26,6 +30,12 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
+
+      - name: Record the originals (SHA-256)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory results-ocr | Out-Null
+          python harness/score_searchable.py hash --pdfs harness/corpus --out results-ocr/originals.json
 
       - uses: actions/setup-dotnet@v4
         with:
@@ -76,9 +86,69 @@ jobs:
           Get-Content results/summary.md >> $env:GITHUB_STEP_SUMMARY
           exit $code
 
+      - name: Make Searchable over the corpus
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path jack/Jack.exe).Path
+          $td = (Resolve-Path tessdata).Path
+          python harness/run_engine.py --cmd "$exe ocr {in} {out} --tessdata $td" --ext .pdf --pdfs harness/corpus --out results-ocr
+
+      - name: Make Searchable naming and never-overwrite checks
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path jack/Jack.exe).Path
+          $td = (Resolve-Path tessdata).Path
+          $d = Join-Path $env:RUNNER_TEMP 'naming'
+          New-Item -ItemType Directory $d | Out-Null
+          Copy-Item harness/corpus/memo.scan.pdf (Join-Path $d 'memo.pdf')
+          $orig = Join-Path $d 'memo.pdf'
+          $h0 = (Get-FileHash $orig -Algorithm SHA256).Hash
+          function Run([string[]]$a, [int]$want, [string]$what) {
+            $out = & $exe @a 2>&1 | Out-String
+            if ($LASTEXITCODE -ne $want) { Write-Host $out; throw "${what}: exit $LASTEXITCODE, want $want" }
+            Write-Host "ok: $what (exit $want)"
+          }
+          Run @('ocr', $orig, '--tessdata', $td) 0 'default name'
+          if (-not (Test-Path (Join-Path $d 'memo (searchable).pdf'))) { throw 'memo (searchable).pdf not written beside the original' }
+          Run @('ocr', $orig, '--tessdata', $td) 0 'second run picks a new name'
+          if (-not (Test-Path (Join-Path $d 'memo (searchable 2).pdf'))) { throw 'memo (searchable 2).pdf not written' }
+          $first = Join-Path $d 'memo (searchable).pdf'
+          $h1 = (Get-FileHash $first -Algorithm SHA256).Hash
+          Run @('ocr', $orig, $first, '--tessdata', $td) 1 'explicit output that exists is refused'
+          if ((Get-FileHash $first -Algorithm SHA256).Hash -ne $h1) { throw 'existing output was overwritten' }
+          Run @('ocr', $orig, $orig, '--tessdata', $td) 1 'output = input is refused'
+          Run @('ocr', $first, (Join-Path $d 'again.pdf'), '--tessdata', $td) 3 'a searchable copy has nothing left to do'
+          if (Test-Path (Join-Path $d 'again.pdf')) { throw 'refused run left a file' }
+          if ((Get-FileHash $orig -Algorithm SHA256).Hash -ne $h0) { throw 'the original changed' }
+          $left = Get-ChildItem $d -Force | Where-Object { $_.Name -like '*.tmp' }
+          if ($left) { throw "temporary files left: $($left.Name -join ', ')" }
+          Get-ChildItem $d | ForEach-Object { Write-Host "  $($_.Name) $($_.Length) bytes" }
+
+      - name: Score Make Searchable (truth, Save as Word recall, originals unchanged)
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path jack/Jack.exe).Path
+          python harness/score_searchable.py score --manifest harness/corpus/manifest.json --results results-ocr `
+            --text-cmd "$exe text {pdf}" --originals results-ocr/originals.json --pdfs harness/corpus `
+            --word-scores results/scores.json --engine "Jack for Windows (CI)" `
+            --json results-ocr/scores.json --summary results-ocr/summary.md
+          $code = $LASTEXITCODE
+          Get-Content results-ocr/summary.md >> $env:GITHUB_STEP_SUMMARY
+          exit $code
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: win-word-results
           path: results/
+          if-no-files-found: warn
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: win-searchable-results
+          path: results-ocr/
           if-no-files-found: warn

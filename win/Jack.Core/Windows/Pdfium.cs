@@ -11,6 +11,12 @@ internal struct FsMatrix { public float A, B, C, D, E, F; }
 [StructLayout(LayoutKind.Sequential)]
 internal struct FsRectF { public float Left, Top, Right, Bottom; }
 
+[StructLayout(LayoutKind.Sequential)]
+internal struct FileWrite { public int Version; public IntPtr WriteBlock; }
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal delegate int WriteBlockFn(IntPtr self, IntPtr data, uint size);
+
 internal static class Pdfium
 {
     const string D = "pdfium";
@@ -46,8 +52,93 @@ internal static class Pdfium
     [DllImport(D)] public static extern int FPDFBitmap_GetStride(IntPtr bmp);
     [DllImport(D)] public static extern void FPDFBitmap_Destroy(IntPtr bmp);
 
+    [DllImport(D)] public static extern int FPDFPage_GetRotation(IntPtr page);
+
+    // Writing (Make Searchable): invisible text objects on a loaded page, then save a NEW file.
+    [DllImport(D)] public static extern IntPtr FPDFText_LoadStandardFont(IntPtr doc, [MarshalAs(UnmanagedType.LPStr)] string name);
+    [DllImport(D)] public static extern void FPDFFont_Close(IntPtr font);
+    [DllImport(D)] public static extern IntPtr FPDFPageObj_CreateTextObj(IntPtr doc, IntPtr font, float size);
+    [DllImport(D)] public static extern int FPDFText_SetText(IntPtr obj, [MarshalAs(UnmanagedType.LPWStr)] string text);
+    [DllImport(D)] public static extern int FPDFTextObj_SetTextRenderMode(IntPtr obj, int mode);
+    [DllImport(D)] public static extern void FPDFPageObj_Transform(IntPtr obj, double a, double b, double c, double d, double e, double f);
+    [DllImport(D)] public static extern int FPDFPageObj_GetBounds(IntPtr obj, out float left, out float bottom, out float right, out float top);
+    [DllImport(D)] public static extern void FPDFPageObj_Destroy(IntPtr obj);
+    [DllImport(D)] public static extern void FPDFPage_InsertObject(IntPtr page, IntPtr obj);
+    [DllImport(D)] public static extern int FPDFPage_GenerateContent(IntPtr page);
+    [DllImport(D)] public static extern int FPDF_SaveAsCopy(IntPtr doc, ref FileWrite fileWrite, uint flags);
+
+    public const int TextRenderInvisible = 3;
+    public const uint SaveNoIncremental = 2;
     public const int PageObjImage = 3;
     public const int RenderAnnotations = 0x01;
+
+    public static IntPtr Open(string path)
+    {
+        Init();
+        var doc = FPDF_LoadDocument(path, null);
+        if (doc == IntPtr.Zero) throw new InvalidOperationException($"PDFium could not open {Path.GetFileName(path)} (error {FPDF_GetLastError()})");
+        return doc;
+    }
+
+    /// Writes `doc` as a complete new file at `path` (created, never appended to).
+    public static void SaveAsNew(IntPtr doc, string path)
+    {
+        using var fs = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+        Exception? failure = null;
+        WriteBlockFn fn = (_, data, size) =>
+        {
+            try
+            {
+                var buf = new byte[size];
+                Marshal.Copy(data, buf, 0, (int)size);
+                fs.Write(buf, 0, buf.Length);
+                return 1;
+            }
+            catch (Exception e) { failure ??= e; return 0; }
+        };
+        var fw = new FileWrite { Version = 1, WriteBlock = Marshal.GetFunctionPointerForDelegate(fn) };
+        bool ok = FPDF_SaveAsCopy(doc, ref fw, SaveNoIncremental) != 0;
+        GC.KeepAlive(fn);
+        if (failure != null) throw new IOException("writing the PDF failed", failure);
+        if (!ok) throw new InvalidOperationException("PDFium could not save the PDF");
+        fs.Flush(true);
+    }
+
+    /// Every page's text as PDFium extracts it (what a viewer's search and copy see).
+    public static List<string> PageTexts(string path)
+    {
+        var doc = Open(path);
+        try
+        {
+            var pages = new List<string>();
+            int n = FPDF_GetPageCount(doc);
+            for (int i = 0; i < n; i++)
+            {
+                var page = FPDF_LoadPage(doc, i);
+                if (page == IntPtr.Zero) { pages.Add(""); continue; }
+                try { pages.Add(PageText(page)); } finally { FPDF_ClosePage(page); }
+            }
+            return pages;
+        }
+        finally { FPDF_CloseDocument(doc); }
+    }
+
+    public static string PageText(IntPtr page)
+    {
+        var tp = FPDFText_LoadPage(page);
+        if (tp == IntPtr.Zero) return "";
+        try
+        {
+            int n = FPDFText_CountChars(tp);
+            if (n <= 0) return "";
+            var buf = new ushort[n + 1];
+            int got = FPDFText_GetText(tp, 0, n, buf);
+            var chars = new char[Math.Max(0, got - 1)];
+            for (int i = 0; i < chars.Length; i++) chars[i] = (char)buf[i];
+            return new string(chars);
+        }
+        finally { FPDFText_ClosePage(tp); }
+    }
 
     static bool inited;
     public static void Init()

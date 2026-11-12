@@ -172,6 +172,7 @@ public static class WordExportEngine
         public List<Line> Dropped = new();
         public bool IsScan;
         public GrayImage? Gray;
+        public double Deskew;           // degrees the scan was turned before reading (0 = not turned); Make Searchable maps boxes back
         public PageData(int index, double width, double height) { Index = index; Width = width; Height = height; }
     }
 
@@ -291,6 +292,7 @@ public static class WordExportEngine
             {
                 g = straight;
                 pd.Gray = straight;
+                pd.Deskew = skew;
                 report.Debug.Add(F("p{0} deskewed {1:F2}° (left {2:F2}°)", index + 1, skew, EstimateSkew(straight)));
             }
         }

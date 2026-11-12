@@ -10,7 +10,10 @@
   # Mac, also dumping what the engine read (page images, both OCR readings) for replay
   python3 harness/run_engine.py --mac JackDev.app --pdfs harness/corpus --out out/mac --dump out/dump
 
-For each <stem>.pdf it writes <stem>.docx (when the engine made one), <stem>.json with
+  # Make Searchable on Windows: the output is a PDF, scored by score_searchable.py
+  python3 harness/run_engine.py --cmd "Jack.exe ocr {in} {out}" --ext .pdf --pdfs harness/corpus --out out/ocr
+
+For each <stem>.pdf it writes <stem>.docx (or <stem><ext> with --ext; when the engine made one), <stem>.json with
 {"status", "reason", "seconds", "engine"} and <stem>.log with the engine's own output.
 
 Command engines report through their exit code: 0 = made the .docx, 3 = refused (reason on a line
@@ -55,6 +58,7 @@ def main():
     ap.add_argument("--out", required=True, help="results folder")
     ap.add_argument("--timeout", type=int, default=300)
     ap.add_argument("--only", help="substring filter on file names")
+    ap.add_argument("--ext", default=".docx", help="extension of the engine's output file (default .docx)")
     ap.add_argument("--dump", help="with --mac: folder for the engine's input dump (JACK_WORD_DUMP), one subfolder per PDF")
     a = ap.parse_args()
     if a.dump and not a.mac:
@@ -74,7 +78,7 @@ def main():
     for name in pdfs:
         stem = os.path.splitext(name)[0]
         src = os.path.abspath(os.path.join(a.pdfs, name))
-        docx = os.path.abspath(os.path.join(a.out, stem + ".docx"))
+        docx = os.path.abspath(os.path.join(a.out, stem + a.ext))
         if os.path.exists(docx):
             os.remove(docx)
         t0 = time.time()

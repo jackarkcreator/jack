@@ -1,6 +1,12 @@
 // Jack (Windows) command line.
 //   Jack word <in.pdf> <out.docx> [--tessdata DIR] [--replay DIR] [--own-rotation]
-// Exit 0 = wrote the .docx, 3 = refused (a line "REFUSED: <reason>"), anything else = failed.
+//   Jack ocr <in.pdf> [<out.pdf>] [--tessdata DIR]     make a searchable copy; without <out.pdf>
+//                                                      it goes to "<name> (searchable).pdf" beside it
+//   Jack text <in.pdf>                                 print each page's text as PDFium extracts it
+//                                                      (pages separated by a form feed line)
+// Exit 0 = wrote the output, 3 = refused (a line "REFUSED: <reason>"), anything else = failed.
+// For ocr, "refused" means there was nothing to do: every page already has text, or no words
+// were found. Nothing is ever written over an existing file, and the input is never written.
 // --replay DIR plays back a Mac dump (harness/run_engine.py --mac … --dump) instead of reading
 // the PDF: DIR is one PDF's dump folder, or the dump root holding a folder named after the PDF.
 // --own-rotation (replay only) deskews with the Windows rotation instead of the Mac's pixels.
@@ -19,17 +25,23 @@ internal static class Program
         CultureInfo.DefaultThreadCurrentCulture = CultureInfo.InvariantCulture;
         CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
         Console.OutputEncoding = System.Text.Encoding.UTF8;
-        if (args.Length < 3 || args[0] != "word")
-        {
-            Console.Error.WriteLine("usage: Jack word <in.pdf> <out.docx> [--tessdata DIR] [--replay DIR] [--own-rotation]");
-            return 2;
-        }
-        string input = args[1], output = args[2];
         string? Opt(string name)
         {
             int i = Array.IndexOf(args, name);
             return i >= 0 && i + 1 < args.Length ? args[i + 1] : null;
         }
+        if (args.Length >= 2 && args[0] == "ocr")
+            return Ocr(args[1], args.Length >= 3 && !args[2].StartsWith("--") ? args[2] : null, Opt("--tessdata"));
+        if (args.Length == 2 && args[0] == "text")
+            return Text(args[1]);
+        if (args.Length < 3 || args[0] != "word")
+        {
+            Console.Error.WriteLine("usage: Jack word <in.pdf> <out.docx> [--tessdata DIR] [--replay DIR] [--own-rotation]");
+            Console.Error.WriteLine("       Jack ocr <in.pdf> [<out.pdf>] [--tessdata DIR]");
+            Console.Error.WriteLine("       Jack text <in.pdf>");
+            return 2;
+        }
+        string input = args[1], output = args[2];
         var tessdata = Opt("--tessdata");
         var replay = Opt("--replay");
         bool ownRotation = args.Contains("--own-rotation");
@@ -87,6 +99,60 @@ internal static class Program
         }
         Console.Write(log.ToString());
         return code;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    static int Ocr(string input, string? output, string? tessdata)
+    {
+        output ??= Jack.Core.Searchable.SearchableEngine.OutputPath(input);
+        var log = new System.Text.StringBuilder();
+        log.AppendLine($"Jack Make Searchable {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+        log.AppendLine($"source: {input}");
+        int code;
+        var sw = Stopwatch.StartNew();
+        try
+        {
+            var r = Jack.Core.Searchable.SearchableEngine.Make(input, output, tessdata);
+            log.AppendLine($"OK in {sw.Elapsed.TotalSeconds:F1}s → {output}");
+            log.AppendLine(r.Summary);
+            foreach (var (p, why) in r.LeftAlone) log.AppendLine($"p{p + 1} left as it was: {why}");
+            foreach (var d in r.Debug) log.AppendLine(d);
+            code = 0;
+        }
+        catch (Jack.Core.Searchable.SearchableEngine.SearchableException e)
+            when (e.Kind is Jack.Core.Searchable.SearchableEngine.ErrorKind.NothingToDo or Jack.Core.Searchable.SearchableEngine.ErrorKind.NoText)
+        {
+            log.AppendLine($"REFUSED: {e.Message}");
+            code = 3;
+        }
+        catch (Exception e)
+        {
+            log.AppendLine($"FAILED: {Root(e)}");
+            code = 1;
+        }
+        Console.Write(log.ToString());
+        return code;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    static int Text(string input)
+    {
+        try
+        {
+            var pages = Jack.Core.Searchable.SearchableEngine.PageTexts(input);
+            for (int i = 0; i < pages.Count; i++)
+            {
+                if (i > 0) Console.Write("\n\f\n");
+                Console.Write(pages[i]);
+            }
+            Console.WriteLine();
+            return 0;
+        }
+        catch (Exception e)
+        {
+            Console.Error.WriteLine($"FAILED: {Root(e)}");
+            return 1;
+        }
     }
 
     // Kept out of Main so a replay run never touches the Windows-only types.
