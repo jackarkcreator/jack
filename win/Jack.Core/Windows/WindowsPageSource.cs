@@ -24,7 +24,9 @@ public sealed class WindowsPageSource : IPageSource
     readonly OcrEngine ocr;
     readonly Tesseract.TesseractEngine? tess;
     readonly Dictionary<int, (GrayImage Image, List<OcrLine> Lines)> tessCache = new();
+    readonly Dictionary<int, (GrayImage Image, List<OcrLine> Lines)> firstReading = new();
     public readonly List<string> Warnings = new();
+    readonly bool trace = Environment.GetEnvironmentVariable("JACK_WINOCR_DUMP") is { Length: > 0 };
 
     /// `tessdata`: folder with eng.traineddata (and spa.traineddata, used when present). Without
     /// it scans get no second reading, so every word on a scan is marked to double-check.
@@ -135,12 +137,22 @@ public sealed class WindowsPageSource : IPageSource
     public IReadOnlyList<OcrLine> Recognize(int index, GrayImage g, double pageWidth, double pageHeight, bool correction)
     {
         var tl = TesseractLines(index, g);
-        if (!correction) return tl ?? new List<OcrLine>();
+        if (!correction)
+        {
+            if (tl == null) return new List<OcrLine>();
+            // Same characters, different spacing ("2026" vs "20 26" on a form blank) is the two
+            // readings agreeing: split Tesseract's word the way the first reading spaced it.
+            return firstReading.TryGetValue(index, out var fr) && ReferenceEquals(fr.Image, g) ? SpaceLike(tl, fr.Lines) : tl;
+        }
         var lines = WindowsOcr(g, index);
         var info = Page(index);
         bool trustedLayer = info.TextLayer.Trim().Length > 20 && !info.IsScanPage;   // the engine's own rule
         if (trustedLayer) lines = FromTextLayer(lines, TextLayerWords(index));
-        else if (tl != null) lines = FillFromTesseract(lines, tl);
+        else if (tl != null)
+        {
+            lines = RereadMarkers(FillFromTesseract(Arbitrate(lines, tl, WordConf), tl), g);
+            firstReading[index] = (g, lines);
+        }
         // Windows OCR gives no confidence. A line's confidence is the mean confidence Tesseract
         // gave the words it read inside that line (handwriting and smudges score low there too).
         if (tl == null) return lines;
@@ -280,11 +292,24 @@ public sealed class WindowsPageSource : IPageSource
             var run = new List<(OcrWord W, float C)>();
             void Close()
             {
-                if (run.Count > 0 && Key(string.Concat(run.Select(r => r.W.Text))).Length >= 2)
+                // Two or more letters/digits, or a list marker on its own ("A.", "D.", "(c)"): Windows
+                // OCR skips those isolated markers, and a lost "A." turns a list item into body text.
+                if (run.Count > 0 && (Key(string.Concat(run.Select(r => r.W.Text))).Length >= 2 || (run.Count == 1 && IsMarker(run[0].W.Text))))
                 {
                     var words = VisionLike(run.Select(r => r.W).ToList());
-                    result.Add(new OcrLine(string.Join(" ", words.Select(w => w.Text)), words.Min(w => w.X0), words.Max(w => w.X1),
-                        words.Min(w => w.Y0), words.Max(w => w.Y1), run.Average(r => r.C), words));
+                    var add = new OcrLine(string.Join(" ", words.Select(w => w.Text)), words.Min(w => w.X0), words.Max(w => w.X1),
+                        words.Min(w => w.Y0), words.Max(w => w.Y1), run.Average(r => r.C), words);
+                    // Words that carry on a Windows line on the same baseline ("…from Child to" +
+                    // "Senior") join that line, as Vision would read it whole: a line split in two
+                    // no longer matches the same printed line on other pages (letterhead detection).
+                    int host = result.FindIndex(l => ContinuesLine(l, add));
+                    if (host >= 0)
+                    {
+                        var l = result[host];
+                        var ws = l.Words.Concat(add.Words.Select(w => w with { Y0 = l.Y0, Y1 = l.Y1 })).OrderBy(w => w.X0).ToList();
+                        result[host] = l with { Text = string.Join(" ", ws.Select(w => w.Text)), X0 = ws.Min(w => w.X0), X1 = ws.Max(w => w.X1), Words = ws };
+                    }
+                    else result.Add(add);
                 }
                 run.Clear();
             }
@@ -298,6 +323,215 @@ public sealed class WindowsPageSource : IPageSource
             Close();
         }
         return result;
+    }
+
+    static readonly System.Text.RegularExpressions.Regex MarkerRx = new(@"^\(?([A-Za-z]|[0-9]{1,2}|[ivxIVX]{1,4})[.)]$");
+    internal static bool IsMarker(string t) => MarkerRx.IsMatch(t);
+
+    /// Letters and digits OCR engines confuse with each other, folded together for comparing
+    /// two readings ("IO" and "10", "80f10" and "8 of 10").
+    static string Fold(string key) => new(key.Select(c => c switch
+    {
+        'o' => '0', 'i' or 'l' => '1', 's' => '5', 'z' => '2', _ => c,
+    }).ToArray());
+
+    /// Scans: Windows OCR against Tesseract, word by word. Measured on a real 11-page scanned
+    /// contract, every Windows misread had Tesseract right at 0.92+ confidence: glued words
+    /// ("ofNOVember" = "of" + "November", "80f10" = "8 of 10"), look-alike letters ("cbildren",
+    /// "Safetv", "IO" for "10", "Empoweäng"), lower-case list markers ("c." for "C.").
+    ///  - a Windows word whose letters are exactly two or more Tesseract words under it (look-alikes
+    ///    folded, each at 0.85+) is split into those words;
+    ///  - a Windows word that one confident Tesseract word (0.93+) reads differently but similarly
+    ///    (folded similarity 0.6+) takes Tesseract's word;
+    ///  - a list marker that differs only in case takes Tesseract's.
+    /// Words are replaced only where both readings are close, so the two still disagree (and the
+    /// word stays highlighted) whenever Tesseract is unsure or reads something else entirely.
+    internal static List<OcrLine> Arbitrate(List<OcrLine> lines, List<OcrLine> tess, Func<OcrLine, int, float> conf)
+    {
+        var tw = tess.SelectMany(l => l.Words.Select((w, k) => (W: w, C: conf(l, k)))).ToList();
+        var result = new List<OcrLine>(lines.Count);
+        foreach (var line0 in lines)
+        {
+            var line = MergePieces(line0, tw);
+            var outWords = new List<OcrWord>();
+            bool changed = !ReferenceEquals(line, line0);
+            foreach (var w in line.Words)
+            {
+                // Tesseract words whose centre lies inside this word's box.
+                var under = tw.Where(t =>
+                {
+                    double cx = (t.W.X0 + t.W.X1) / 2, cy = (t.W.Y0 + t.W.Y1) / 2;
+                    return cx > w.X0 && cx < w.X1 && cy > w.Y0 && cy < w.Y1;
+                }).OrderBy(t => t.W.X0).ToList();
+                string kw = Key(w.Text);
+                if (under.Count >= 2 && under.All(t => t.C >= 0.85f) && kw.Length > 0 &&
+                    Fold(Key(string.Concat(under.Select(t => t.W.Text)))) == Fold(kw))
+                {
+                    foreach (var t in under) outWords.Add(t.W with { Y0 = w.Y0, Y1 = w.Y1 });
+                    changed = true;
+                    continue;
+                }
+                if (under.Count == 1)
+                {
+                    var t = under[0];
+                    string kt = Key(t.W.Text);
+                    if (kt == kw && t.W.Text != w.Text && IsMarker(w.Text) && IsMarker(t.W.Text))
+                    {
+                        outWords.Add(w with { Text = t.W.Text }); changed = true; continue;
+                    }
+                    if (kt != kw && kt.Length > 0 && kw.Length > 0 && t.C >= 0.93f && Similar(Fold(kw), Fold(kt)) >= 0.6)
+                    {
+                        outWords.Add(w with { Text = t.W.Text }); changed = true; continue;
+                    }
+                }
+                outWords.Add(w);
+            }
+            result.Add(changed ? line with { Text = string.Join(" ", outWords.Select(x => x.Text)), Words = outWords } : line);
+        }
+        return result;
+    }
+
+    /// List markers both readers miss. Windows OCR skips isolated short marks ("A.", "D.", "F."
+    /// in a column of B., C., E.…) and Tesseract's page layout can read a whole column of markers
+    /// as one garbled word. So: ink just left of a line's first word that no word covers is cropped
+    /// and read on its own (Tesseract, single word); it is kept only when it reads as a list marker.
+    /// Markers Windows did read are re-read the same way, only to fix their case ("c." → "C.").
+    List<OcrLine> RereadMarkers(List<OcrLine> lines, GrayImage g)
+    {
+        if (tess == null) return lines;
+        var all = lines.SelectMany(l => l.Words).ToList();
+        var result = new List<OcrLine>(lines.Count);
+        foreach (var line in lines)
+        {
+            double h = (line.Y1 - line.Y0) / 1.164;               // ink height (VisionLike boxes)
+            double y0 = line.Y0, y1 = line.Y0 + h;
+            var first = line.Words[0];
+            if (IsMarker(first.Text))
+            {
+                // Case only: same letter, the other case.
+                if (ReadAlone(g, first.X0, y0, first.X1, y1) is string t && Key(t) == Key(first.Text) && t != first.Text && IsMarker(t))
+                {
+                    var ws = line.Words.ToList(); ws[0] = first with { Text = t };
+                    result.Add(line with { Text = string.Join(" ", ws.Select(w => w.Text)), Words = ws });
+                }
+                else result.Add(line);
+                continue;
+            }
+            // Unread ink in the gap left of the line (up to ~4 ink heights), not under any word.
+            double left = Math.Max(0, first.X0 - 4.5 * h), right = first.X0 - 0.25 * h;
+            void Trace(string what) { if (trace) Warnings.Add(WordExportEngine.F("marker y{0:F0} '{1}': {2}", line.Y0, first.Text, what)); }
+            if (right - left < h || all.Any(w => w.X1 > left && w.X0 < right && Math.Min(w.Y1, y1) - Math.Max(w.Y0, y0) > h * 0.3)) { Trace("gap covered"); result.Add(line); continue; }
+            var span = InkSpan(g, left, y0, right, y1);
+            if (span is not var (bx0, bx1) || bx1 - bx0 > 3 * h || bx1 - bx0 < 0.2 * h) { Trace(span == null ? "no ink" : WordExportEngine.F("ink {0:F1}-{1:F1} h{2:F1}", span.Value.X0, span.Value.X1, h)); result.Add(line); continue; }
+            var read = ReadAlone(g, bx0, y0, bx1, y1);
+            Trace(WordExportEngine.F("ink {0:F1}-{1:F1} read '{2}'", bx0, bx1, read ?? "(unsure)"));
+            if (read is string m && IsMarker(m))
+            {
+                var mw = new OcrWord(m, bx0, bx1, line.Y0, line.Y1);
+                var ws = new List<OcrWord> { mw }; ws.AddRange(line.Words);
+                result.Add(line with { Text = m + " " + line.Text, X0 = bx0, Words = ws });
+            }
+            else result.Add(line);
+        }
+        return result;
+    }
+
+    /// The horizontal extent (points) of the right-most cluster of ink in a band, or null.
+    static (double X0, double X1)? InkSpan(GrayImage g, double x0, double y0, double x1, double y1)
+    {
+        int c0 = Math.Max(0, (int)(x0 * g.Scale)), c1 = Math.Min(g.W - 1, (int)(x1 * g.Scale));
+        int r0 = Math.Max(0, (int)(y0 * g.Scale)), r1 = Math.Min(g.H - 1, (int)(y1 * g.Scale));
+        if (c1 <= c0 || r1 <= r0) return null;
+        var dark = new bool[c1 - c0 + 1];
+        for (int c = c0; c <= c1; c++)
+        {
+            int n = 0;
+            for (int r = r0; r <= r1; r++) if (g.Dark(c, r)) n++;
+            dark[c - c0] = n >= 2;                                 // specks of 1 px are noise
+        }
+        int gapMax = (int)((y1 - y0) * g.Scale * 0.6);              // letters of one mark stay together
+        int end = -1, start = -1, gap = 0;
+        for (int i = dark.Length - 1; i >= 0; i--)
+        {
+            if (dark[i]) { if (end < 0) end = i; start = i; gap = 0; }
+            else if (end >= 0 && ++gap > gapMax) break;
+        }
+        if (end < 0) return null;
+        return ((c0 + start) / g.Scale, (c0 + end + 1) / g.Scale);
+    }
+
+    /// Tesseract on one small crop of the page (points), read as a single line. Null when unsure.
+    /// Measured on lone list markers: single-line mode reads "A." 0.96, "D." 0.81, "F." 0.69,
+    /// where single-word mode drops the full stop ("A" 0.52, "FL" 0.58); Windows OCR reads nothing.
+    string? ReadAlone(GrayImage g, double x0, double y0, double x1, double y1)
+    {
+        double pad = (y1 - y0) * 0.4;
+        int c0 = Math.Max(0, (int)((x0 - pad) * g.Scale)), c1 = Math.Min(g.W, (int)((x1 + pad) * g.Scale));
+        int r0 = Math.Max(0, (int)((y0 - pad) * g.Scale)), r1 = Math.Min(g.H, (int)((y1 + pad) * g.Scale));
+        if (c1 - c0 < 4 || r1 - r0 < 4) return null;
+        var px = new byte[(c1 - c0) * (r1 - r0)];
+        for (int r = r0; r < r1; r++) Array.Copy(g.Px, r * g.W + c0, px, (r - r0) * (c1 - c0), c1 - c0);
+        var crop = new GrayImage(c1 - c0, r1 - r0, g.Scale, px);
+        using var pix = Tesseract.Pix.LoadFromMemory(Bmp24(crop));
+        using var page = tess!.Process(pix, Tesseract.PageSegMode.SingleLine);
+        var text = page.GetText()?.Trim();
+        return !string.IsNullOrEmpty(text) && page.GetMeanConfidence() >= 0.6f ? text : null;
+    }
+
+    /// One word Windows OCR read in pieces ("Severa" + "bility", gap 0.11 ink heights; "W" + "9"):
+    /// consecutive words with gaps under 0.2 ink heights whose letters are exactly one confident
+    /// (0.9+) Tesseract word over them become that word. Real word gaps measured 0.28+.
+    static OcrLine MergePieces(OcrLine line, List<(OcrWord W, float C)> tw)
+    {
+        var ws = line.Words.ToList();
+        double h = (line.Y1 - line.Y0) / 1.164;
+        bool changed = false;
+        for (int i = 0; i < ws.Count - 1; i++)
+        {
+            for (int j = i + 1; j < ws.Count && ws[j].X0 - ws[j - 1].X1 < 0.2 * h; j++)
+            {
+                string joined = Fold(Key(string.Concat(ws.Skip(i).Take(j - i + 1).Select(w => w.Text))));
+                var t = tw.FirstOrDefault(t => t.C >= 0.9f && t.W.X0 < ws[i].X1 && t.W.X1 > ws[j].X0 &&
+                    Math.Min(t.W.Y1, line.Y1) - Math.Max(t.W.Y0, line.Y0) > 0 && Fold(Key(t.W.Text)) == joined);
+                if (t.W == null) continue;
+                ws[i] = ws[i] with { Text = t.W.Text, X1 = ws[j].X1 };
+                ws.RemoveRange(i + 1, j - i);
+                changed = true;
+                break;
+            }
+        }
+        return changed ? line with { Text = string.Join(" ", ws.Select(w => w.Text)), Words = ws } : line;
+    }
+
+    /// Tesseract's lines with each word that covers two or more first-reading words with the same
+    /// letters (look-alikes folded) split into those words, for comparing the two readings.
+    static List<OcrLine> SpaceLike(List<OcrLine> tess, List<OcrLine> first)
+    {
+        var fw = first.SelectMany(l => l.Words).ToList();
+        return tess.Select(l =>
+        {
+            var ws = new List<OcrWord>();
+            foreach (var t in l.Words)
+            {
+                var inside = fw.Where(w => { double cx = (w.X0 + w.X1) / 2, cy = (w.Y0 + w.Y1) / 2; return cx > t.X0 && cx < t.X1 && cy > t.Y0 - 2 && cy < t.Y1 + 2; })
+                    .OrderBy(w => w.X0).ToList();
+                if (inside.Count >= 2 && Fold(Key(string.Concat(inside.Select(w => w.Text)))) == Fold(Key(t.Text)))
+                    ws.AddRange(inside.Select(w => t with { Text = w.Text, X0 = w.X0, X1 = w.X1 }));
+                else ws.Add(t);
+            }
+            return ws.Count == l.Words.Count ? l : l with { Text = string.Join(" ", ws.Select(w => w.Text)), Words = ws };
+        }).ToList();
+    }
+
+    /// `add` sits on `line`'s baseline (vertical overlap at least half the smaller height) and
+    /// starts or ends within 1.5 ink heights of it, with no overlap.
+    static bool ContinuesLine(OcrLine line, OcrLine add)
+    {
+        double hl = line.Y1 - line.Y0, ha = add.Y1 - add.Y0;
+        if (Math.Min(line.Y1, add.Y1) - Math.Max(line.Y0, add.Y0) < 0.5 * Math.Min(hl, ha)) return false;
+        double h = Math.Min(hl, ha) / 1.164;
+        double right = add.X0 - line.X1, left = line.X0 - add.X1;
+        return (right >= 0 && right < 1.5 * h) || (left >= 0 && left < 1.5 * h && !IsMarker(add.Text));
     }
 
     static double Similar(string a, string b)
@@ -445,6 +679,17 @@ public sealed class WindowsPageSource : IPageSource
                 confs.Add(Math.Clamp(it.GetConfidence(Tesseract.PageIteratorLevel.Word) / 100f, 0f, 1f));
             } while (it.Next(Tesseract.PageIteratorLevel.Word));
             Flush();
+        }
+        // Calibration aid, as for Windows OCR: Tesseract's lines and words with confidences.
+        if (Environment.GetEnvironmentVariable("JACK_WINOCR_DUMP") is { Length: > 0 } dumpDir)
+        {
+            Directory.CreateDirectory(dumpDir);
+            var json = System.Text.Json.JsonSerializer.Serialize(lines.Select(l => new
+            {
+                text = l.Text, conf = l.Confidence, x0 = l.X0, x1 = l.X1, y0 = l.Y0, y1 = l.Y1,
+                words = l.Words.Select((w, k) => new { text = w.Text, conf = WordConf(l, k), x0 = w.X0, x1 = w.X1, y0 = w.Y0, y1 = w.Y1 })
+            }));
+            File.WriteAllText(Path.Combine(dumpDir, $"{stem}-p{index + 1}.tess.json"), json);
         }
         tessCache[index] = (g, lines);
         return lines;
