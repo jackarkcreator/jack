@@ -125,6 +125,7 @@ jobs:
           $left = Get-ChildItem $d -Force | Where-Object { $_.Name -like '*.tmp' }
           if ($left) { throw "temporary files left: $($left.Name -join ', ')" }
           Get-ChildItem $d | ForEach-Object { Write-Host "  $($_.Name) $($_.Length) bytes" }
+          exit 0   # the last native call exits 3 on purpose; pwsh would end the step with it
 
       - name: Score Make Searchable (truth, Save as Word recall, originals unchanged)
         if: ${{ !cancelled() }}
