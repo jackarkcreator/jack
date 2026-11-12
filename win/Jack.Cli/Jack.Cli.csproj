@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- `Jack word <in.pdf> <out.docx>`: the command-line face of the Windows engines, and the
+       contract harness/run_engine.py drives with its cmd option (exit 0 = wrote it, 3 = refused). Ships win-x64.
+       On a Mac it builds with the osx-arm64 runtime for replay runs (no PDFium / OCR needed there). -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>Jack</AssemblyName>
+    <RootNamespace>Jack.Cli</RootNamespace>
+    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">win-x64</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+    <Product>Jack</Product>
+    <Company>ThinkOpen Inc.</Company>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Jack.Core\Jack.Core.csproj" />
+  </ItemGroup>
+
+</Project>

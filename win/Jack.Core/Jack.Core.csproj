@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Jack for Windows: the conversion engines, no UI. Save as Word is a line-for-line port of
+       Sources/WordExportEngine.swift + Sources/DocxWriter.swift. The engine reads pages through
+       IPageSource: Windows/ (PDFium + Windows OCR + Tesseract, x64) or Replay/ (inputs dumped by
+       the Mac engine with JACK_WORD_DUMP, so the port can be checked against the Mac with no OCR). -->
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>Jack.Core</RootNamespace>
+    <AssemblyName>Jack.Core</AssemblyName>
+    <InvariantGlobalization>false</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Tesseract" Version="5.2.0" />
+  </ItemGroup>
+
+</Project>
